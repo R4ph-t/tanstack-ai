@@ -2687,11 +2687,7 @@ export class StreamProcessor {
       if (isIntermediateToolTurn) {
         return
       }
-      // The calls of an answer cut at the output limit never run.
-      if (
-        (!chunk.outcome || chunk.outcome.type === 'success') &&
-        this.finishReason !== 'length'
-      ) {
+      if (!chunk.outcome || chunk.outcome.type === 'success') {
         this.handlePendingToolCalls(chunk.outcome?.pendingToolCallIds)
       }
       this.isDone = true
@@ -2732,6 +2728,14 @@ export class StreamProcessor {
         this.isToolCallPartTerminal(toolCallId) ||
         this.isToolCallPartAwaitingUserAction(toolCallId)
       ) {
+        continue
+      }
+      // A call of an answer cut at the output limit never runs, also when
+      // its arguments parse.
+      if (this.finishReason === 'length') {
+        console.warn(
+          `[StreamProcessor] Did not run tool call ${toolCallId}: the answer stopped at the output limit`,
+        )
         continue
       }
       // A snapshot can carry a part with arguments but no input. Parse them
