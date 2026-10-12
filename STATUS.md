@@ -453,8 +453,10 @@ Reddit pod: **+ React-news demo** → **🔧 tools** → run
   memory panel, persistence + approval replay, Reddit pod, trace, controls,
   product automations, MCP, session tools); vitest for the RSS parser.
 - `@tanstack/ai-dashboard`: **4 vitest** (relay, child-agent blocks).
-- After aligning with #1555 (2026-10-09): `pnpm test:pr` (113 projects),
-  dashboard e2e (21 passed), and `@tanstack/ai-e2e` (599 passed) all green.
+- After syncing with #1555 at `6101b7dff` (2026-10-12): `pnpm test:pr` (113
+  projects), dashboard e2e (21 passed), and `@tanstack/ai-e2e` (598 passed, 4
+  skipped) green. Two `@tanstack/ai-e2e` specs (ArkType wire format, MCP
+  elicitation) failed once in the full run and passed 3 of 3 alone.
 
 ## Deliberate decisions / open questions (flagged for @AlemTuzlak)
 
