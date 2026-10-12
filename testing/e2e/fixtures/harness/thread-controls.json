@@ -33,6 +33,14 @@
       "response": { "content": "Two." }
     },
     {
+      "match": { "userMessage": "[harness-chips] one" },
+      "response": { "content": "Chips one." }
+    },
+    {
+      "match": { "userMessage": "[harness-chips] two" },
+      "response": { "content": "Chips two." }
+    },
+    {
       "match": {
         "userMessage": "Background agent stepper finished: [stepper finished] charged once"
       },

@@ -22,7 +22,9 @@ import {
   text,
   toolCall,
   untilAborted,
+  wakeMessages,
 } from './helpers'
+import { messagesFromTranscript } from '../src/view/reduce'
 import type { AnyChatMiddleware, ContentPart, StreamChunk } from '@tanstack/ai'
 import type { HarnessTurnOptions, Receipt, SessionEvent } from '../src'
 import type { Reply } from './helpers'
@@ -357,6 +359,14 @@ describe('agents', () => {
       'Background agent pricer finished',
     )
     await vi.waitFor(() => expect(session.snapshot().status).toBe('idle'))
+    const transcript = await session.transcript()
+    expect(wakeMessages(transcript)).toEqual([
+      expect.stringContaining('Background agent pricer finished'),
+    ])
+    // A reload shows the note and the answer, not the wake message.
+    expect(
+      messagesFromTranscript(transcript).map((message) => message.role),
+    ).toEqual(['assistant', 'assistant'])
     await host.close()
   })
 
@@ -409,6 +419,28 @@ describe('inbox', () => {
     await vi.waitFor(() => expect(session.snapshot().status).toBe('idle'))
     expect((await persistence.stores.inbox.get('in-1'))?.status).toBe('applied')
     expect(messageTexts(calls[0])).toEqual(['left over'])
+    await host.close()
+  })
+
+  it('keeps the wake mark of a follow-up that a restart left', async () => {
+    const persistence = memoryPersistence()
+    await persistence.stores.inbox.append({
+      inputId: 'in-wake',
+      threadId: 't1',
+      input: { op: 'followUp', message: 'Background job done.', wake: true },
+      createdAt: Date.now(),
+    })
+    const { adapter } = mockAdapter([() => text('noted')])
+    const host = createHarnessHost({ persistence })
+    const session = await host.open(
+      defineHarness({ name: 'test/recover-wake', adapter }),
+      { threadId: 't1' },
+    )
+
+    await vi.waitFor(() => expect(session.snapshot().status).toBe('idle'))
+    expect(wakeMessages(await session.transcript())).toEqual([
+      'Background job done.',
+    ])
     await host.close()
   })
 })

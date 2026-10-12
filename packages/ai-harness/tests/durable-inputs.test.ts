@@ -11,6 +11,7 @@ import {
   text,
   toolCall,
   untilAborted,
+  wakeMessages,
 } from './helpers'
 import type { AnyTool, ModelMessage } from '@tanstack/ai'
 import type { LeaseStore, LogRecord } from '@tanstack/ai-persistence'
@@ -533,7 +534,7 @@ describe('recovery of a durable input', () => {
       leaseExpiresAt: Date.now() - 1_000,
     })
 
-    const { host, calls } = await openDurable({
+    const { host, session, calls } = await openDurable({
       persistence,
       replies: [() => text('noted')],
     })
@@ -546,6 +547,11 @@ describe('recovery of a durable input', () => {
     expect((await persistence.stores.runs.get('op-agent'))?.status).toBe(
       'failed',
     )
+    await vi.waitFor(async () =>
+      expect(wakeMessages(await session.transcript())).toEqual([
+        'Background agent waiter failed: [waiter failed] The host stopped during this agent run.',
+      ]),
+    )
     const settled = (await logRecords(persistence)).find(
       (record) =>
         record.type === 'harness.input.settled' &&
@@ -556,6 +562,31 @@ describe('recovery of a durable input', () => {
       outcome: 'failed',
       error: { message: 'The host stopped during this agent run.' },
     })
+    await host.close()
+  })
+
+  it('keeps the wake mark of a logged follow-up that never ran', async () => {
+    const persistence = durablePersistence()
+    await persistence.stores.log.append(THREAD, 1, [
+      {
+        type: 'harness.input',
+        inputId: 'in-wake',
+        input: { op: 'followUp', message: 'Background job done.', wake: true },
+        at: 1,
+      },
+    ])
+
+    const { host, session, calls } = await openDurable({
+      persistence,
+      replies: [() => text('noted')],
+    })
+
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+    await vi.waitFor(async () =>
+      expect(wakeMessages(await session.transcript())).toEqual([
+        'Background job done.',
+      ]),
+    )
     await host.close()
   })
 

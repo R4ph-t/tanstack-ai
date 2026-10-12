@@ -112,7 +112,18 @@ export type HarnessInput = (
       ephemeral?: ReadonlyArray<ModelMessage & { role: 'user' }>
     }
   | { op: 'steer'; message: UserInput; context?: unknown }
-  | { op: 'followUp'; message: UserInput; context?: unknown }
+  | {
+      op: 'followUp'
+      message: UserInput
+      context?: unknown
+      /**
+       * The harness wrote this input to wake the session, for example when a
+       * background agent ended. Its user message gets
+       * `metadata.harness.wake: true`. Only the harness sets it: the input
+       * of a client never has it.
+       */
+      wake?: true
+    }
   /** A turn from the stored transcript, with no new message. */
   | {
       op: 'continue'

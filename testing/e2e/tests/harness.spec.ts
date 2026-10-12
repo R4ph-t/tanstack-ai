@@ -69,6 +69,9 @@ test.describe('harness session', () => {
     const body = await response.json()
     expect(body.status).toBe('failed')
     expect(body.text).toBe('The waiter stopped before it finished.')
+    expect(body.wake).toEqual([
+      'Background agent waiter failed: [waiter failed] The host stopped during this agent run.',
+    ])
   })
 
   test('a bash background job that a stopped host left running gets a note', async ({

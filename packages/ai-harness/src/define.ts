@@ -1,3 +1,4 @@
+import { assertMetadataSchema } from './session-entry'
 import type {
   AgentLoopStrategy,
   AnyChatMiddleware,
@@ -8,14 +9,16 @@ import type {
   ModelMessage,
   PromptCacheOptions,
   ReasoningOption,
+  SchemaInput,
   SubagentRouterPick,
   SubagentsBag,
   SystemPrompt,
 } from '@tanstack/ai'
 import type { AnyAgent } from './agents'
 import type { MediaOptions } from './media'
-import type { HarnessPlugin } from './plugins'
+import type { HarnessPlugin, PluginMetadataCheck } from './plugins'
 import type { HarnessSession } from './session'
+import type { MetadataOf } from './session-entry'
 import type { HarnessTurnOptions, RecoverHook } from './turn'
 import type { BusyPolicy, Principal, ThreadSettings, UserInput } from './types'
 
@@ -29,7 +32,7 @@ export type HarnessSubagents<TSubagents extends ReadonlyArray<AnyAgent>> = Omit<
  * What `routing.router` gets: the fields of the `subagents.router` context,
  * plus the harness fields of the turn.
  */
-export interface HarnessRouterContext {
+export interface HarnessRouterContext<TMetadataSchema = any> {
   /** The model messages of the turn: the history, then the new user message. */
   messages: Array<ModelMessage>
   /**
@@ -40,7 +43,7 @@ export interface HarnessRouterContext {
   agents: ReadonlyArray<AnyAgent>
   /** Aborted when the turn is cancelled. */
   abortSignal?: AbortSignal
-  session: HarnessSession
+  session: SessionWithMetadata<TMetadataSchema>
   /**
    * The user input of the turn as sent: text, or content parts. `undefined`
    * for a turn with no new user message.
@@ -64,7 +67,7 @@ export interface HarnessRouterContext {
  * main model answers after the agents, in the same turn, and it keeps its
  * `subagents`.
  */
-export interface HarnessRouting extends Pick<
+export interface HarnessRouting<TMetadataSchema = any> extends Pick<
   SubagentsBag,
   'order' | 'strategy' | 'limits' | 'sandbox'
 > {
@@ -75,7 +78,7 @@ export interface HarnessRouting extends Pick<
    * `{ name, input }`. A throw fails the turn.
    */
   router: (
-    ctx: HarnessRouterContext,
+    ctx: HarnessRouterContext<TMetadataSchema>,
   ) => SubagentRouterPick | Promise<SubagentRouterPick>
 }
 
@@ -83,7 +86,7 @@ export interface HarnessRouting extends Pick<
  * Limits for one input on a durable host (a host with `stores.log`). A host
  * without a log reads only `interruptedToolResult` and `truncatedToolResult`.
  */
-export interface HarnessDurability {
+export interface HarnessDurability<TMetadataSchema = any> {
   /**
    * Total attempts for one input, the first run included. Each recovery after
    * a crash is one more attempt. When no attempt is left, the input fails
@@ -102,7 +105,7 @@ export interface HarnessDurability {
    * the harness takes by default. Return `undefined` to keep it. Return
    * `{ action: 'run', overrides }` to run the turn with `TurnOverrides`.
    */
-  recover?: RecoverHook
+  recover?: RecoverHook<TMetadataSchema>
   /**
    * The tool result that recovery gives a `replay: 'never'` tool call that
    * a crash cut: the content and the error of its tool message. Default: a
@@ -148,6 +151,7 @@ export interface HarnessConfig<
   TAdapter extends AnyTextAdapter = AnyTextAdapter,
   TAgents extends ReadonlyArray<AnyAgent> = ReadonlyArray<AnyAgent>,
   TSubagents extends ReadonlyArray<AnyAgent> = ReadonlyArray<AnyAgent>,
+  TMetadataSchema = undefined,
 > {
   /** A stable name, for example `'acme/studio'`. */
   name: string
@@ -217,15 +221,27 @@ export interface HarnessConfig<
    * root agents: the harness `agents` and the `agents` of plugins. A resolve
    * continues the turn it answers, so it does not call the router.
    */
-  routing?: HarnessRouting
+  routing?: HarnessRouting<TMetadataSchema>
   /** Called once per session, so every session gets fresh plugin instances. */
-  plugins?: () => ReadonlyArray<HarnessPlugin>
+  plugins?: () => ReadonlyArray<
+    HarnessPlugin & PluginMetadataCheck<MetadataOf<TMetadataSchema>>
+  >
+  /**
+   * The shape of the `metadata` of the session index entry of each thread,
+   * as a Standard Schema (for example a zod object). Each write checks it:
+   * `host.sessions.update`, the `update` op of `POST sessions`, and
+   * `updateEntry` of plugins and sessions. A write it refuses throws
+   * `SessionMetadataError` and writes nothing. It also types the metadata
+   * of those writes, of `session.entry()`, of the hooks, and of a client
+   * made with `createHarnessClient<typeof harness>`.
+   */
+  metadataSchema?: TMetadataSchema
   /** What a `prompt` does while a chat turn runs. Default `'queue'`. */
   busy?: BusyPolicy
   /** Attempt and time limits for each input on a durable host. */
-  durability?: HarnessDurability
+  durability?: HarnessDurability<TMetadataSchema>
   /** Hooks that control a chat turn: retries, joins, and the end of a turn. */
-  turn?: HarnessTurnOptions
+  turn?: HarnessTurnOptions<TMetadataSchema>
   /**
    * Files sent to a turn, and media agents make: the size limit, the kinds a
    * user can send, the kinds the model reads, and an optional transcriber for
@@ -272,17 +288,29 @@ export type HarnessDefinition<
   TAdapter extends AnyTextAdapter = AnyTextAdapter,
   TAgents extends ReadonlyArray<AnyAgent> = ReadonlyArray<AnyAgent>,
   TSubagents extends ReadonlyArray<AnyAgent> = ReadonlyArray<AnyAgent>,
-> = Readonly<HarnessConfig<TAdapter, TAgents, TSubagents>> & {
+  TMetadataSchema = undefined,
+> = Readonly<HarnessConfig<TAdapter, TAgents, TSubagents, TMetadataSchema>> & {
   readonly kind: typeof HARNESS_KIND
   readonly version: 1
 }
 
 /** A harness definition with any type parameters. */
-export type AnyHarness = HarnessDefinition<any, any, any>
+export type AnyHarness = HarnessDefinition<any, any, any, any>
+
+/** A session whose harness has the metadata schema `TMetadataSchema`. */
+export type SessionWithMetadata<TMetadataSchema> = HarnessSession<
+  HarnessDefinition<any, any, any, TMetadataSchema>
+>
+
+/** The type of the session index `metadata` of a harness. */
+export type SessionMetadataOf<THarness> =
+  THarness extends HarnessDefinition<any, any, any, infer TMetadataSchema>
+    ? MetadataOf<TMetadataSchema>
+    : Record<string, unknown>
 
 /** Every agent a harness registers, as a union. */
 export type HarnessAgentsOf<THarness> =
-  THarness extends HarnessDefinition<any, infer TAgents, infer TSubagents>
+  THarness extends HarnessDefinition<any, infer TAgents, infer TSubagents, any>
     ? TAgents[number] | TSubagents[number]
     : never
 
@@ -314,12 +342,14 @@ export function defineHarness<
   TAdapter extends AnyTextAdapter = AnyTextAdapter,
   const TAgents extends ReadonlyArray<AnyAgent> = readonly [],
   const TSubagents extends ReadonlyArray<AnyAgent> = readonly [],
+  TMetadataSchema extends SchemaInput | undefined = undefined,
 >(
-  config: HarnessConfig<TAdapter, TAgents, TSubagents>,
-): HarnessDefinition<TAdapter, TAgents, TSubagents> {
+  config: HarnessConfig<TAdapter, TAgents, TSubagents, TMetadataSchema>,
+): HarnessDefinition<TAdapter, TAgents, TSubagents, TMetadataSchema> {
   if (config.name.trim() === '') {
     throw new Error('defineHarness requires a non-empty name')
   }
+  assertMetadataSchema(`defineHarness "${config.name}"`, config.metadataSchema)
   const byName = new Map<string, AnyAgent>()
   for (const agent of [
     ...(config.agents ?? []),

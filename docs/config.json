@@ -773,7 +773,7 @@
           "label": "Store Reference",
           "to": "persistence/store-reference",
           "addedAt": "2026-08-04",
-          "updatedAt": "2026-10-07"
+          "updatedAt": "2026-10-12"
         },
         {
           "label": "How Persistence Works",
@@ -968,7 +968,7 @@
           "label": "List, rename, and fork sessions",
           "to": "harness/sessions",
           "addedAt": "2026-10-06",
-          "updatedAt": "2026-10-07"
+          "updatedAt": "2026-10-12"
         },
         {
           "label": "Send inputs safely",
@@ -1125,7 +1125,7 @@
           "label": "Run agents from a harness",
           "to": "harness/subagents",
           "addedAt": "2026-09-26",
-          "updatedAt": "2026-10-07"
+          "updatedAt": "2026-10-12"
         },
         {
           "label": "Deploy a harness",

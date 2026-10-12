@@ -253,8 +253,8 @@ async function resolveAfterRestart(
 /**
  * Start a background agent on a durable host, and let that host stop: its
  * short lease is not renewed in time. A second host opens the same log. It
- * fails the run, and the wake turn answers. Returns the run status and the
- * text of the wake turn.
+ * fails the run, and the wake turn answers. Returns the run status, the
+ * text of the wake turn, and the marked wake messages of the transcript.
  */
 async function agentRestart(
   openai: () => ReturnType<typeof createTextAdapter>['adapter'],
@@ -295,7 +295,15 @@ async function agentRestart(
       )
         break
     }
-    return { status: (await runs.get(run.id))?.status, text }
+    // The wake message is marked, so a view does not show it as a user
+    // message after a reload.
+    const wake = (await session.transcript())
+      .filter(
+        (message) =>
+          message.role === 'user' && message.metadata?.harness?.wake === true,
+      )
+      .map((message) => message.content)
+    return { status: (await runs.get(run.id))?.status, text, wake }
   } finally {
     await next.close()
     // The first host sees the writes of the second host, and stops.

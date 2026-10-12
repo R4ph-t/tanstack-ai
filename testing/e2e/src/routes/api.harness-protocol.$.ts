@@ -165,6 +165,9 @@ function harnessFor(request: Request) {
   const harness = defineHarness({
     name: 'e2e/protocol',
     adapter,
+    // App data in the session index entry: the context items a user pinned
+    // in the composer. Each write over `POST sessions` checks it.
+    metadataSchema: z.object({ chips: z.array(z.string()) }),
     // Models a thread can pick with `configure`. aimock answers both, and
     // its journal shows which model id a turn sent.
     models: {

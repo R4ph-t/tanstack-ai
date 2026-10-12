@@ -27,6 +27,7 @@ import { LogConflictError, withPersistence } from '@tanstack/ai-persistence'
 import { AgentRegistry } from './agents'
 import { SessionFeed } from './feed'
 import { isRecord } from './utils'
+import { changedEntry } from './session-entry'
 import { bindDurable, createToolStep } from './durable-tool'
 import {
   commonPrefix,
@@ -94,6 +95,7 @@ import type {
   LogRecord,
   LogStore,
   MessageStore,
+  SessionIndexEntry,
   SessionIndexStore,
 } from '@tanstack/ai-persistence'
 import type { AuthRequiredError, CredentialsAccess } from './auth'
@@ -117,7 +119,8 @@ import type {
   AgentResultOf,
   AnyAgent,
 } from './agents'
-import type { AnyHarness, HarnessAgentsOf } from './define'
+import type { AnyHarness, HarnessAgentsOf, SessionMetadataOf } from './define'
+import type { SessionEntryChange, SessionEntryUpdate } from './session-entry'
 import type {
   ModelErrorContext,
   RecoverContext,
@@ -365,6 +368,8 @@ interface QueuedTurn {
   principal?: Principal
   /** The `context` of the input. */
   context?: unknown
+  /** A wake input of the harness: its user message gets `metadata.harness.wake`. */
+  wake?: boolean
   /**
    * The message of a turn that recovery runs again. The transcript has it
    * already, so only plugins and the router read it.
@@ -391,6 +396,8 @@ interface WaitingSteer {
   principal?: Principal
   /** Used only when the steer runs as its own turn, as `overrides`. */
   context?: unknown
+  /** A wake input of the harness, as in `QueuedTurn`. */
+  wake?: boolean
 }
 
 /** The interrupts the last turn stopped for, and how a resolve continues it. */
@@ -817,6 +824,13 @@ function settingTools(
     (tool) => keep.has(tool.name) || names.has(tool.name) === isList,
   )
 }
+
+/**
+ * The metadata of the user message of a wake turn: the harness sent it (a
+ * background job ended), not the user. The model gets it as usual. A view
+ * does not show it as something the user said.
+ */
+const WAKE_METADATA = { harness: { wake: true } }
 
 /**
  * The transcript message of a `reset()`: a user message with
@@ -1332,6 +1346,8 @@ export class HarnessSession<THarness extends AnyHarness = AnyHarness> {
       credentials: this.credentialAccess,
       keys: this.keys,
       session: this.pluginApi(),
+      sessionWith: (metadataSchema) =>
+        this.pluginApi(undefined, metadataSchema),
       agents: {
         run: ((target: string | AnyAgent, input?: unknown) =>
           this.runAgent(target, input, {
@@ -2029,16 +2045,36 @@ export class HarnessSession<THarness extends AnyHarness = AnyHarness> {
       context?: unknown
     },
   ): Promise<Receipt> {
+    return this.queueFollowUp(message, options)
+  }
+
+  /**
+   * `followUp`, plus `wake`: the harness wakes the session with `message`
+   * (a background job ended), so its user message is marked, not shown as
+   * something the user said.
+   */
+  private async queueFollowUp(
+    message: UserInput,
+    options?: {
+      inputId?: string
+      overrides?: TurnOverrides
+      principal?: Principal
+      context?: unknown
+      wake?: boolean
+    },
+  ): Promise<Receipt> {
     return this.admitting(async () => {
       const inputId = options?.inputId ?? createInputId()
       const principal = options?.principal ?? this.principal
       const context = options?.context
+      const wake = options?.wake === true
       const admission = await this.accept(
         inputId,
         {
           op: 'followUp',
           message,
           ...(context !== undefined ? { context } : {}),
+          ...(wake ? { wake } : {}),
         },
         principal,
       )
@@ -2054,6 +2090,7 @@ export class HarnessSession<THarness extends AnyHarness = AnyHarness> {
         overrides: options?.overrides,
         principal,
         context,
+        ...(wake ? { wake } : {}),
       })
       return this.keep({ inputId, status, operationId: operation.id })
     })
@@ -2820,6 +2857,39 @@ export class HarnessSession<THarness extends AnyHarness = AnyHarness> {
   }
 
   /**
+   * The session index entry of this thread, with `metadata` typed by the
+   * harness `metadataSchema`. `undefined` without `stores.sessions`, or for
+   * a thread with no entry.
+   */
+  async entry(): Promise<
+    SessionIndexEntry<SessionMetadataOf<THarness>> | undefined
+  > {
+    // The schema checked the metadata on each write.
+    return (await this.index.get(this.threadId)) as
+      | SessionIndexEntry<SessionMetadataOf<THarness>>
+      | undefined
+  }
+
+  /**
+   * Change the session index entry of this thread, as
+   * `host.sessions.update` does: `title`, `pinned`, and `metadata`, or a
+   * function of the current entry. The harness `metadataSchema` checks
+   * `metadata`. Resolves to the changed entry, or `undefined` when there is
+   * no entry.
+   */
+  async updateEntry(
+    update: SessionEntryUpdate<SessionMetadataOf<THarness>>,
+  ): Promise<SessionIndexEntry<SessionMetadataOf<THarness>> | undefined> {
+    return (await this.index.update(this.threadId, (entry) =>
+      changedEntry(
+        entry,
+        update as SessionEntryUpdate<any, SessionEntryChange<any>>,
+        this.harness.metadataSchema,
+      ),
+    )) as SessionIndexEntry<SessionMetadataOf<THarness>> | undefined
+  }
+
+  /**
    * The saved messages of this thread, oldest first. While a revert stands,
    * the messages after its message are hidden.
    */
@@ -3460,7 +3530,10 @@ export class HarnessSession<THarness extends AnyHarness = AnyHarness> {
    * The session API of plugins. With `principal` (a command), it acts for
    * that user. Without it, it follows the sender of the running turn.
    */
-  private pluginApi(principal?: Principal): PluginSessionApi {
+  private pluginApi(
+    principal?: Principal,
+    metadataSchema?: SchemaInput,
+  ): PluginSessionApi {
     const sender = () => principal ?? this.sender()
     return {
       threadId: this.threadId,
@@ -3473,25 +3546,37 @@ export class HarnessSession<THarness extends AnyHarness = AnyHarness> {
         this.prompt(text, { busy: 'queue', principal: sender() }),
       note: async (text, options) => {
         await this.addNote(text)
-        if (options?.wake) await this.followUp(text, { principal: sender() })
+        if (options?.wake)
+          await this.queueFollowUp(text, { principal: sender(), wake: true })
       },
       transcript: () => this.transcript(),
       replaceTranscript: (messages) =>
         this.messages.saveThread(this.threadId, messages),
       entry: () => this.index.get(this.threadId),
-      // Only these fields: a plugin cannot change the owner or the parent.
-      updateEntry: ({ title, metadata, usage }) =>
-        this.index.update(
-          this.threadId,
-          (entry) =>
-            entry && {
-              ...entry,
-              ...(title !== undefined ? { title } : {}),
-              ...(metadata !== undefined ? { metadata } : {}),
-              ...(usage !== undefined ? { usage } : {}),
-              updatedAt: Date.now(),
-            },
-        ),
+      updateEntry: (update) => {
+        // Only these fields: a plugin cannot change the owner, the parent,
+        // or the pin.
+        const pick = (
+          change:
+            | Pick<SessionIndexEntry, 'title' | 'metadata' | 'usage'>
+            | undefined,
+        ) =>
+          change && {
+            title: change.title,
+            metadata: change.metadata,
+            usage: change.usage,
+          }
+        return this.index.update(this.threadId, (entry) =>
+          changedEntry(
+            entry,
+            typeof update === 'function'
+              ? (current) => pick(update(current))
+              : pick(update),
+            this.harness.metadataSchema,
+            metadataSchema,
+          ),
+        )
+      },
       // The public type narrows the answer from the schema.
       ask: ((question: Question<SchemaInput | undefined>) =>
         this.ask(question)) as PluginSessionApi['ask'],
@@ -4207,6 +4292,7 @@ export class HarnessSession<THarness extends AnyHarness = AnyHarness> {
                 id: createMessageId(),
                 role: 'user',
                 content: steer.message,
+                ...(steer.wake ? { metadata: WAKE_METADATA } : {}),
               }),
             ),
             ...(added?.messages ?? []).map(
@@ -4456,7 +4542,7 @@ export class HarnessSession<THarness extends AnyHarness = AnyHarness> {
    * `metadata.harness.media`, so a UI can show their names and sizes later.
    * An id this thread does not know is skipped.
    */
-  private async userMessage(content: UserInput) {
+  private async userMessage(content: UserInput, wake?: boolean) {
     const ids =
       typeof content === 'string'
         ? []
@@ -4467,7 +4553,16 @@ export class HarnessSession<THarness extends AnyHarness = AnyHarness> {
       id: createMessageId(),
       role: 'user',
       content,
-      ...(media.length > 0 ? { metadata: { harness: { media } } } : {}),
+      ...(media.length > 0 || wake
+        ? {
+            metadata: {
+              harness: {
+                ...(media.length > 0 ? { media } : {}),
+                ...(wake ? { wake: true } : {}),
+              },
+            },
+          }
+        : {}),
     }
     return message
   }
@@ -4846,7 +4941,7 @@ export class HarnessSession<THarness extends AnyHarness = AnyHarness> {
       }
       let message =
         turn.message !== undefined
-          ? await this.userMessage(turn.message)
+          ? await this.userMessage(turn.message, turn.wake)
           : undefined
       let resume = turn.resume
       let parentRunId = turn.answers?.runId ?? turn.parentRunId
@@ -5539,6 +5634,7 @@ export class HarnessSession<THarness extends AnyHarness = AnyHarness> {
       ephemeral: turn.ephemeral,
       principal: turn.principal,
       context: turn.context,
+      ...(turn.wake ? { wake: true } : {}),
     }
     return taken
   }
@@ -6298,8 +6394,9 @@ export class HarnessSession<THarness extends AnyHarness = AnyHarness> {
       await this.addNote(note)
     }
     if (options.wake) {
-      void this.followUp(`Background agent ${name} ${ended}: ${note}`, {
+      void this.queueFollowUp(`Background agent ${name} ${ended}: ${note}`, {
         ...(principal ? { principal } : {}),
+        wake: true,
       })
     }
   }
@@ -6837,6 +6934,7 @@ export class HarnessSession<THarness extends AnyHarness = AnyHarness> {
           inputId: entry.inputId,
           principal: entry.principal,
           context: input.context,
+          ...(input.op === 'followUp' && input.wake ? { wake: true } : {}),
         })
       } else if (input.op === 'reset') {
         this.queueReset(entry.inputId, input.note, entry.principal, 'end')
@@ -7069,6 +7167,9 @@ export class HarnessSession<THarness extends AnyHarness = AnyHarness> {
           principal: input.principal,
           context: input.input.context,
           overrides: decision.overrides,
+          ...(input.input.op === 'followUp' && input.input.wake
+            ? { wake: true }
+            : {}),
         }
         // Else it runs as its own turn, as `steer()` does when no turn runs.
         if (input.delivery === 'steer' && this.activeTurn) {

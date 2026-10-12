@@ -1,5 +1,6 @@
 import { CapabilityRegistry, createCapability } from '@tanstack/ai'
 import { ResourceScope, disposeAll } from './resources'
+import { assertMetadataSchema } from './session-entry'
 import type {
   AgentProduces,
   AnyChatMiddleware,
@@ -12,6 +13,7 @@ import type {
   MetadataStore,
   ModelMessage,
   ProviderKeys,
+  SchemaInput,
 } from '@tanstack/ai'
 import type {
   AgentInputOf,
@@ -25,6 +27,7 @@ import type { CredentialsAccess } from './auth'
 import type { AnyCommand, PluginSessionApi } from './commands'
 import type { ConfigOption } from './config'
 import type { ExtensionItem, ExtensionPoint, PluginEvent } from './extensions'
+import type { MetadataOf } from './session-entry'
 
 /**
  * How long a plugin's `setup` result and resources live:
@@ -176,6 +179,8 @@ export interface PluginServices {
   credentials: CredentialsAccess
   keys: ProviderKeys
   session: PluginSessionApi
+  /** The session API of a plugin with a `metadataSchema`: its writes check it too. */
+  sessionWith: (metadataSchema: SchemaInput) => PluginSessionApi
   agents: PluginAgentActions
   /** Called after `ctx.commands` adds or removes a command. */
   commandsChanged?: () => void
@@ -204,8 +209,11 @@ export interface PluginCommands {
   ready: Promise<void>
 }
 
-/** What a plugin's `setup` receives. */
-export interface PluginSetupContext {
+/**
+ * What a plugin's `setup` receives. `TMetadata` is the type of the session
+ * index `metadata`, from the `metadataSchema` of the plugin.
+ */
+export interface PluginSetupContext<TMetadata = Record<string, unknown>> {
   /** Resources this plugin owns, with rollback and reverse-order cleanup. */
   resources: {
     acquire: <T>(
@@ -275,7 +283,7 @@ export interface PluginSetupContext {
    * the call. A missing key throws `AuthRequiredError`.
    */
   keys: ProviderKeys
-  session: PluginSessionApi
+  session: PluginSessionApi<TMetadata>
   /** Add and remove this plugin's commands while the session runs. */
   commands: PluginCommands
   /**
@@ -286,9 +294,21 @@ export interface PluginSetupContext {
   turn?: TurnInfo
 }
 
-export interface PluginDefinition {
+/**
+ * A plugin. `TMetadata` is the type of the session index `metadata` that the
+ * plugin reads and writes, from its `metadataSchema`.
+ */
+export interface PluginDefinition<TMetadata = Record<string, unknown>> {
   /** A stable, unique name, for example `'acme/todos'`. */
   name: string
+  /**
+   * The shape of the session index `metadata` this plugin uses, as a
+   * Standard Schema. It types `ctx.session.entry()` and
+   * `ctx.session.updateEntry()`, and checks each write of this plugin. Pass
+   * the same schema as the harness `metadataSchema`: a harness whose
+   * metadata type does not fit is a type error.
+   */
+  metadataSchema?: SchemaInput
   lifetime?: PluginLifetime
   /** Capabilities that an earlier plugin or harness middleware must provide. */
   requires?: ReadonlyArray<CapabilityHandle>
@@ -299,16 +319,30 @@ export interface PluginDefinition {
   /** Agent outputs this plugin needs the session to have. */
   needs?: { produces?: ReadonlyArray<AgentProduces> }
   setup?: (
-    ctx: PluginSetupContext,
+    ctx: PluginSetupContext<TMetadata>,
   ) => PluginContributions | void | Promise<PluginContributions | void>
 }
 
 const PLUGIN_BRAND = Symbol.for('tanstack.ai.harnessPlugin')
 
-/** A plugin made with {@link definePlugin}. */
+/**
+ * A plugin made with {@link definePlugin}. `TMetadata` is the session
+ * metadata type it reads, from its `metadataSchema`.
+ */
 export type HarnessPlugin<
-  TDefinition extends PluginDefinition = PluginDefinition,
-> = Readonly<TDefinition> & { readonly [PLUGIN_BRAND]: true }
+  TDefinition extends PluginDefinition<any> = PluginDefinition<any>,
+  TMetadata = any,
+> = Readonly<TDefinition> & {
+  readonly [PLUGIN_BRAND]: true
+} & PluginMetadataCheck<TMetadata>
+
+/**
+ * @internal A type-only field: the metadata a plugin reads. The harness
+ * `plugins` option takes only plugins that can read the harness metadata.
+ */
+export interface PluginMetadataCheck<TMetadata> {
+  readonly '~metadata'?: (metadata: TMetadata) => void
+}
 
 /**
  * Define a harness plugin. `setup` returns what the plugin contributes, and
@@ -322,12 +356,20 @@ export type HarnessPlugin<
  * })
  * ```
  */
-export function definePlugin<const TDefinition extends PluginDefinition>(
-  definition: TDefinition,
-): HarnessPlugin<TDefinition> {
+export function definePlugin<
+  TMetadataSchema extends SchemaInput | undefined = undefined,
+  const TDefinition extends PluginDefinition<MetadataOf<TMetadataSchema>> =
+    PluginDefinition<MetadataOf<TMetadataSchema>>,
+>(
+  definition: TDefinition & { metadataSchema?: TMetadataSchema },
+): HarnessPlugin<TDefinition, MetadataOf<TMetadataSchema>> {
   if (definition.name.trim() === '') {
     throw new Error('definePlugin requires a non-empty name')
   }
+  assertMetadataSchema(
+    `definePlugin "${definition.name}"`,
+    definition.metadataSchema,
+  )
   return Object.freeze({ ...definition, [PLUGIN_BRAND]: true as const })
 }
 
@@ -417,6 +459,22 @@ const unavailable = (what: string) => () => {
   throw new Error(`${what} is only available inside a harness session.`)
 }
 
+const NO_SESSION: PluginSessionApi = {
+  threadId: '',
+  principal: undefined,
+  snapshot: unavailable('ctx.session'),
+  prompt: unavailable('ctx.session'),
+  note: unavailable('ctx.session'),
+  transcript: unavailable('ctx.session'),
+  replaceTranscript: unavailable('ctx.session'),
+  entry: unavailable('ctx.session'),
+  updateEntry: unavailable('ctx.session'),
+  ask: unavailable('ctx.session'),
+  authRequired: unavailable('ctx.session'),
+  setConfig: unavailable('ctx.session'),
+  settings: unavailable('ctx.session'),
+}
+
 const NO_SERVICES: PluginServices = {
   emit: () => {},
   on: () => () => {},
@@ -434,21 +492,8 @@ const NO_SERVICES: PluginServices = {
     require: unavailable('ctx.keys'),
     adapter: unavailable('ctx.keys'),
   },
-  session: {
-    threadId: '',
-    principal: undefined,
-    snapshot: unavailable('ctx.session'),
-    prompt: unavailable('ctx.session'),
-    note: unavailable('ctx.session'),
-    transcript: unavailable('ctx.session'),
-    replaceTranscript: unavailable('ctx.session'),
-    entry: unavailable('ctx.session'),
-    updateEntry: unavailable('ctx.session'),
-    ask: unavailable('ctx.session'),
-    authRequired: unavailable('ctx.session'),
-    setConfig: unavailable('ctx.session'),
-    settings: unavailable('ctx.session'),
-  },
+  session: NO_SESSION,
+  sessionWith: () => NO_SESSION,
   agents: {
     run: unavailable('ctx.agents.run') as PluginAgentActions['run'],
     start: unavailable('ctx.agents.start') as PluginAgentActions['start'],
@@ -729,7 +774,9 @@ export async function mountPlugins(
         config: services.config,
         credentials: services.credentials,
         keys: services.keys,
-        session: services.session,
+        session: plugin.metadataSchema
+          ? services.sessionWith(plugin.metadataSchema)
+          : services.session,
         commands: {
           has: (name) => ownerOf(name) !== undefined,
           set: (name, command) => {

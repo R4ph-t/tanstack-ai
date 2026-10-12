@@ -2,8 +2,10 @@ import { expectTypeOf, it } from 'vitest'
 import { z } from 'zod'
 import { defineAgent } from '@tanstack/ai'
 import { defineHarness, definePlugin } from '../src'
+import { createHarnessClient } from '../src/client'
 import { mockAdapter } from './helpers'
 import type { AnyTextAdapter, KeyedAdapter } from '@tanstack/ai'
+import type { SessionIndexEntry } from '@tanstack/ai-persistence'
 import type {
   AgentRun,
   HarnessConfig,
@@ -13,6 +15,8 @@ import type {
   PluginLifetime,
   Receipt,
   RecoverHook,
+  SessionEntryChange,
+  SessionMetadataOf,
 } from '../src'
 import type { InputSettlement } from '../src/types'
 
@@ -109,4 +113,54 @@ it('gives a started agent run send()', () => {
   const run = session.agents.pricer.start({ vendor: 'a' })
   expectTypeOf(run).toEqualTypeOf<AgentRun<{ vendor: string; cents: number }>>()
   expectTypeOf(run.send).returns.toEqualTypeOf<Promise<Receipt>>()
+})
+
+const chipsSchema = z.object({ chips: z.array(z.string()) })
+type Chips = z.infer<typeof chipsSchema>
+const chipsPlugin = definePlugin({
+  name: 'test/chips',
+  metadataSchema: chipsSchema,
+  setup: (ctx) => {
+    expectTypeOf(ctx.session.entry).returns.resolves.toEqualTypeOf<
+      SessionIndexEntry<Chips> | undefined
+    >()
+  },
+})
+const untypedPlugin = definePlugin({ name: 'test/untyped' })
+
+it('types the session metadata from the harness metadataSchema', () => {
+  const chips = defineHarness({
+    name: 'test/chips',
+    metadataSchema: chipsSchema,
+    plugins: () => [chipsPlugin, untypedPlugin],
+    turn: {
+      beforeFinish: async ({ session: hooked }) => {
+        expectTypeOf(await hooked.entry()).toEqualTypeOf<
+          SessionIndexEntry<Chips> | undefined
+        >()
+        return undefined
+      },
+    },
+  })
+  expectTypeOf<SessionMetadataOf<typeof chips>>().toEqualTypeOf<Chips>()
+  expectTypeOf<SessionMetadataOf<typeof harness>>().toEqualTypeOf<
+    Record<string, unknown>
+  >()
+  expectTypeOf(createHarnessClient<typeof chips>)
+    .returns.toHaveProperty('updateSession')
+    .parameter(1)
+    .toEqualTypeOf<SessionEntryChange<Chips>>()
+})
+
+it('refuses a plugin whose metadata the harness does not have', () => {
+  const other = definePlugin({
+    name: 'test/other',
+    metadataSchema: z.object({ other: z.number() }),
+  })
+  defineHarness({
+    name: 'test/mismatch',
+    metadataSchema: chipsSchema,
+    // @ts-expect-error The plugin reads `other`, which the harness does not have.
+    plugins: () => [other],
+  })
 })

@@ -8,7 +8,15 @@ export type {
   HarnessRouterContext,
   HarnessRouting,
   HarnessSubagents,
+  SessionMetadataOf,
+  SessionWithMetadata,
 } from './define'
+export { SessionMetadataError } from './session-entry'
+export type {
+  MetadataOf,
+  SessionEntryChange,
+  SessionEntryUpdate,
+} from './session-entry'
 
 export { durableTool } from './durable-tool'
 export type {

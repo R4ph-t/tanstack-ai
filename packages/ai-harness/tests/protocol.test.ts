@@ -10,7 +10,7 @@ import {
   parseControlFrame,
   parseHarnessInput,
 } from '../src'
-import { after, gate, mockAdapter, text } from './helpers'
+import { after, gate, mockAdapter, text, wakeMessages } from './helpers'
 import type { WebSocketLike } from '@tanstack/ai'
 import type { HostFrame } from '../src'
 import type { Reply } from './helpers'
@@ -328,9 +328,28 @@ describe('HTTP handler', () => {
     release.open()
     await host.close()
   })
+
+  it('drops the wake mark of a client follow-up', async () => {
+    const { handler, host, harness, calls } = setup([() => text('ok')])
+    const control = controlOf(handler, 'user-1-wake')
+
+    await control({ op: 'followUp', message: 'I am real', wake: true })
+
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+    const session = await host.open(harness, { threadId: 'user-1-wake' })
+    await vi.waitFor(() => expect(session.snapshot().status).toBe('idle'))
+    expect(wakeMessages(await session.transcript())).toEqual([])
+    await host.close()
+  })
 })
 
 describe('parseHarnessInput', () => {
+  it('drops the wake mark of a follow-up, which only the harness sets', () => {
+    expect(
+      parseHarnessInput({ op: 'followUp', message: 'hi', wake: true }),
+    ).toEqual({ op: 'followUp', message: 'hi' })
+  })
+
   it('lets a client send background without an expose entry', async () => {
     const { handler, host } = setup()
     const control = controlOf(handler, 'user-1-bg')

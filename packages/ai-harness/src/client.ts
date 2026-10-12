@@ -8,9 +8,10 @@ import type {
   SessionIndexPage,
 } from '@tanstack/ai-persistence'
 import type { AgentInputOf } from './agents'
-import type { AnyHarness, HarnessAgentsOf } from './define'
+import type { AnyHarness, HarnessAgentsOf, SessionMetadataOf } from './define'
 import type { HostEvent } from './host'
 import type { SessionDescription, SessionSnapshot } from './session'
+import type { SessionEntryChange } from './session-entry'
 import type {
   BusyPolicy,
   Cursor,
@@ -193,9 +194,26 @@ export interface HarnessClient<THarness extends AnyHarness> {
     parentThreadId?: string
     search?: string
     metadata?: Record<string, string>
-  }) => Promise<SessionIndexPage>
+  }) => Promise<
+    Omit<SessionIndexPage, 'entries'> & {
+      entries: Array<SessionIndexEntry<SessionMetadataOf<THarness>>>
+    }
+  >
   /** Set the title of one of your sessions. Resolves to the changed entry. */
-  renameSession: (threadId: string, title: string) => Promise<SessionIndexEntry>
+  renameSession: (
+    threadId: string,
+    title: string,
+  ) => Promise<SessionIndexEntry<SessionMetadataOf<THarness>>>
+  /**
+   * Change the `title`, `pinned`, or `metadata` of one of your sessions, for
+   * example the context items a user pinned in the composer. Each field you
+   * pass replaces the stored one. The harness `metadataSchema` checks
+   * `metadata` on the server. Resolves to the changed entry.
+   */
+  updateSession: (
+    threadId: string,
+    change: SessionEntryChange<SessionMetadataOf<THarness>>,
+  ) => Promise<SessionIndexEntry<SessionMetadataOf<THarness>>>
   /**
    * Remove one of your sessions from the session index. The transcript and
    * the other data of the thread stay on the server.
@@ -205,12 +223,16 @@ export interface HarnessClient<THarness extends AnyHarness> {
    * Copy one of your sessions into a new session, up to a message id.
    * Resolves to the entry of the new session.
    */
-  forkSession: (threadId: string, at: ForkPoint) => Promise<SessionIndexEntry>
+  forkSession: (
+    threadId: string,
+    at: ForkPoint,
+  ) => Promise<SessionIndexEntry<SessionMetadataOf<THarness>>>
 }
 
 /** The body of `POST sessions`. */
 type SessionChange =
   | { op: 'rename'; threadId: string; title: string }
+  | ({ op: 'update'; threadId: string } & SessionEntryChange<unknown>)
   | { op: 'delete'; threadId: string }
   | ({ op: 'fork'; threadId: string } & ForkPoint)
 
@@ -371,8 +393,11 @@ export function createHarnessClient<THarness extends AnyHarness>(
     )
 
   const sessionEntry = async (change: SessionChange) =>
-    // The handler answers a rename and a fork with the entry.
-    (await (await changeSession(change)).json()) as SessionIndexEntry
+    // The handler answers a rename, an update, and a fork with the entry.
+    // The server schema checked its metadata.
+    (await (await changeSession(change)).json()) as SessionIndexEntry<
+      SessionMetadataOf<THarness>
+    >
 
   async function* events(
     eventOptions: {
@@ -548,10 +573,14 @@ export function createHarnessClient<THarness extends AnyHarness>(
         await doFetch(`${base}/sessions?${query}`, { headers: headers() }),
       )
       // The handler answers with one page of the session index.
-      return (await response.json()) as SessionIndexPage
+      return (await response.json()) as Omit<SessionIndexPage, 'entries'> & {
+        entries: Array<SessionIndexEntry<SessionMetadataOf<THarness>>>
+      }
     },
     renameSession: (threadId, title) =>
       sessionEntry({ op: 'rename', threadId, title }),
+    updateSession: (threadId, change) =>
+      sessionEntry({ ...change, op: 'update', threadId }),
     deleteSession: async (threadId) => {
       await changeSession({ op: 'delete', threadId })
     },
