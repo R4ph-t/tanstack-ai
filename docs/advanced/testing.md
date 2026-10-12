@@ -98,6 +98,24 @@ for await (const chunk of chat({
 }
 ```
 
+With [`isContextOverflow`](./compaction#retry-after-a-context-overflow), test the code that retries after an overflow:
+
+```ts group=testing
+import { isContextOverflow } from '@tanstack/ai'
+
+const small = fakeText()
+small.setResponses([{ error: 'prompt is too long: 2000 tokens > 1000 maximum' }])
+
+for await (const chunk of chat({
+  adapter: small,
+  messages: [{ role: 'user', content: 'A very long question' }],
+})) {
+  if (chunk.type === 'RUN_ERROR') {
+    console.log(isContextOverflow({ error: chunk })) // true
+  }
+}
+```
+
 The fake also reports token usage on each call: `ceil(characters / 4)` over the request and the answer. So a long message costs many tokens, like with a real model.
 
 ## Options

@@ -418,6 +418,10 @@ export type {
   SandboxLifecyclePayload,
 } from './custom-events'
 
+// Context overflow detection
+export { isContextOverflow } from './utilities/context-overflow'
+export type { ContextOverflowInput } from './utilities/context-overflow'
+
 // All types
 export * from './types'
 

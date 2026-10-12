@@ -186,6 +186,43 @@ withCompaction({
 
 The token count is a rough `characters / 4` estimate. It is good enough to trigger on, not exact. Pass `estimateTokens` for provider-accurate counts.
 
+## Retry after a context overflow
+
+A call can still pass the model's context limit and fail. `isContextOverflow` from `@tanstack/ai` tells you that a call failed for this reason. Then send the request again with a smaller `maxTokens`:
+
+```typescript
+import { chat, isContextOverflow } from "@tanstack/ai";
+import type { ModelMessage } from "@tanstack/ai";
+import { openaiText } from "@tanstack/ai-openai";
+import { withCompaction } from "@tanstack/ai-compaction";
+
+async function answer(messages: Array<ModelMessage>) {
+  for (const maxTokens of [100_000, 50_000]) {
+    let text = "";
+    let overflow = false;
+    for await (const chunk of chat({
+      adapter: openaiText("gpt-6.1-sol"),
+      messages,
+      middleware: [withCompaction({ maxTokens })],
+    })) {
+      if (chunk.type === "TEXT_MESSAGE_CONTENT") text += chunk.delta;
+      if (chunk.type === "RUN_ERROR") {
+        if (!isContextOverflow({ error: chunk })) throw new Error(chunk.message);
+        overflow = true;
+      }
+    }
+    if (!overflow) return text;
+  }
+  throw new Error("The conversation is too long, even after compaction.");
+}
+```
+
+`isContextOverflow` knows the overflow errors of Anthropic, OpenAI, Gemini, Bedrock, Mistral, xAI, Groq, OpenRouter, Ollama, and more. It ignores rate-limit errors. It takes one object, and every field is optional:
+
+- `error`: a `RUN_ERROR` event, an `Error`, or a message string.
+- `usage`, `finishReason`, and `contextWindow`: the usage and finish reason of one model call, and the model's context window. Some providers accept an overflow and cut the input without an error. A call that stopped with `'stop'` counts as an overflow when its `usage.promptTokens` is more than the window. A call that stopped with `'length'` counts when it wrote nothing and its input fills the window.
+- `provider`: set `'cerebras'` for Cerebras, which answers an overflow with a bare `400` or `413`.
+
 ## What it keeps safe
 
 - **The system prompt is never dropped.** `chat()` keeps it separate from `messages`, so compaction only touches the conversation.
