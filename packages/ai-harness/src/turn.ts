@@ -1,6 +1,6 @@
 import type { ModelMessage } from '@tanstack/ai'
 import type { LogRecord } from '@tanstack/ai-persistence'
-import type { HarnessSession } from './session'
+import type { SessionWithMetadata } from './define'
 import type { HarnessInput, Principal, TurnOverrides, UserInput } from './types'
 
 /** What recovery does with one input. */
@@ -21,8 +21,8 @@ export type RecoverDecision =
     }
 
 /** What `durability.recover` gets for one input. */
-export interface RecoverContext {
-  session: HarnessSession
+export interface RecoverContext<TMetadataSchema = any> {
+  session: SessionWithMetadata<TMetadataSchema>
   input: {
     inputId: string
     input: HarnessInput
@@ -54,8 +54,8 @@ export interface RecoverContext {
 }
 
 /** Decide how an input that a crashed host left recovers. */
-export type RecoverHook = (
-  ctx: RecoverContext,
+export type RecoverHook<TMetadataSchema = any> = (
+  ctx: RecoverContext<TMetadataSchema>,
 ) => RecoverDecision | undefined | Promise<RecoverDecision | undefined>
 
 /** Messages and host records that a turn hook adds, in one append. */
@@ -72,8 +72,8 @@ export interface TurnAdditions {
 }
 
 /** What `turn.onModelError` gets. */
-export interface ModelErrorContext {
-  session: HarnessSession
+export interface ModelErrorContext<TMetadataSchema = any> {
+  session: SessionWithMetadata<TMetadataSchema>
   operationId: string
   inputId?: string
   /**
@@ -98,8 +98,8 @@ export interface ModelErrorContext {
 }
 
 /** What `turn.beforeFinish` gets. */
-export interface FinishContext {
-  session: HarnessSession
+export interface FinishContext<TMetadataSchema = any> {
+  session: SessionWithMetadata<TMetadataSchema>
   operationId: string
   inputId?: string
   /** How many times this hook continued the turn so far. */
@@ -125,8 +125,8 @@ export interface JoinCandidate {
 }
 
 /** What `turn.onJoin` gets. */
-export interface JoinContext {
-  session: HarnessSession
+export interface JoinContext<TMetadataSchema = any> {
+  session: SessionWithMetadata<TMetadataSchema>
   operationId: string
   /** The inputs that join now, in admission order. */
   inputs: ReadonlyArray<JoinCandidate>
@@ -134,7 +134,7 @@ export interface JoinContext {
 }
 
 /** Hooks that control a chat turn. */
-export interface HarnessTurnOptions {
+export interface HarnessTurnOptions<TMetadataSchema = any> {
   /**
    * A run of the turn failed (a `RUN_ERROR`, or an error thrown by the run).
    * Return `'retry'` to run the model again in the same operation, after any
@@ -144,7 +144,7 @@ export interface HarnessTurnOptions {
    * `'continue'` acts as `'retry'`. See `retryTransientErrors`.
    */
   onModelError?: (
-    ctx: ModelErrorContext,
+    ctx: ModelErrorContext<TMetadataSchema>,
   ) =>
     | 'retry'
     | 'continue'
@@ -156,7 +156,7 @@ export interface HarnessTurnOptions {
    * turn.
    */
   beforeFinish?: (
-    ctx: FinishContext,
+    ctx: FinishContext<TMetadataSchema>,
   ) => TurnAdditions | undefined | Promise<TurnAdditions | undefined>
   /**
    * How many times `beforeFinish` can continue one turn. Default 32. At the
@@ -171,7 +171,7 @@ export interface HarnessTurnOptions {
   canJoin?: (candidate: JoinCandidate) => boolean | Promise<boolean>
   /** Runs before the model call that the joined inputs reach. */
   onJoin?: (
-    ctx: JoinContext,
+    ctx: JoinContext<TMetadataSchema>,
   ) => TurnAdditions | undefined | Promise<TurnAdditions | undefined>
 }
 

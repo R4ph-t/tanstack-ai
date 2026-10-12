@@ -590,7 +590,7 @@ export function defineWorkClaimStore(store: WorkClaimStore): WorkClaimStore {
  * @property updatedAt - Epoch ms of the last change. {@link SessionIndexStore.list}
  *   sorts by it.
  */
-export interface SessionIndexEntry {
+export interface SessionIndexEntry<TMetadata = Record<string, unknown>> {
   threadId: string
   /** The `name` of the harness that runs the thread. */
   harness?: string
@@ -624,7 +624,11 @@ export interface SessionIndexEntry {
     /** Cost in USD, when a usage plugin writes it. */
     cost?: number
   }
-  metadata?: Record<string, unknown>
+  /**
+   * Data the app owns, for example the context items a user pinned to the
+   * thread. A harness with `metadataSchema` checks it on each write.
+   */
+  metadata?: TMetadata
 }
 
 /** Options for {@link SessionIndexStore.list}. */
@@ -681,6 +685,27 @@ export interface SessionIndexStore {
   upsert: (entry: SessionIndexEntry) => Promise<void>
   /** The entry for `threadId`, or `undefined`. */
   get: (threadId: string) => Promise<SessionIndexEntry | undefined>
+  /**
+   * Optional. The entry with a revision, or `undefined` when it is absent.
+   * Pair it with `upsertIf` for compare-and-set writes. Each write (`upsert`
+   * or `upsertIf`) changes the revision.
+   */
+  getVersioned?: (
+    threadId: string,
+  ) => Promise<{ entry: SessionIndexEntry; revision: string } | undefined>
+  /**
+   * Optional. Write `entry` only when the current revision of its thread is
+   * `expectedRevision` (`null` means "only when absent"). Returns the new
+   * revision, or `{ ok: false, reason: 'conflict' }` when someone else wrote
+   * first. With both methods, hosts on several machines do not lose each
+   * other's changes to one entry.
+   */
+  upsertIf?: (
+    entry: SessionIndexEntry,
+    expectedRevision: string | null,
+  ) => Promise<
+    { ok: true; revision: string } | { ok: false; reason: 'conflict' }
+  >
   /**
    * The entries that match the filters, newest `updatedAt` first. Entries with
    * the same `updatedAt` are in `threadId` order. Pinned entries get no

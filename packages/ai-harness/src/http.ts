@@ -22,6 +22,7 @@ import {
   parseHarnessInput,
 } from './protocol'
 import { isRecord } from './utils'
+import { SessionMetadataError } from './session-entry'
 import type {
   ModelMessage,
   StreamChunk,
@@ -149,13 +150,30 @@ function lastUserInput(messages: Array<UIMessage | ModelMessage>) {
 /** A `POST sessions` body, or `undefined` when it is not a valid one. */
 function parseSessionOp(body: unknown) {
   if (!isRecord(body)) return undefined
-  const { op, threadId, title, before, through } = body
+  const { op, threadId, title, before, through, pinned, metadata } = body
   if (typeof threadId !== 'string') return undefined
   switch (op) {
     case 'rename':
       return typeof title === 'string'
         ? { op: 'rename' as const, threadId, title }
         : undefined
+    case 'update':
+      if (title !== undefined && typeof title !== 'string') return undefined
+      if (pinned !== undefined && typeof pinned !== 'boolean') return undefined
+      if (
+        metadata !== undefined &&
+        (!isRecord(metadata) || Array.isArray(metadata))
+      )
+        return undefined
+      return {
+        op: 'update' as const,
+        threadId,
+        change: {
+          ...(title !== undefined ? { title } : {}),
+          ...(pinned !== undefined ? { pinned } : {}),
+          ...(metadata !== undefined ? { metadata } : {}),
+        },
+      }
     case 'delete':
       return { op: 'delete' as const, threadId }
     case 'fork':
@@ -266,12 +284,17 @@ async function mediaResponse(
  *   session index, newest first. Only the sessions of this principal that
  *   `canAccess` lets in. Default: top-level sessions only.
  * - `POST .../sessions`: change a session of this principal. The body is
- *   `{ op: 'rename', threadId, title }`, `{ op: 'delete', threadId }` (it
- *   removes the index entry only), or `{ op: 'fork', threadId, before }` or
- *   `{ op: 'fork', threadId, through }` with a message id. Rename and fork
- *   answer with the entry, delete with 204. 403 when `canAccess` refuses
- *   the thread, 404 for a thread this principal does not own, and 409
- *   (`other_harness`) for a fork of a thread that another harness runs.
+ *   `{ op: 'rename', threadId, title }`, `{ op: 'update', threadId, title?,
+ *   pinned?, metadata? }` (each field replaces the stored one, and the
+ *   harness `metadataSchema` checks `metadata`. Without a schema, a client
+ *   cannot write `metadata`: 403 `not_exposed`), `{ op: 'delete', threadId }`
+ *   (it removes the index entry only), or `{ op: 'fork', threadId, before }`
+ *   or `{ op: 'fork', threadId, through }` with a message id. Rename,
+ *   update, and fork answer with the entry, delete with 204. 400
+ *   (`invalid_metadata`, with `issues`) for metadata the schema refuses, 403
+ *   when `canAccess` refuses the thread, 404 for a thread this principal
+ *   does not own, and 409 (`other_harness`) for an update or a fork of a
+ *   thread that another harness runs.
  * - `GET  .../host-events`: the `host.events()` of this principal as SSE:
  *   status changes and session index changes. First the current status of
  *   each open session. Only the threads that `canAccess` lets in and that
@@ -584,6 +607,30 @@ export function createHarnessHandler(
           case 'rename': {
             const renamed = await host.sessions.rename(op.threadId, op.title)
             return renamed ? json(renamed) : json({ error: 'not found' }, 404)
+          }
+          case 'update': {
+            // The host can run more harnesses than this handler serves.
+            if (entry.harness !== undefined && entry.harness !== harness.name)
+              return json({ error: 'other_harness' }, 409)
+            // The schema is the contract for what a client may write. Without
+            // one, metadata stays a server field.
+            if (op.change.metadata !== undefined && !harness.metadataSchema)
+              return json({ error: 'not_exposed' }, 403)
+            try {
+              const updated = await host.sessions.update(
+                harness,
+                op.threadId,
+                op.change,
+              )
+              return updated ? json(updated) : json({ error: 'not found' }, 404)
+            } catch (error) {
+              if (error instanceof SessionMetadataError)
+                return json(
+                  { error: 'invalid_metadata', issues: error.issues },
+                  400,
+                )
+              throw error
+            }
           }
           case 'delete':
             await host.sessions.delete(op.threadId)

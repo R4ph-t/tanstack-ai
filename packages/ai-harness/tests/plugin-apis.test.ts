@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { memoryPersistence } from '@tanstack/ai-persistence'
 import { createHarnessHost, defineHarness, definePlugin } from '../src'
-import { mockAdapter, text } from './helpers'
+import { mockAdapter, text, wakeMessages } from './helpers'
 import type { AnyTextAdapter } from '@tanstack/ai'
 import type { PluginSessionApi } from '../src'
 
@@ -59,6 +59,9 @@ describe('ctx.session.note', () => {
       { role: 'user', content: 'Build finished.' },
     ])
     await vi.waitFor(() => expect(session.snapshot().status).toBe('idle'))
+    expect(wakeMessages(await session.transcript())).toEqual([
+      'Build finished.',
+    ])
     await host.close()
   })
 })

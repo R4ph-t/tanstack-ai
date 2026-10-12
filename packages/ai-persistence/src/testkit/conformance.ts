@@ -2286,6 +2286,60 @@ export function runPersistenceConformance(
           kept,
         ])
       })
+
+      // Compare-and-set is optional. A store without it skips these cases.
+      it('writes with upsertIf only at the expected revision', async (ctx) => {
+        const store = persistence.stores.sessions
+        if (!store?.getVersioned || !store.upsertIf)
+          return ctx.skip('sessions store has no compare-and-set')
+        const threadId = newId()
+        expect(await store.getVersioned(threadId)).toBeUndefined()
+
+        // `null`: only when absent.
+        const created = await store.upsertIf(sessionEntry(threadId, 1), null)
+        if (!created.ok) throw new Error('the first upsertIf conflicted')
+        expect(await store.upsertIf(sessionEntry(threadId, 9), null)).toEqual({
+          ok: false,
+          reason: 'conflict',
+        })
+        expect(await store.getVersioned(threadId)).toEqual({
+          entry: sessionEntry(threadId, 1),
+          revision: created.revision,
+        })
+
+        const changed = await store.upsertIf(
+          sessionEntry(threadId, 2, { title: 'new' }),
+          created.revision,
+        )
+        if (!changed.ok)
+          throw new Error('upsertIf at the read revision conflicted')
+        expect(changed.revision).not.toBe(created.revision)
+
+        // A stale revision conflicts and leaves the entry as it was.
+        expect(
+          await store.upsertIf(sessionEntry(threadId, 3), created.revision),
+        ).toEqual({ ok: false, reason: 'conflict' })
+        expect(await store.get(threadId)).toEqual(
+          sessionEntry(threadId, 2, { title: 'new' }),
+        )
+      })
+
+      it('changes the revision on a plain upsert', async (ctx) => {
+        const store = persistence.stores.sessions
+        if (!store?.getVersioned || !store.upsertIf)
+          return ctx.skip('sessions store has no compare-and-set')
+        const threadId = newId()
+        await store.upsert(sessionEntry(threadId, 1))
+        const read = await store.getVersioned(threadId)
+        if (!read) throw new Error('getVersioned found no entry')
+
+        await store.upsert(sessionEntry(threadId, 2))
+
+        expect(
+          await store.upsertIf(sessionEntry(threadId, 3), read.revision),
+        ).toEqual({ ok: false, reason: 'conflict' })
+        expect((await store.get(threadId))?.updatedAt).toBe(2)
+      })
     })
 
     describe('metadata', () => {

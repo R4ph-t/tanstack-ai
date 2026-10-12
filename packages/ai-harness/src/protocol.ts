@@ -156,6 +156,11 @@ export function parseHarnessInput(value: unknown): HarnessInput {
       'Invalid input: ephemeral must be an array of user messages.',
     )
   }
+  // Only the harness marks a wake follow-up. A client cannot.
+  if (value.op === 'followUp' && 'wake' in value) {
+    const { wake: _wake, ...input } = value
+    return input as HarnessInput
+  }
   // The checks above cover every field the session reads.
   return value as HarnessInput
 }

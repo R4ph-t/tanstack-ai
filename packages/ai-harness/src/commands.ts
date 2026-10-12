@@ -2,6 +2,7 @@ import type { InferSchemaType, ModelMessage, SchemaInput } from '@tanstack/ai'
 import type { SessionIndexEntry } from '@tanstack/ai-persistence'
 import type { CredentialsAccess } from './auth'
 import type { SessionSnapshot } from './session'
+import type { SessionEntryChange, SessionEntryUpdate } from './session-entry'
 import type {
   ChatTurnResult,
   Operation,
@@ -31,8 +32,11 @@ export type AnswerOf<TSchema> = TSchema extends SchemaInput
   ? InferSchemaType<TSchema>
   : string
 
-/** The parts of the session a plugin can use. */
-export interface PluginSessionApi {
+/**
+ * The parts of the session a plugin can use. `TMetadata` is the type of the
+ * session index `metadata`, from the `metadataSchema` of the plugin.
+ */
+export interface PluginSessionApi<TMetadata = Record<string, unknown>> {
   threadId: string
   /**
    * Who sent the input of the running chat turn. Outside a turn: the
@@ -63,12 +67,15 @@ export interface PluginSessionApi {
    * The session index entry of this thread. `undefined` when the host has
    * no `stores.sessions`, or the thread has no entry.
    */
-  entry: () => Promise<SessionIndexEntry | undefined>
+  entry: () => Promise<SessionIndexEntry<TMetadata> | undefined>
   /**
    * Change the session index entry of this thread. Each field you pass
-   * replaces the stored one. Resolves to the changed entry. Without
-   * `stores.sessions`, or for a thread with no entry, it writes nothing and
-   * resolves to `undefined`.
+   * replaces the stored one. Pass a function of the current entry to change
+   * part of a field: it runs again when another host wrote first. The
+   * `metadataSchema` of the plugin and of the harness check `metadata`, and
+   * a refused value throws `SessionMetadataError`. Resolves to the changed
+   * entry. Without `stores.sessions`, or for a thread with no entry, it
+   * writes nothing and resolves to `undefined`.
    *
    * @example
    * ```ts
@@ -76,8 +83,12 @@ export interface PluginSessionApi {
    * ```
    */
   updateEntry: (
-    patch: Partial<Pick<SessionIndexEntry, 'title' | 'metadata' | 'usage'>>,
-  ) => Promise<SessionIndexEntry | undefined>
+    update: SessionEntryUpdate<
+      TMetadata,
+      Omit<SessionEntryChange<TMetadata>, 'pinned'> &
+        Pick<SessionIndexEntry, 'usage'>
+    >,
+  ) => Promise<SessionIndexEntry<TMetadata> | undefined>
   /**
    * Ask the user and wait for the answer. Hosts show it (the CLI prompts,
    * ACP shows an elicitation). Rejects when the session closes.

@@ -5,6 +5,7 @@ import { LEASE } from './resume'
 import { HarnessSession } from './session'
 import { HARNESS_EVENTS } from './types'
 import { isRecord } from './utils'
+import { changedEntry } from './session-entry'
 import type { PromptCacheOptions, RunStore, StreamChunk } from '@tanstack/ai'
 import type {
   AIPersistence,
@@ -24,7 +25,8 @@ import type {
   SessionIndexPage,
   SessionIndexStore,
 } from '@tanstack/ai-persistence'
-import type { AnyHarness } from './define'
+import type { AnyHarness, SessionMetadataOf } from './define'
+import type { SessionEntryChange, SessionEntryUpdate } from './session-entry'
 import type { ProjectOptions, ReduceOptions } from './log'
 import type { LeaseOptions } from './resume'
 import type { ForkPoint, Principal } from './types'
@@ -144,6 +146,29 @@ export interface HostSessions {
     threadId: string,
     title: string,
   ) => Promise<SessionIndexEntry | undefined>
+  /**
+   * Change the entry of a thread from app code, with no session open: its
+   * `title`, `pinned`, or `metadata`. Each field you pass replaces the stored
+   * one. Pass a function of the current entry to change part of `metadata`:
+   * with a store that has `upsertIf`, it runs again when another host wrote
+   * first, so neither change is lost. The harness `metadataSchema` checks
+   * `metadata`, and types it. Resolves to the changed entry, or `undefined`
+   * for a thread that has no entry. Throws `SessionMetadataError` for
+   * metadata the schema refuses, and an error when the entry names another
+   * harness.
+   *
+   * @example
+   * ```ts
+   * await host.sessions.update(assistant, threadId, (entry) => ({
+   *   metadata: { ...entry.metadata, pinned: [...(entry.metadata?.pinned ?? []), file] },
+   * }))
+   * ```
+   */
+  update: <THarness extends AnyHarness>(
+    harness: THarness,
+    threadId: string,
+    update: SessionEntryUpdate<SessionMetadataOf<THarness>>,
+  ) => Promise<SessionIndexEntry<SessionMetadataOf<THarness>> | undefined>
   /**
    * Remove the index entry of a thread. Only the entry: the transcript, the
    * log, and the other data of the thread stay in their stores.
@@ -334,13 +359,27 @@ export interface HarnessHost<TLogState = unknown> {
   events: (options?: { signal?: AbortSignal }) => AsyncIterable<HostEvent>
 }
 
+/** Throw when `entry` names another harness than `harness`. */
+function checkHarness(
+  entry: SessionIndexEntry | undefined,
+  harness: AnyHarness,
+) {
+  if (entry?.harness !== undefined && entry.harness !== harness.name) {
+    throw new Error(
+      `Thread ${JSON.stringify(entry.threadId)} belongs to harness ${JSON.stringify(entry.harness)}, not ${JSON.stringify(harness.name)}.`,
+    )
+  }
+}
+
 let warned = false
 
 /**
  * Writes to the session index. `upsert` replaces the whole entry, so a
  * change reads the entry, changes a copy, and writes it back. The changes of
  * one thread run one at a time, so no change loses the fields of another.
- * `onChange` gets each write and each removal.
+ * A store with `getVersioned` and `upsertIf` also stops the lost writes of
+ * other hosts: a change that another host wrote first runs again on the new
+ * entry. `onChange` gets each write and each removal.
  */
 function sessionIndex(
   store: SessionIndexStore | undefined,
@@ -370,16 +409,33 @@ function sessionIndex(
       threadId: string,
       change: (
         entry: SessionIndexEntry | undefined,
-      ) => SessionIndexEntry | undefined,
+      ) =>
+        | SessionIndexEntry
+        | undefined
+        | Promise<SessionIndexEntry | undefined>,
     ) =>
       serial(threadId, async () => {
         if (!store) return undefined
-        const next = change(await store.get(threadId))
-        if (next) {
-          await store.upsert(next)
-          onChange({ type: 'session', threadId, entry: next })
+        if (!store.getVersioned || !store.upsertIf) {
+          const next = await change(await store.get(threadId))
+          if (next) {
+            await store.upsert(next)
+            onChange({ type: 'session', threadId, entry: next })
+          }
+          return next
         }
-        return next
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          const current = await store.getVersioned(threadId)
+          const next = await change(current?.entry)
+          if (!next) return undefined
+          const written = await store.upsertIf(next, current?.revision ?? null)
+          if (!written.ok) continue
+          onChange({ type: 'session', threadId, entry: next })
+          return next
+        }
+        throw new Error(
+          `The session index entry of ${threadId} changed on another host 5 times in a row.`,
+        )
       }),
     remove: (threadId: string) =>
       serial(threadId, async () => {
@@ -777,16 +833,22 @@ export function createHarnessHost<TLogState = undefined>(
           threadId,
           (entry) => entry && { ...entry, title, updatedAt: Date.now() },
         ),
+      update: async (harness, threadId, update) =>
+        // The schema checked the metadata, so it has the harness type.
+        (await index.update(threadId, (entry) => {
+          checkHarness(entry, harness)
+          return changedEntry(
+            entry,
+            update as SessionEntryUpdate<any, SessionEntryChange<any>>,
+            harness.metadataSchema,
+          )
+        })) as SessionIndexEntry<SessionMetadataOf<typeof harness>> | undefined,
       delete: (threadId) => index.remove(threadId),
       async fork(harness, threadId, at) {
         // Check before a session opens. Without a sessions store there is no
         // entry, so there is nothing to check.
         const source = await index.get(threadId)
-        if (source?.harness !== undefined && source.harness !== harness.name) {
-          throw new Error(
-            `Thread ${JSON.stringify(threadId)} belongs to harness ${JSON.stringify(source.harness)}, not ${JSON.stringify(harness.name)}.`,
-          )
-        }
+        checkHarness(source, harness)
         // `host.fork` takes the last message to copy, so `before` becomes
         // the message just before it, or `null` before the first one.
         let last: string | null = 'through' in at ? at.through : null

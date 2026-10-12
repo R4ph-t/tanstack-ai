@@ -2,6 +2,7 @@ import { EventType } from '@tanstack/ai'
 import type {
   AnyChatMiddleware,
   AnyTextAdapter,
+  ModelMessage,
   StreamChunk,
 } from '@tanstack/ai'
 
@@ -162,6 +163,18 @@ export function messageTexts(call: any): Array<string> {
       : JSON.stringify(message.content),
   )
 }
+
+/**
+ * The content of each user message that the harness marked as a wake
+ * (`metadata.harness.wake`): the session woke for a background job.
+ */
+export const wakeMessages = (messages: ReadonlyArray<ModelMessage>) =>
+  messages
+    .filter(
+      (message) =>
+        message.role === 'user' && message.metadata?.harness?.wake === true,
+    )
+    .map((message) => message.content)
 
 /**
  * A middleware that sends the model `[hidden]` in place of each message

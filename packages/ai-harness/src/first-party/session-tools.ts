@@ -218,14 +218,12 @@ export function usage(
       const saveCost = async () => {
         const { cost } = sessionCost(ctx.session.snapshot().usage)
         if (cost === undefined) return
-        const entry = await ctx.session.entry()
-        if (!entry) return
-        // Before the first turn ends, the entry has no usage.
-        const tokens = entry.usage ?? NO_TOKENS
-        // ponytail: read, then write. A host write or another agent's write
-        // between the two can be lost until the next run writes the total
-        // again. Upgrade: a change function in updateEntry.
-        await ctx.session.updateEntry({ usage: { ...tokens, cost } })
+        // A change function: it runs again on the new entry when another
+        // write landed first, so the tokens of that write stay. Before the
+        // first turn ends, the entry has no usage.
+        await ctx.session.updateEntry((entry) => ({
+          usage: { ...(entry.usage ?? NO_TOKENS), cost },
+        }))
       }
       // Copy the session totals to the state. Only a call of the lead turn
       // sets the context size.

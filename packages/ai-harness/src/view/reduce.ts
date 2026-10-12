@@ -715,8 +715,12 @@ export function messagesFromTranscript(
   const result: Array<ViewMessage> = []
   messages.forEach((message, index) => {
     const id = message.id ?? `history-${index}`
+    const harness = recordOf(message.metadata?.harness)
+    // The harness sent a wake message (a background job ended), not the
+    // user. The live view never showed it, so a reload does not either.
+    if (message.role === 'user' && harness.wake === true) return
     // The marker of a `session.reset()` shows as a notice, not a message.
-    const reset = recordOf(message.metadata?.harness).reset
+    const reset = harness.reset
     if (message.role === 'user' && isRecord(reset)) {
       result.push({
         id,

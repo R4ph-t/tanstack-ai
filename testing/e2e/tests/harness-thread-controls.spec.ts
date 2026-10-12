@@ -244,6 +244,52 @@ test.describe('harness thread controls', () => {
     )
   })
 
+  test('keeps the metadata an app writes when the next turn writes its usage', async ({
+    request,
+    testId,
+    aimockPort,
+  }) => {
+    const user = client(request, testId, aimockPort)
+    const threadId = `chips-${testId}`
+    const update = (data: Record<string, unknown>) =>
+      request.post('/api/harness-protocol/sessions', {
+        headers: user.json,
+        data: { op: 'update', threadId, ...data },
+      })
+    expect(await user.prompt(threadId, '[harness-chips] one')).toBe(
+      'Chips one.',
+    )
+
+    const updated = await update({
+      pinned: true,
+      metadata: { chips: ['a.ts'] },
+    })
+    expect(updated.status()).toBe(200)
+    expect(await user.prompt(threadId, '[harness-chips] two')).toBe(
+      'Chips two.',
+    )
+
+    const entry = async () => {
+      const list = await request.get('/api/harness-protocol/sessions', {
+        headers: user.headers,
+      })
+      const { entries } = (await list.json()) as {
+        entries: Array<{ threadId: string }>
+      }
+      return entries.find((item) => item.threadId === threadId)
+    }
+    // The host writes the usage of the turn after the answer streams.
+    await expect.poll(entry).toMatchObject({
+      pinned: true,
+      metadata: { chips: ['a.ts'] },
+      usage: { turns: 2 },
+    })
+    // The harness `metadataSchema` refuses metadata of another shape.
+    const refused = await update({ metadata: { chips: 'a.ts' } })
+    expect(refused.status()).toBe(400)
+    expect(await refused.json()).toMatchObject({ error: 'invalid_metadata' })
+  })
+
   test('forks a thread at a message and leaves the source as it was', async ({
     request,
     testId,

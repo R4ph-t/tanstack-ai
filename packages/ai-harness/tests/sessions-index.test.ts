@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { z } from 'zod'
 import { EventType, defineAgent } from '@tanstack/ai'
-import { memoryLogStore, memoryPersistence } from '@tanstack/ai-persistence'
 import {
+  defineSessionIndexStore,
+  memoryLogStore,
+  memoryPersistence,
+} from '@tanstack/ai-persistence'
+import {
+  SessionMetadataError,
   createHarnessHandler,
   createHarnessHost,
   defineHarness,
@@ -10,7 +16,10 @@ import {
 import { createHarnessClient } from '../src/client'
 import { mockAdapter, text, toolCall } from './helpers'
 import type { ModelMessage, StreamChunk, TokenUsage } from '@tanstack/ai'
-import type { SessionIndexPage } from '@tanstack/ai-persistence'
+import type {
+  SessionIndexPage,
+  SessionIndexStore,
+} from '@tanstack/ai-persistence'
 import type { HarnessPersistence, PluginSessionApi } from '../src'
 import type { Reply } from './helpers'
 
@@ -46,6 +55,39 @@ function hostWith(replies: Array<Reply> | Reply = () => text('answer')) {
     adapter: mockAdapter(replies).adapter,
   })
   return { persistence, host, harness }
+}
+
+/** The context items a user pinned to a thread. */
+const chipsSchema = z.object({ chips: z.array(z.string()) })
+
+/** A harness whose session metadata is `chipsSchema`. */
+const chipsHarness = (name = 'test/chips') =>
+  defineHarness({
+    name,
+    adapter: mockAdapter(() => text('answer')).adapter,
+    metadataSchema: chipsSchema,
+  })
+
+/**
+ * A sessions store that forwards to the memory store of `persistence`, with
+ * `overrides` in place of some of its methods.
+ */
+function storeWith(
+  persistence: HarnessPersistence,
+  overrides: (store: Required<SessionIndexStore>) => Partial<SessionIndexStore>,
+) {
+  const store = persistence.stores.sessions
+  if (!store?.getVersioned || !store.upsertIf)
+    throw new Error('The persistence has no compare-and-set sessions store.')
+  const forwarding: Required<SessionIndexStore> = {
+    upsert: (entry) => store.upsert(entry),
+    get: (threadId) => store.get(threadId),
+    list: (options) => store.list(options),
+    delete: (threadId) => store.delete(threadId),
+    getVersioned: store.getVersioned.bind(store),
+    upsertIf: store.upsertIf.bind(store),
+  }
+  return defineSessionIndexStore({ ...forwarding, ...overrides(forwarding) })
 }
 
 /** Open a session with a plugin that hands out its session API. */
@@ -161,6 +203,128 @@ describe('host.sessions', () => {
     expect(await host.sessions.rename('unknown', 'x')).toBeUndefined()
     expect(await host.sessions.get('unknown')).toBeUndefined()
     await host.close()
+  })
+
+  it('updates the title, pin, and metadata from app code, and nothing for an unknown thread', async () => {
+    const host = createHarnessHost({ persistence: memoryPersistence() })
+    const harness = chipsHarness()
+    await host.open(harness, { threadId: 't1', principal: { id: 'u1' } })
+
+    const updated = await host.sessions.update(harness, 't1', {
+      title: 'Chips',
+      pinned: true,
+      metadata: { chips: ['a.ts'] },
+    })
+    const added = await host.sessions.update(harness, 't1', (entry) => ({
+      metadata: { chips: [...(entry.metadata?.chips ?? []), 'b.ts'] },
+    }))
+
+    expect(updated).toMatchObject({ title: 'Chips', pinned: true })
+    expect(added).toMatchObject({
+      title: 'Chips',
+      metadata: { chips: ['a.ts', 'b.ts'] },
+    })
+    expect(await host.sessions.get('t1')).toMatchObject({
+      principal: { id: 'u1' },
+      metadata: { chips: ['a.ts', 'b.ts'] },
+    })
+    expect(
+      await host.sessions.update(harness, 'unknown', { title: 'x' }),
+    ).toBeUndefined()
+    await host.close()
+  })
+
+  it('writes nothing when the change function returns undefined', async () => {
+    const { host, harness } = hostWith()
+    await host.open(harness, { threadId: 't1' })
+    const before = await host.sessions.get('t1')
+
+    expect(
+      await host.sessions.update(harness, 't1', () => undefined),
+    ).toBeUndefined()
+    expect(await host.sessions.get('t1')).toEqual(before)
+    await host.close()
+  })
+
+  it('checks metadata with the harness schema, and writes nothing it refuses', async () => {
+    const host = createHarnessHost({ persistence: memoryPersistence() })
+    const harness = chipsHarness()
+    await host.open(harness, { threadId: 't1' })
+
+    const write = host.sessions.update(harness, 't1', {
+      title: 'Never',
+      // @ts-expect-error The schema wants a list of strings.
+      metadata: { chips: 'a.ts' },
+    })
+
+    await expect(write).rejects.toBeInstanceOf(SessionMetadataError)
+    expect((await host.sessions.get('t1'))?.title).toBeUndefined()
+    await host.close()
+  })
+
+  it('refuses an update of a thread that another harness runs', async () => {
+    const { host, harness } = hostWith()
+    await host.open(harness, { threadId: 't1' })
+
+    await expect(
+      host.sessions.update(chipsHarness(), 't1', { title: 'x' }),
+    ).rejects.toThrow('belongs to harness "test/sessions", not "test/chips"')
+    await host.close()
+  })
+
+  it('keeps the write of another host that lands between the read and the write', async () => {
+    const persistence = memoryPersistence()
+    // A store that lets another host write right after the next read.
+    let other: (() => Promise<unknown>) | undefined
+    const racing = storeWith(persistence, (store) => ({
+      getVersioned: async (threadId) => {
+        const read = await store.getVersioned(threadId)
+        const write = other
+        other = undefined
+        await write?.()
+        return read
+      },
+    }))
+    const app = createHarnessHost({
+      persistence: { stores: { ...persistence.stores, sessions: racing } },
+    })
+    const turnEnd = createHarnessHost({ persistence })
+    const harness = chipsHarness()
+    await turnEnd.open(harness, { threadId: 't1' })
+    other = () => turnEnd.sessions.rename('t1', 'From the other host')
+    let runs = 0
+
+    await app.sessions.update(harness, 't1', (entry) => {
+      runs += 1
+      return { metadata: { chips: [...(entry.metadata?.chips ?? []), 'a.ts'] } }
+    })
+
+    expect(runs).toBe(2)
+    expect(await racing.get('t1')).toMatchObject({
+      title: 'From the other host',
+      metadata: { chips: ['a.ts'] },
+    })
+    await app.close()
+    await turnEnd.close()
+  })
+
+  it('throws when another host wins five times in a row', async () => {
+    const persistence = memoryPersistence()
+    const losing = storeWith(persistence, () => ({
+      upsertIf: () => Promise.resolve({ ok: false, reason: 'conflict' }),
+    }))
+    const harness = chipsHarness()
+    const opener = createHarnessHost({ persistence })
+    await opener.open(harness, { threadId: 't1' })
+    const host = createHarnessHost({
+      persistence: { stores: { ...persistence.stores, sessions: losing } },
+    })
+
+    await expect(
+      host.sessions.update(harness, 't1', { title: 'x' }),
+    ).rejects.toThrow('changed on another host 5 times in a row')
+    await host.close()
+    await opener.close()
   })
 
   it('deletes the index entry only, and a later turn does not bring it back', async () => {
@@ -436,6 +600,87 @@ describe('ctx.session.entry and updateEntry', () => {
     await host.close()
   })
 
+  it('types the metadata of a plugin with a schema, and checks its writes with it', async () => {
+    const apis: Array<PluginSessionApi<z.infer<typeof chipsSchema>>> = []
+    const chipsPlugin = definePlugin({
+      name: 'test/chips-plugin',
+      // Stricter than the harness: at most two chips.
+      metadataSchema: chipsSchema.refine(({ chips }) => chips.length <= 2),
+      setup: (ctx) => {
+        apis.push(ctx.session)
+      },
+    })
+    const host = createHarnessHost({ persistence: memoryPersistence() })
+    await host.open(
+      defineHarness({
+        name: 'test/chips',
+        adapter: mockAdapter(() => text('ok')).adapter,
+        metadataSchema: chipsSchema,
+        plugins: () => [chipsPlugin],
+      }),
+      { threadId: 'p1' },
+    )
+    const [api] = apis
+    if (!api) throw new Error('The chips plugin was not set up.')
+
+    await api.updateEntry({ metadata: { chips: ['a.ts', 'b.ts'] } })
+
+    expect((await api.entry())?.metadata?.chips).toEqual(['a.ts', 'b.ts'])
+    await expect(
+      api.updateEntry((entry) => ({
+        metadata: { chips: [...(entry.metadata?.chips ?? []), 'c.ts'] },
+      })),
+    ).rejects.toBeInstanceOf(SessionMetadataError)
+    expect((await host.sessions.get('p1'))?.metadata).toEqual({
+      chips: ['a.ts', 'b.ts'],
+    })
+    await host.close()
+  })
+
+  it('keeps the harness keys that a plugin schema does not know', async () => {
+    const apis: Array<PluginSessionApi<z.infer<typeof chipsSchema>>> = []
+    const chipsPlugin = definePlugin({
+      name: 'test/chips-plugin',
+      metadataSchema: chipsSchema,
+      setup: (ctx) => {
+        apis.push(ctx.session)
+      },
+    })
+    const host = createHarnessHost({ persistence: memoryPersistence() })
+    const harness = defineHarness({
+      name: 'test/chips-theme',
+      adapter: mockAdapter(() => text('ok')).adapter,
+      metadataSchema: chipsSchema.extend({ theme: z.string().optional() }),
+      plugins: () => [chipsPlugin],
+    })
+    await host.open(harness, { threadId: 'p1' })
+    await host.sessions.update(harness, 'p1', {
+      metadata: { chips: [], theme: 'dark' },
+    })
+    const [api] = apis
+    if (!api) throw new Error('The chips plugin was not set up.')
+
+    await api.updateEntry((entry) => ({
+      metadata: { ...entry.metadata, chips: ['a.ts'] },
+    }))
+
+    expect((await host.sessions.get('p1'))?.metadata).toEqual({
+      chips: ['a.ts'],
+      theme: 'dark',
+    })
+    await host.close()
+  })
+
+  it('refuses a metadataSchema that is not a Standard Schema', () => {
+    const jsonSchema = { type: 'object' }
+    expect(() =>
+      defineHarness({ name: 'test/json', metadataSchema: jsonSchema }),
+    ).toThrow('metadataSchema must be a Standard Schema')
+    expect(() =>
+      definePlugin({ name: 'test/json', metadataSchema: jsonSchema }),
+    ).toThrow('metadataSchema must be a Standard Schema')
+  })
+
   it('reads nothing and writes nothing without a sessions store', async () => {
     const { messages, runs, metadata } = memoryPersistence().stores
     const { host, session, api } = await openWithApi({
@@ -458,6 +703,7 @@ describe('sessions over HTTP', () => {
     const harness = defineHarness({
       name: 'test/sessions-http',
       adapter: mockAdapter(() => text('hello')).adapter,
+      metadataSchema: chipsSchema,
     })
     const persistence = memoryPersistence()
     const host = createHarnessHost({ persistence })
@@ -473,7 +719,7 @@ describe('sessions over HTTP', () => {
     const fetch: typeof globalThis.fetch = (input, init) =>
       handler(new Request(input, init))
     const clientOf = (user: string) =>
-      createHarnessClient({
+      createHarnessClient<typeof harness>({
         url: 'http://local/api/harness',
         threadId: `${user}-thread`,
         headers: { 'x-user': user },
@@ -586,6 +832,9 @@ describe('sessions over HTTP', () => {
     )
     await expect(bob.deleteSession('alice-thread')).rejects.toThrow('(404)')
     await expect(
+      bob.updateSession('alice-thread', { title: 'Mine' }),
+    ).rejects.toThrow('(404)')
+    await expect(
       bob.forkSession('alice-thread', { through: idOf(answer) }),
     ).rejects.toThrow('(404)')
     await expect(alice.renameSession('hidden', 'x')).rejects.toThrow('(403)')
@@ -593,6 +842,66 @@ describe('sessions over HTTP', () => {
       principal: { id: 'alice' },
     })
     expect((await host.sessions.get('alice-thread'))?.title).toBeUndefined()
+    await host.close()
+  })
+
+  it('updates the pin and metadata of a session of the user', async () => {
+    const { host, clientOf, chat } = setup()
+    const alice = clientOf('alice')
+    await chat(alice)
+
+    const updated = await alice.updateSession('alice-thread', {
+      pinned: true,
+      metadata: { chips: ['a.ts'] },
+    })
+
+    expect(updated.metadata?.chips).toEqual(['a.ts'])
+    expect(await host.sessions.get('alice-thread')).toMatchObject({
+      pinned: true,
+      metadata: { chips: ['a.ts'] },
+    })
+    await host.close()
+  })
+
+  it('answers 403 for client metadata when the harness has no schema', async () => {
+    const { host, harness } = hostWith()
+    await host.open(harness, { threadId: 't1', principal: { id: 'alice' } })
+    const handler = createHarnessHandler({
+      host,
+      harness,
+      authorize: () => ({ id: 'alice' }),
+    })
+    const post = (body: Record<string, unknown>) =>
+      handler(
+        new Request('http://local/api/harness/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ op: 'update', threadId: 't1', ...body }),
+        }),
+      )
+
+    const refused = await post({ metadata: { project: 'p-1' } })
+    const renamed = await post({ title: 'Allowed' })
+
+    expect(refused.status).toBe(403)
+    expect(await refused.json()).toEqual({ error: 'not_exposed' })
+    expect(renamed.status).toBe(200)
+    expect((await host.sessions.get('t1'))?.metadata).toBeUndefined()
+    await host.close()
+  })
+
+  it('answers 400 for metadata that the harness schema refuses', async () => {
+    const { host, clientOf, chat } = setup()
+    const alice = clientOf('alice')
+    await chat(alice)
+
+    await expect(
+      alice.updateSession('alice-thread', {
+        // @ts-expect-error The schema wants a list of strings.
+        metadata: { chips: 'a.ts' },
+      }),
+    ).rejects.toThrow('(400): invalid_metadata')
+    expect((await host.sessions.get('alice-thread'))?.metadata).toBeUndefined()
     await host.close()
   })
 
@@ -620,6 +929,12 @@ describe('sessions over HTTP', () => {
       }),
     ).toBe(400)
     expect(await post({ op: 'move', threadId: 'alice-thread' })).toBe(400)
+    expect(
+      await post({ op: 'update', threadId: 'alice-thread', metadata: [] }),
+    ).toBe(400)
+    expect(
+      await post({ op: 'update', threadId: 'alice-thread', pinned: 'yes' }),
+    ).toBe(400)
     const list = await handler(
       new Request('http://local/api/harness/sessions?limit=0', {
         headers: { 'x-user': 'alice' },
@@ -634,7 +949,7 @@ describe('sessions over HTTP', () => {
     await host.close()
   })
 
-  it('answers 409 for a fork of a thread that another harness runs', async () => {
+  it('answers 409 for an update or a fork of a thread that another harness runs', async () => {
     const { host, clientOf } = setup()
     const other = defineHarness({
       name: 'test/other',
@@ -649,6 +964,9 @@ describe('sessions over HTTP', () => {
 
     await expect(
       clientOf('alice').forkSession('alice-thread', { through: idOf(answer) }),
+    ).rejects.toThrow('(409): other_harness')
+    await expect(
+      clientOf('alice').updateSession('alice-thread', { title: 'x' }),
     ).rejects.toThrow('(409): other_harness')
     expect(threadIds(await host.sessions.list())).toEqual(['alice-thread'])
     await host.close()

@@ -806,7 +806,7 @@ interface SessionIndexEntry {
     cacheWriteTokens: number
     cost?: number // USD, when a plugin counts it
   }
-  metadata?: Record<string, unknown>
+  metadata?: Record<string, unknown> // app data, for example pinned files
 }
 
 interface SessionIndexListOptions {
@@ -830,6 +830,14 @@ interface SessionIndexStore {
   get(threadId: string): Promise<SessionIndexEntry | undefined>
   list(options?: SessionIndexListOptions): Promise<SessionIndexPage>
   delete(threadId: string): Promise<void>
+  // Optional: compare-and-set. Add both, or neither.
+  getVersioned?(
+    threadId: string,
+  ): Promise<{ entry: SessionIndexEntry; revision: string } | undefined>
+  upsertIf?(
+    entry: SessionIndexEntry,
+    expectedRevision: string | null,
+  ): Promise<{ ok: true; revision: string } | { ok: false; reason: 'conflict' }>
 }
 ```
 
@@ -862,6 +870,32 @@ Rules for `list`:
   The format of the cursor is yours. An entry that changes between two pages can
   move in the order.
 
+### Keep the writes of several hosts
+
+Two hosts can write one entry at the same time. For example, one host writes the
+usage of a turn while another host writes the pinned files of the app. Without
+`getVersioned` and `upsertIf`, the second write can remove the change of the first.
+Add both methods, and the host runs its change again on the new entry when another
+host wrote first.
+
+Rules for `getVersioned` and `upsertIf`:
+
+- `getVersioned` returns the entry and its revision, or `undefined` for an unknown
+  thread. The format of the revision is yours.
+- Each write changes the revision: `upsert` and `upsertIf` both.
+- `upsertIf` writes only when the current revision is `expectedRevision`. Then it
+  returns `{ ok: true, revision }` with the new revision.
+- `expectedRevision: null` means "only when the thread has no entry".
+- On any other revision, `upsertIf` writes nothing and returns
+  `{ ok: false, reason: 'conflict' }`.
+
+In SQL, keep a revision column. Then:
+
+- For a revision, write with `UPDATE ... WHERE thread_id = ? AND revision = ?`.
+  When no row changed, return a conflict.
+- For `null`, write with `INSERT ... ON CONFLICT DO NOTHING`. When no row was
+  added, return a conflict.
+
 The reference implementation is `MemorySessionIndexStore` in
 `packages/ai-persistence/src/memory.ts`. `memoryPersistence().stores.sessions` is an
 instance of it. Its cursor is `<updatedAt>:<threadId>` of the last entry of a page.
@@ -869,7 +903,8 @@ instance of it. Its cursor is `<updatedAt>:<threadId>` of the last entry of a pa
 ### Prove it with the conformance suite
 
 The `sessions` cases of `runPersistenceConformance` run when your persistence has
-`stores.sessions`. A persistence without it needs no `skip` entry. To check the store
+`stores.sessions`. A persistence without it needs no `skip` entry. The
+compare-and-set cases run only when the store has `getVersioned` and `upsertIf`. To check the store
 alone, skip the stores that the suite reads by default:
 
 ```ts

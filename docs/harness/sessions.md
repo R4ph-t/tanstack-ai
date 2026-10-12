@@ -27,10 +27,15 @@ import {
 import { title } from '@tanstack/ai-harness/plugins'
 import { memoryPersistence } from '@tanstack/ai-persistence'
 import { openaiText } from '@tanstack/ai-openai'
+import { z } from 'zod'
+
+// The app data of each session. See "Keep app data on a session" below.
+export const pinnedFilesSchema = z.object({ pinnedFiles: z.array(z.string()) })
 
 export const assistant = defineHarness({
   name: 'acme/assistant',
   adapter: openaiText('gpt-6.1-sol'),
+  metadataSchema: pinnedFilesSchema,
   plugins: () => [title({ adapter: openaiText('gpt-6-luna') })],
 })
 
@@ -72,7 +77,7 @@ const durableHost = createHarnessHost({
 })
 ```
 
-Without `stores.sessions`, `list` is empty, `get` returns `undefined`, and `rename` and `delete` write nothing. The HTTP routes on this page then find no sessions. To write your own store, read the [`SessionIndexStore` contract](../persistence/store-reference#sessionindexstore).
+Without `stores.sessions`, `list` is empty, `get` returns `undefined`, and `rename`, `update`, and `delete` write nothing. The HTTP routes on this page then find no sessions. To write your own store, read the [`SessionIndexStore` contract](../persistence/store-reference#sessionindexstore).
 
 ## List the sessions of a user
 
@@ -223,6 +228,85 @@ await client.deleteSession('chat-1')
 
 A user can change only the sessions that the user owns. For a thread of another user, the handler answers `404`. For a thread that `canAccess` refuses, it answers `403`. The client calls throw for both.
 
+## Keep app data on a session
+
+Your composer lets a user pin files to a chat. The pins must stay with the chat, show again after a reload, and work on each of your servers. Keep them in the `metadata` of the session entry.
+
+The `assistant` at the top of this page has a `metadataSchema`. It types `metadata`, and each write checks it.
+
+Write the pins from your server code. No session has to be open:
+
+```ts group=harness-sessions
+await host.sessions.update(assistant, forked.threadId, {
+  metadata: { pinnedFiles: ['src/auth.ts'] },
+})
+
+// Add one file, and keep the files that are there.
+await host.sessions.update(assistant, forked.threadId, (entry) => ({
+  metadata: {
+    pinnedFiles: [...(entry.metadata?.pinnedFiles ?? []), 'src/login.tsx'],
+  },
+}))
+```
+
+- Each field that you give replaces the stored field: `title`, `pinned`, and `metadata`.
+- A function gets the current entry. Use it to change a part of `metadata`.
+- `update` resolves to the changed entry. For a thread with no entry, it resolves to `undefined`.
+- For metadata that the schema refuses, `update` throws `SessionMetadataError` and writes nothing.
+- For a thread that another harness runs, `update` throws.
+
+In the browser:
+
+```ts group=harness-sessions-client
+const pinned = await client.updateSession(forked.threadId, {
+  metadata: { pinnedFiles: ['src/auth.ts'] },
+})
+console.log(pinned.metadata?.pinnedFiles) // ['src/auth.ts']
+```
+
+The client sends a change object, not a function. The handler answers with an error in these cases, and the call throws:
+
+- `400` with `{ error: 'invalid_metadata', issues }`: the schema refuses the metadata.
+- `403` with `{ error: 'not_exposed' }`: the harness has no `metadataSchema`. Without a schema, only your server code can write `metadata`.
+- `409`: another harness runs the thread.
+
+A write from the client replaces all of `metadata`. So keep a server-only value, such as an org id, in your own store, not in `metadata`.
+
+### Writes from several servers
+
+A turn on one server writes the usage of the thread. At the same time, the app on another server can write the pins. Your store keeps both writes when it has `getVersioned` and `upsertIf`. Then the host runs your change function again on the new entry. `memoryPersistence()` has both. To add them to your own store, read [Keep the writes of several hosts](../persistence/store-reference#keep-the-writes-of-several-hosts).
+
+### Read and write the metadata in a plugin
+
+Give the plugin the same schema. Then `ctx.session.entry()` and `ctx.session.updateEntry()` are typed, and the schema checks each write of the plugin:
+
+```ts group=harness-sessions
+import { defineCommand, definePlugin } from '@tanstack/ai-harness'
+
+export const pins = definePlugin({
+  name: 'acme/pins',
+  metadataSchema: pinnedFilesSchema,
+  setup: (ctx) => ({
+    commands: {
+      unpin: defineCommand({
+        description: 'Unpin a file from this chat',
+        input: z.object({ file: z.string() }),
+        run: ({ file }) =>
+          ctx.session.updateEntry((entry) => ({
+            metadata: {
+              pinnedFiles: (entry.metadata?.pinnedFiles ?? []).filter(
+                (pinned) => pinned !== file,
+              ),
+            },
+          })),
+      }),
+    },
+  }),
+})
+```
+
+Add `pins` to the `plugins` of the harness. If the harness metadata does not fit the schema of a plugin, TypeScript shows an error. The turn hooks of the harness also get a typed `session.entry()`.
+
 ## Show a live status
 
 `host.events()` yields the changes of status and of the index. First it yields the current status of each open session:
@@ -241,7 +325,7 @@ void watch()
 ```
 
 - `status`: `running` (an operation runs), `waiting` (a question or an approval waits for an answer), or `idle`. `at` is the time of the change.
-- `session`: the host wrote an entry, for a new session, the end of a turn, a rename, or a fork. `entry` is the new entry.
+- `session`: the host wrote an entry, for a new session, the end of a turn, a rename, an update, or a fork. `entry` is the new entry.
 - `session-deleted`: the host removed an entry. `entry` is the removed entry.
 
 Each host reports only the sessions that are open in it. A session with no status event is not open, so show it as idle.
@@ -274,4 +358,5 @@ To watch the sessions of many machines from a phone, without a screen of your ow
 
 - A sidebar of past chats, newest first, with a title for each.
 - Rename, remove, fork, and revert, from the server and from the browser.
+- Typed app data on each session, such as the pinned files of a chat.
 - A status for each chat that stays current.

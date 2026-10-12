@@ -750,14 +750,48 @@ function parseSessionCursor(cursor: string) {
 
 class MemorySessionIndexStore implements SessionIndexStore {
   private readonly entries = new Map<string, SessionIndexEntry>()
+  /** The revision of each entry. It goes up on each write. */
+  private readonly revisions = new Map<string, number>()
   upsert(entry: SessionIndexEntry) {
     // Copies in and out, so a caller never changes a stored entry.
     this.entries.set(entry.threadId, structuredClone(entry))
+    this.revisions.set(
+      entry.threadId,
+      (this.revisions.get(entry.threadId) ?? 0) + 1,
+    )
     return Promise.resolve()
   }
   get(threadId: string) {
     const entry = this.entries.get(threadId)
     return Promise.resolve(entry && structuredClone(entry))
+  }
+  getVersioned(threadId: string) {
+    const entry = this.entries.get(threadId)
+    return Promise.resolve(
+      entry && {
+        entry: structuredClone(entry),
+        revision: String(this.revisions.get(threadId)),
+      },
+    )
+  }
+  upsertIf(
+    entry: SessionIndexEntry,
+    expectedRevision: string | null,
+  ): Promise<
+    { ok: true; revision: string } | { ok: false; reason: 'conflict' }
+  > {
+    const current = this.entries.has(entry.threadId)
+      ? String(this.revisions.get(entry.threadId))
+      : null
+    if (current !== expectedRevision)
+      return Promise.resolve({ ok: false, reason: 'conflict' })
+    // No await between the write and the read of its revision, so no other
+    // write lands between them.
+    void this.upsert(entry)
+    return Promise.resolve({
+      ok: true,
+      revision: String(this.revisions.get(entry.threadId)),
+    })
   }
   list(options: SessionIndexListOptions = {}) {
     const { limit, cursor, parentThreadId, principal, search, harness } =
