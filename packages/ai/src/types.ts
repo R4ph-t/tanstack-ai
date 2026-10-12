@@ -702,6 +702,11 @@ export interface TanStackMessageMetadata {
   source?: MessageSource
   stopReason?: 'error' | 'aborted'
   responseId?: string
+  /**
+   * Why the model call of this assistant message ended. A `'length'` message
+   * stopped at the output limit, so its tool calls are not complete.
+   */
+  finishReason?: TanStackRunMetadata['finishReason']
   /** Parent chat run that produced this assistant message. */
   runId?: string
   /**
@@ -1277,6 +1282,16 @@ export interface TextOptions<
    * starts them together, and `'sequential'` runs them one at a time.
    */
   toolExecution?: 'parallel' | 'sequential'
+  /**
+   * The tool result of a call in a model answer that stopped at the output
+   * limit (finish reason `length`). The function form gets the call. Such a
+   * call never runs. When set, each call gets this text as an error result,
+   * and the loop calls the model again, as after a tool phase. Not set: the
+   * answer ends the run, and a kept call gets a default text.
+   */
+  truncatedToolResult?:
+    | string
+    | ((call: { toolCallId: string; toolName: string }) => string)
   /**
    * Retry a model call when the provider error has a wait time (usually a
    * 429). `chat()` waits for the `retryAfterMs` time of the `RUN_ERROR`, then

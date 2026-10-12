@@ -2687,7 +2687,11 @@ export class StreamProcessor {
       if (isIntermediateToolTurn) {
         return
       }
-      if (!chunk.outcome || chunk.outcome.type === 'success') {
+      // The calls of an answer cut at the output limit never run.
+      if (
+        (!chunk.outcome || chunk.outcome.type === 'success') &&
+        this.finishReason !== 'length'
+      ) {
         this.handlePendingToolCalls(chunk.outcome?.pendingToolCallIds)
       }
       this.isDone = true

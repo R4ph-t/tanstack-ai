@@ -233,6 +233,10 @@ function turnBlockOrder(
   return buildBlockOrder(entries)
 }
 
+/** The default tool result of a call in an answer cut at the output limit. */
+const TRUNCATED_TOOL_RESULT =
+  'The answer was cut off at the output limit before this tool call was complete. The call did not run.'
+
 // ===========================
 // Activity Kind
 // ===========================
@@ -590,6 +594,25 @@ export interface TextActivityOptions<
   agentLoopStrategy?: TextOptions['agentLoopStrategy']
   /** How the server tools of one model turn run. Default `'parallel'`. */
   toolExecution?: TextOptions['toolExecution']
+  /**
+   * Continue after a model answer with tool calls that stopped at the output
+   * limit (finish reason `length`). Each call that the provider did not run
+   * gets this text as an error result and does not run. Then the model is
+   * called again, so it can send the calls again with complete arguments.
+   * The function form gets the call. Not set: the answer ends the run.
+   *
+   * @example
+   * ```ts
+   * chat({
+   *   adapter,
+   *   messages,
+   *   tools,
+   *   truncatedToolResult: (call) =>
+   *     `Tool call "${call.toolName}" was cut off. Send it again.`,
+   * })
+   * ```
+   */
+  truncatedToolResult?: TextOptions['truncatedToolResult']
   /**
    * Retry a rate-limited model call after the wait the provider asks for.
    *
@@ -2146,8 +2169,10 @@ class TextEngine<
     if (chunk.type === EventType.RUN_FINISHED) {
       const model = chunk.model ?? incoming?.model
       const responseId = chunk.responseId ?? incoming?.responseId
+      const finishReason = chunk.finishReason ?? incoming?.finishReason
       if (model !== undefined) metadata.model = model
       if (responseId !== undefined) metadata.responseId = responseId
+      if (finishReason) metadata.finishReason = finishReason
     }
     if (chunk.type === EventType.RUN_ERROR) {
       metadata.stopReason ??= 'error'
@@ -2635,6 +2660,47 @@ class TextEngine<
 
     this.addAssistantToolCallMessage(toolCalls)
 
+    // The output limit cut this answer. Each call that the provider did not
+    // run has its error result now (closeTruncatedToolCalls). No call runs,
+    // and the loop goes on, so the model can call again.
+    if (this.lastFinishReason === 'length') {
+      // A client reads it as a tool turn, so it waits for the next call.
+      this.deferredToolCallRunFinishedChunks =
+        this.deferredToolCallRunFinishedChunks.map((chunk) =>
+          chunk.type === EventType.RUN_FINISHED
+            ? { ...chunk, finishReason: 'tool_calls' }
+            : chunk,
+        )
+      yield* this.flushDeferredToolCallRunFinishedChunks()
+      const results = toolCalls.flatMap((call): Array<ToolResult> => {
+        const result = this.messages.find(
+          (message) =>
+            message.role === 'tool' && message.toolCallId === call.id,
+        )
+        return result
+          ? [
+              {
+                toolCallId: call.id,
+                toolName: call.function.name,
+                result: result.content,
+                state: 'output-error',
+              },
+            ]
+          : []
+      })
+      for (const chunk of this.buildToolResultChunks(
+        results,
+        finishEvent,
+        undefined,
+        true,
+      )) {
+        yield* this.pipeThroughMiddleware(chunk)
+      }
+      this.toolCallManager.clear()
+      this.setToolPhase('continue')
+      return
+    }
+
     // Handle undiscovered lazy tool calls with self-correcting error messages
     const undiscoveredLazyResults: Array<ToolResult> = []
     const executableToolCalls = toolCalls.filter((tc) => {
@@ -2902,7 +2968,14 @@ class TextEngine<
 
   private shouldExecuteToolPhase(): boolean {
     return (
-      this.lastFinishReason === 'tool_calls' &&
+      (this.lastFinishReason === 'tool_calls' ||
+        (this.lastFinishReason === 'length' &&
+          this.params.truncatedToolResult !== undefined &&
+          // Provider-executed calls have their results. With no other call,
+          // the cut answer ends the run like a text answer.
+          this.toolCallManager
+            .getToolCalls()
+            .some((call) => !isProviderExecutedToolCall(call)))) &&
       this.tools.length > 0 &&
       this.toolCallManager.hasToolCalls()
     )
@@ -3051,8 +3124,38 @@ class TextEngine<
         },
       ]),
     ]
+    this.closeTruncatedToolCalls(from)
     this.saveMidConversationChange(from)
     this.middlewareCtx.messages = this.messages
+  }
+
+  /**
+   * Give each call of the assistant messages from index `from` an error result
+   * when the output limit cut their answer. Such a call is not complete, so it
+   * never runs and asks for nothing. A provider-executed call has its result.
+   */
+  private closeTruncatedToolCalls(from: number): void {
+    const cut = this.messages
+      .slice(from)
+      .flatMap((message) =>
+        tanstackMetadata(message)?.finishReason === 'length'
+          ? (message.toolCalls ?? []).filter(
+              (call) => !isProviderExecutedToolCall(call),
+            )
+          : [],
+      )
+    if (cut.length === 0) return
+    const option = this.params.truncatedToolResult
+    this.messages = [
+      ...this.messages,
+      ...cut.map((call): ModelMessage => {
+        const text =
+          typeof option === 'function'
+            ? option({ toolCallId: call.id, toolName: call.function.name })
+            : (option ?? TRUNCATED_TOOL_RESULT)
+        return { role: 'tool', toolCallId: call.id, content: text, error: text }
+      }),
+    ]
   }
 
   private addTerminalAssistantMessages(): void {
@@ -3179,6 +3282,7 @@ class TextEngine<
     }
 
     this.messages = messages
+    this.closeTruncatedToolCalls(startedLength)
     // An in-place update does not grow the array. The assistant message is
     // already at existingStructuredIndex, so a search from the old length
     // misses it and leaves the record pending.
@@ -3831,6 +3935,7 @@ class TextEngine<
     results: Array<ToolResult>,
     _finishEvent: RunFinishedEvent,
     argsMap?: Map<string, string>,
+    replaceExisting = false,
   ): Array<AdapterYieldChunk> {
     const chunks: Array<AdapterYieldChunk> = []
 
@@ -3912,17 +4017,19 @@ class TextEngine<
         }
       })
       const isDeniedResult = result.outcome === 'denied'
-      const existingToolResultIdx = isDeniedResult
-        ? this.messages.findIndex(
-            (message) =>
-              message.role === 'tool' &&
-              message.toolCallId === result.toolCallId,
-          )
-        : -1
+      const existingToolResultIdx =
+        isDeniedResult || replaceExisting
+          ? this.messages.findIndex(
+              (message) =>
+                message.role === 'tool' &&
+                message.toolCallId === result.toolCallId,
+            )
+          : -1
       const resultMessageIdx =
         existingToolResultIdx >= 0 ? existingToolResultIdx : placeholderIdx
 
-      // Only a denied result keeps the old message's fields. A replaced
+      // Only a denied result or `replaceExisting` (the cut calls of an answer
+      // at the output limit) keeps the old message's fields. A replaced
       // pendingExecution placeholder must not leak into the real result.
       const existingToolMessage =
         existingToolResultIdx >= 0
@@ -4041,8 +4148,15 @@ class TextEngine<
 
     for (const message of this.messages) {
       if (message.role === 'assistant' && message.toolCalls) {
-        const stopReason = tanstackMetadata(message)?.stopReason
-        if (stopReason === 'error' || stopReason === 'aborted') continue
+        const metadata = tanstackMetadata(message)
+        // The calls of a failed answer, or of an answer that the output limit
+        // cut, are not complete. They never run.
+        if (
+          metadata?.stopReason === 'error' ||
+          metadata?.stopReason === 'aborted' ||
+          metadata?.finishReason === 'length'
+        )
+          continue
         for (const toolCall of message.toolCalls) {
           // Provider-executed tool calls (e.g. Anthropic `web_search`) were
           // already run by the provider; they carry no client result, so they
