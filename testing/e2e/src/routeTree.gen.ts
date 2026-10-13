@@ -84,6 +84,8 @@ import { Route as ApiDurableDeliveryRouteImport } from './routes/api.durable-del
 import { Route as ApiDurableTakeoverRouteImport } from './routes/api.durable-takeover'
 import { Route as ApiEmbeddingRouteImport } from './routes/api.embedding'
 import { Route as ApiFakeTextRouteImport } from './routes/api.fake-text'
+import { Route as ApiHarnessContinueRouteImport } from './routes/api.harness-continue'
+import { Route as ApiHarnessRetryAfterRouteImport } from './routes/api.harness-retry-after'
 import { Route as ApiFileSourceWireRouteImport } from './routes/api.file-source-wire'
 import { Route as ApiForeignChunkEventsRouteImport } from './routes/api.foreign-chunk-events'
 import { Route as ApiForeignClientToolRouteImport } from './routes/api.foreign-client-tool'
@@ -568,6 +570,16 @@ const ApiEmbeddingRoute = ApiEmbeddingRouteImport.update({
 const ApiFakeTextRoute = ApiFakeTextRouteImport.update({
   id: '/api/fake-text',
   path: '/api/fake-text',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiHarnessContinueRoute = ApiHarnessContinueRouteImport.update({
+  id: '/api/harness-continue',
+  path: '/api/harness-continue',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiHarnessRetryAfterRoute = ApiHarnessRetryAfterRouteImport.update({
+  id: '/api/harness-retry-after',
+  path: '/api/harness-retry-after',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiFileSourceWireRoute = ApiFileSourceWireRouteImport.update({
@@ -1135,6 +1147,8 @@ export interface FileRoutesByFullPath {
   '/api/durable-takeover': typeof ApiDurableTakeoverRoute
   '/api/embedding': typeof ApiEmbeddingRoute
   '/api/fake-text': typeof ApiFakeTextRoute
+  '/api/harness-continue': typeof ApiHarnessContinueRoute
+  '/api/harness-retry-after': typeof ApiHarnessRetryAfterRoute
   '/api/file-source-wire': typeof ApiFileSourceWireRoute
   '/api/foreign-chunk-events': typeof ApiForeignChunkEventsRoute
   '/api/foreign-client-tool': typeof ApiForeignClientToolRoute
@@ -1305,6 +1319,8 @@ export interface FileRoutesByTo {
   '/api/durable-takeover': typeof ApiDurableTakeoverRoute
   '/api/embedding': typeof ApiEmbeddingRoute
   '/api/fake-text': typeof ApiFakeTextRoute
+  '/api/harness-continue': typeof ApiHarnessContinueRoute
+  '/api/harness-retry-after': typeof ApiHarnessRetryAfterRoute
   '/api/file-source-wire': typeof ApiFileSourceWireRoute
   '/api/foreign-chunk-events': typeof ApiForeignChunkEventsRoute
   '/api/foreign-client-tool': typeof ApiForeignClientToolRoute
@@ -1476,6 +1492,8 @@ export interface FileRoutesById {
   '/api/durable-takeover': typeof ApiDurableTakeoverRoute
   '/api/embedding': typeof ApiEmbeddingRoute
   '/api/fake-text': typeof ApiFakeTextRoute
+  '/api/harness-continue': typeof ApiHarnessContinueRoute
+  '/api/harness-retry-after': typeof ApiHarnessRetryAfterRoute
   '/api/file-source-wire': typeof ApiFileSourceWireRoute
   '/api/foreign-chunk-events': typeof ApiForeignChunkEventsRoute
   '/api/foreign-client-tool': typeof ApiForeignClientToolRoute
@@ -1648,6 +1666,8 @@ export interface FileRouteTypes {
     | '/api/durable-takeover'
     | '/api/embedding'
     | '/api/fake-text'
+    | '/api/harness-continue'
+    | '/api/harness-retry-after'
     | '/api/file-source-wire'
     | '/api/foreign-chunk-events'
     | '/api/foreign-client-tool'
@@ -1818,6 +1838,8 @@ export interface FileRouteTypes {
     | '/api/durable-takeover'
     | '/api/embedding'
     | '/api/fake-text'
+    | '/api/harness-continue'
+    | '/api/harness-retry-after'
     | '/api/file-source-wire'
     | '/api/foreign-chunk-events'
     | '/api/foreign-client-tool'
@@ -1988,6 +2010,8 @@ export interface FileRouteTypes {
     | '/api/durable-takeover'
     | '/api/embedding'
     | '/api/fake-text'
+    | '/api/harness-continue'
+    | '/api/harness-retry-after'
     | '/api/file-source-wire'
     | '/api/foreign-chunk-events'
     | '/api/foreign-client-tool'
@@ -2159,6 +2183,8 @@ export interface RootRouteChildren {
   ApiDurableTakeoverRoute: typeof ApiDurableTakeoverRoute
   ApiEmbeddingRoute: typeof ApiEmbeddingRoute
   ApiFakeTextRoute: typeof ApiFakeTextRoute
+  ApiHarnessContinueRoute: typeof ApiHarnessContinueRoute
+  ApiHarnessRetryAfterRoute: typeof ApiHarnessRetryAfterRoute
   ApiFileSourceWireRoute: typeof ApiFileSourceWireRoute
   ApiForeignChunkEventsRoute: typeof ApiForeignChunkEventsRoute
   ApiForeignClientToolRoute: typeof ApiForeignClientToolRoute
@@ -2775,6 +2801,20 @@ declare module '@tanstack/react-router' {
       path: '/api/fake-text'
       fullPath: '/api/fake-text'
       preLoaderRoute: typeof ApiFakeTextRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/harness-continue': {
+      id: '/api/harness-continue'
+      path: '/api/harness-continue'
+      fullPath: '/api/harness-continue'
+      preLoaderRoute: typeof ApiHarnessContinueRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/harness-retry-after': {
+      id: '/api/harness-retry-after'
+      path: '/api/harness-retry-after'
+      fullPath: '/api/harness-retry-after'
+      preLoaderRoute: typeof ApiHarnessRetryAfterRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/file-source-wire': {
@@ -3569,6 +3609,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApiDurableTakeoverRoute: ApiDurableTakeoverRoute,
   ApiEmbeddingRoute: ApiEmbeddingRoute,
   ApiFakeTextRoute: ApiFakeTextRoute,
+  ApiHarnessContinueRoute: ApiHarnessContinueRoute,
+  ApiHarnessRetryAfterRoute: ApiHarnessRetryAfterRoute,
   ApiFileSourceWireRoute: ApiFileSourceWireRoute,
   ApiForeignChunkEventsRoute: ApiForeignChunkEventsRoute,
   ApiForeignClientToolRoute: ApiForeignClientToolRoute,
