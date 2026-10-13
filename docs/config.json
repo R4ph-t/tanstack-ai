@@ -920,6 +920,82 @@
       "tab": "guides"
     },
     {
+      "label": "Harness",
+      "tab": "guides",
+      "children": [
+        {
+          "label": "Build your first harness",
+          "to": "harness/overview",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Send and show media",
+          "to": "harness/media",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Durable sessions",
+          "to": "harness/durable-sessions",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "List, rename, and fork sessions",
+          "to": "harness/sessions",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Run side effects once",
+          "to": "harness/durable-tools",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Build on the session log",
+          "to": "harness/session-log",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Control how a turn ends",
+          "to": "harness/turn-control",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Store settings per thread",
+          "to": "harness/thread-settings",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Compact a long session",
+          "to": "harness/compaction",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Fork and reset a thread",
+          "to": "harness/fork-and-reset",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Share one log between sessions",
+          "to": "harness/shared-logs",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Write a plugin",
+          "to": "harness/plugins",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Track usage and cost",
+          "to": "harness/usage",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Run agents from a harness",
+          "to": "harness/subagents",
+          "addedAt": "2026-10-13"
+        }
+      ]
+    },
+    {
       "label": "Sandboxes",
       "tab": "guides",
       "children": [
