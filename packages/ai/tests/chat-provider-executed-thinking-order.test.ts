@@ -17,6 +17,7 @@ import {
   serverTool,
 } from './test-utils'
 import { EventType } from '../src/types'
+import { maxIterations } from '../src/activities/chat/agent-loop-strategies'
 import type { ModelMessage, StreamChunk, UIMessage } from '../src/types'
 
 /**
@@ -441,6 +442,9 @@ describe('provider-executed tools interleaved with signed thinking', () => {
       )
     })
 
+    const DEFAULT_TEXT =
+      'The answer stopped at the output limit, so no tool call in it ran. Send the tool calls again. Do not repeat text you already wrote. If one call has a large input, split the work into smaller calls.'
+
     it('gives the calls of an answer cut at the output limit an error result, so a later run does not run them', async () => {
       const lookup = vi.fn(() => ({ found: true }))
       const { adapter, calls } = createMockAdapter({
@@ -481,8 +485,7 @@ describe('provider-executed tools interleaved with signed thinking', () => {
         }) as AsyncIterable<StreamChunk>,
       )
 
-      const text =
-        'The answer was cut off at the output limit before this tool call was complete. The call did not run.'
+      const text = DEFAULT_TEXT
       expect(transcript.filter((message) => message.role === 'tool')).toEqual([
         { role: 'tool', toolCallId: 'call_1', content: text, error: text },
       ])
@@ -499,7 +502,7 @@ describe('provider-executed tools interleaved with signed thinking', () => {
       expect(calls).toHaveLength(2)
     })
 
-    it('with truncatedToolResult, gives the cut call that text and calls the model again', async () => {
+    it('with a strategy that goes on, gives the cut call the text and calls the model again', async () => {
       const lookup = vi.fn(() => ({ found: true }))
       const { adapter, calls } = createMockAdapter({
         iterations: [
@@ -528,7 +531,7 @@ describe('provider-executed tools interleaved with signed thinking', () => {
           adapter,
           messages: [{ role: 'user', content: 'Research' }],
           tools: [serverTool('lookup', lookup)],
-          truncatedToolResult: 'Cut off. Not run.',
+          agentLoopStrategy: maxIterations(5),
         }) as AsyncIterable<StreamChunk>,
       )
 
@@ -546,7 +549,7 @@ describe('provider-executed tools interleaved with signed thinking', () => {
         { assistant: ['srvtoolu_1'] },
         { assistant: ['call_1'] },
         // The provider-executed call keeps its own result.
-        { tool: 'call_1', content: 'Cut off. Not run.' },
+        { tool: 'call_1', content: DEFAULT_TEXT },
       ])
     })
   })

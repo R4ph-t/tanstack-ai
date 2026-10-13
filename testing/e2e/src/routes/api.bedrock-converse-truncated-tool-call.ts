@@ -1,5 +1,11 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { chat, createChatOptions, toolDefinition } from '@tanstack/ai'
+import {
+  chat,
+  createChatOptions,
+  defineChatMiddleware,
+  maxIterations,
+  toolDefinition,
+} from '@tanstack/ai'
 import { BedrockConverseTextAdapter } from '@tanstack/ai-bedrock'
 import { NodeHttpHandler } from '@smithy/node-http-handler'
 import { z } from 'zod'
@@ -27,15 +33,20 @@ class Http1ConverseAdapter extends BedrockConverseTextAdapter<typeof MODEL> {
  * The answer of the first model call has one tool call and stops at
  * `max_tokens` (the fixture in `fixtures/truncated-tool-call` sets
  * `finishReason: 'length'`). Converse keeps the `length` finish with the
- * call. With `truncatedToolResult`, the call does not run, it gets the text
- * as its error result, and the model is called again.
+ * call. The call never runs, and it gets an error tool result. aimock sends
+ * fixture input that is not JSON as `{}`, so the input here is complete.
+ *
+ * - Default strategy: the run ends with `length`.
+ * - `?retry`: `maxIterations(5)` goes on after `length`. A middleware
+ *   replaces the error text of the cut call, and the model is called again.
  */
 export const Route = createFileRoute(
   '/api/bedrock-converse-truncated-tool-call',
 )({
   server: {
     handlers: {
-      POST: async () => {
+      POST: async ({ request }) => {
+        const retry = new URL(request.url).searchParams.has('retry')
         const adapter = new Http1ConverseAdapter(
           {
             apiKey: DUMMY_KEY,
@@ -56,6 +67,7 @@ export const Route = createFileRoute(
 
         let text = ''
         const toolResults: Array<unknown> = []
+        const finishReasons: Array<string | undefined> = []
         let runError: string | undefined
         try {
           for await (const chunk of chat({
@@ -67,17 +79,50 @@ export const Route = createFileRoute(
                 content: '[truncated-tool-call] weather in Paris',
               },
             ],
-            truncatedToolResult: ({ toolName }) =>
-              `Tool call "${toolName}" was cut off. Send it again.`,
+            ...(retry && {
+              agentLoopStrategy: maxIterations(5),
+              middleware: [
+                defineChatMiddleware({
+                  onAfterToolCall(_ctx, info) {
+                    const cut =
+                      info.error instanceof Error &&
+                      'code' in info.error &&
+                      info.error.code === 'max_tokens'
+                    if (!cut) return
+                    return {
+                      type: 'replaceResult',
+                      result: `Tool call "${info.toolName}" was cut off. Send it again.`,
+                    }
+                  },
+                }),
+              ],
+            }),
           })) {
             if (chunk.type === 'TEXT_MESSAGE_CONTENT') text += chunk.delta
             if (chunk.type === 'TOOL_CALL_RESULT') {
               toolResults.push(chunk.content)
             }
+            if (chunk.type === 'RUN_FINISHED') {
+              const tanstack = chunk.metadata?.tanstack
+              finishReasons.push(
+                tanstack &&
+                  typeof tanstack === 'object' &&
+                  'finishReason' in tanstack &&
+                  typeof tanstack.finishReason === 'string'
+                  ? tanstack.finishReason
+                  : undefined,
+              )
+            }
             if (chunk.type === 'RUN_ERROR') runError = chunk.message
           }
           if (runError !== undefined) throw new Error(runError)
-          return Response.json({ ok: true, runs, toolResults, text })
+          return Response.json({
+            ok: true,
+            runs,
+            toolResults,
+            text,
+            finishReasons,
+          })
         } catch (error) {
           return Response.json({
             ok: false,

@@ -155,11 +155,11 @@ export async function POST(request: Request) {
 2. LLM calls `get_clothing_advice({temperature: 62, conditions: "cloudy"})` → Returns `{recommendation: "Light jacket recommended"}`
 3. LLM generates: "The weather in San Francisco is 62°F and cloudy. I recommend wearing a light jacket."
 
-The loop continues only while the model's finish reason is `tool_calls` (with pending tool calls) **and** the agent loop strategy permits another iteration; it ends as soon as the model returns a normal `stop` finish reason.
+The loop continues only while the model's finish reason is `tool_calls` (with pending tool calls) **and** the agent loop strategy permits another iteration. It ends as soon as the model returns a normal `stop` finish reason. An answer that [hits the output limit](#when-the-output-limit-cuts-a-tool-call) is a special case.
 
 ### Controlling the loop
 
-By default the loop is bounded by `maxIterations(5)` — after five **model turns** it stops even if the model would keep calling tools. Override this with the `agentLoopStrategy` option.
+By default, the loop stops after five **model turns** (`maxIterations(5)`), even if the model calls more tools. It also stops after an answer that [hits the output limit](#when-the-output-limit-cuts-a-tool-call) (`untilFinishReason(["length"])`). Override this with the `agentLoopStrategy` option.
 
 Other built-in strategies:
 
@@ -191,12 +191,12 @@ export async function POST(request: Request) {
 
 ### When the output limit cuts a tool call
 
-A model can run out of output tokens in the middle of a tool call, for example while it writes a long file. The provider stops with the finish reason `length`, and the input of the call is incomplete. `chat()` never runs such a call. By default, the run ends.
+A model can run out of output tokens in the middle of a tool call, for example while it writes a long file. The provider stops with the finish reason `length`, and the input of the call is not complete. `chat()` never runs such a call. It asks for no approval and starts no client tool. Each cut call gets an error tool result instead.
 
-Set `truncatedToolResult`, and the model can try again:
+By default, the run then ends with the finish reason `length`. To let the model send the cut call again, use a strategy that does not stop on `length`:
 
 ```typescript
-import { chat, toServerSentEventsResponse } from "@tanstack/ai";
+import { chat, maxIterations, toServerSentEventsResponse } from "@tanstack/ai";
 import { openaiText } from "@tanstack/ai-openai";
 import { writeFile } from "./tools";
 
@@ -206,25 +206,42 @@ export async function POST(request: Request) {
     adapter: openaiText("gpt-6.1-sol"),
     messages,
     tools: [writeFile],
-    truncatedToolResult: (call) =>
-      `Tool call "${call.toolName}" did not run: your answer hit the output limit, so its input can be incomplete. Call it again with the complete input.`,
+    agentLoopStrategy: maxIterations(5),
   });
   return toServerSentEventsResponse(stream);
 }
 ```
 
-What happens when an answer with tool calls stops at the output limit:
+Then this happens after a cut answer:
 
-1. The answer keeps its tool calls in the transcript.
-2. Each call gets an error tool result with your text. The call does not run, and it asks for no approval and no client tool.
-3. The loop calls the model again. This counts as one iteration, so `maxIterations` still stops a model that hits the limit every time.
+1. The loop calls the model again. The model reads the error result and sends the call again.
+2. `maxIterations` counts the cut answer as one model turn. A model that hits the limit every time stops at the iteration limit.
 
-Some details:
+The client needs no change. When the loop goes on, the `RUN_FINISHED` event of the cut answer has the finish reason `tool_calls`, so `useChat` keeps the stream open for the next model turn.
 
-- `truncatedToolResult` is a string, or a function that gets the call (`{ toolCallId, toolName }`).
-- The `RUN_FINISHED` event of that model call has the finish reason `tool_calls`, so the client keeps the stream open.
-- Each assistant message that `chat()` stores keeps the finish reason of its model call in `metadata.tanstack.finishReason`. A cut message keeps `length`.
-- If a history has a call of a `length` message with no result, `chat()` does not run that call.
+The default error text tells the model to send the calls again and to split a large input. To use your own text, return a new result from the `onAfterToolCall` middleware hook. The error of a cut call has the code `max_tokens`:
+
+```typescript
+import { defineChatMiddleware } from "@tanstack/ai";
+
+export const cutToolCallText = defineChatMiddleware({
+  onAfterToolCall(_ctx, info) {
+    const cut =
+      info.error instanceof Error &&
+      "code" in info.error &&
+      info.error.code === "max_tokens";
+    if (!cut) return;
+    return {
+      type: "replaceResult",
+      result: `Your call to ${info.toolName} was cut off. Write the file in parts of 200 lines or less.`,
+    };
+  },
+});
+```
+
+Add it with `middleware: [cutToolCallText]` next to `agentLoopStrategy`.
+
+On the server, each assistant message that `chat()` stores keeps `metadata.tanstack.finishReason`. A cut answer has `length`. If a transcript has a cut call with no result, `chat()` does not run that call.
 
 ### Tool-call budgets (middleware recipe)
 

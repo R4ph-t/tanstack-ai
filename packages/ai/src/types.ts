@@ -1307,16 +1307,6 @@ export interface TextOptions<
    */
   toolExecution?: 'parallel' | 'sequential'
   /**
-   * The tool result of a call in a model answer that stopped at the output
-   * limit (finish reason `length`). The function form gets the call. Such a
-   * call never runs. When set, each call gets this text as an error result,
-   * and the loop calls the model again, as after a tool phase. Not set: the
-   * answer ends the run, and a kept call gets a default text.
-   */
-  truncatedToolResult?:
-    | string
-    | ((call: { toolCallId: string; toolName: string }) => string)
-  /**
    * Retry a model call when the provider error has a wait time (usually a
    * 429). `chat()` waits for the `retryAfterMs` time of the `RUN_ERROR`, then
    * calls the model again. It retries only when the wait time is at most

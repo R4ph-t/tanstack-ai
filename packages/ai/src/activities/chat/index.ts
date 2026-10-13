@@ -96,7 +96,11 @@ import {
   hashSchemaInput,
   normalizeApprovalSchema,
 } from './tools/approval-schema'
-import { maxIterations as maxIterationsStrategy } from './agent-loop-strategies'
+import {
+  combineStrategies,
+  maxIterations as maxIterationsStrategy,
+  untilFinishReason,
+} from './agent-loop-strategies'
 import { isCancelRequestedReason } from './cancel'
 import {
   applyActivityDeltaToRecords,
@@ -234,9 +238,13 @@ function turnBlockOrder(
   return buildBlockOrder(entries)
 }
 
-/** The default tool result of a call in an answer cut at the output limit. */
+/**
+ * The tool result of a call in an answer cut at the output limit. Middleware
+ * `onAfterToolCall` can replace it: the error of such a call has the code
+ * `'max_tokens'`.
+ */
 const TRUNCATED_TOOL_RESULT =
-  'The answer was cut off at the output limit before this tool call was complete. The call did not run.'
+  'The answer stopped at the output limit, so no tool call in it ran. Send the tool calls again. Do not repeat text you already wrote. If one call has a large input, split the work into smaller calls.'
 
 // ===========================
 // Activity Kind
@@ -591,29 +599,15 @@ export interface TextActivityOptions<
   reasoning?: ReasoningOptionFor<AdapterReasoning<TAdapter>>
   /** AbortController for cancellation */
   abortController?: TextOptions['abortController']
-  /** Strategy for controlling the agent loop */
+  /**
+   * Strategy for controlling the agent loop. Default:
+   * `combineStrategies([maxIterations(5), untilFinishReason(['length'])])`.
+   * A strategy that goes on after a `length` answer makes the model send the
+   * cut tool calls of that answer again.
+   */
   agentLoopStrategy?: TextOptions['agentLoopStrategy']
   /** How the server tools of one model turn run. Default `'parallel'`. */
   toolExecution?: TextOptions['toolExecution']
-  /**
-   * Continue after a model answer with tool calls that stopped at the output
-   * limit (finish reason `length`). Each call that the provider did not run
-   * gets this text as an error result and does not run. Then the model is
-   * called again, so it can send the calls again with complete arguments.
-   * The function form gets the call. Not set: the answer ends the run.
-   *
-   * @example
-   * ```ts
-   * chat({
-   *   adapter,
-   *   messages,
-   *   tools,
-   *   truncatedToolResult: (call) =>
-   *     `Tool call "${call.toolName}" was cut off. Send it again.`,
-   * })
-   * ```
-   */
-  truncatedToolResult?: TextOptions['truncatedToolResult']
   /**
    * Retry a rate-limited model call after the wait the provider asks for.
    *
@@ -1007,6 +1001,8 @@ class TextEngine<
   /** Tool call IDs already counted toward `toolCallCount` (avoids double-count on resume). */
   private readonly countedToolCallIds = new Set<string>()
   private lastFinishReason: string | null = null
+  /** The loop decision of a cut answer, from its tool phase (processToolCalls). */
+  private cutAnswerContinues: boolean | undefined
   private streamStartTime = 0
   private totalChunkCount = 0
   private currentMessageId: string | null = null
@@ -1165,7 +1161,11 @@ class TextEngine<
     }
     this.systemPrompts = config.params.systemPrompts || []
     this.loopStrategy =
-      config.params.agentLoopStrategy || maxIterationsStrategy(5)
+      config.params.agentLoopStrategy ||
+      combineStrategies([
+        maxIterationsStrategy(5),
+        untilFinishReason(['length']),
+      ])
     this.initialMessageCount = config.params.messages.length
 
     // Extract client state (approvals, client tool results) from original messages BEFORE conversion
@@ -2662,43 +2662,79 @@ class TextEngine<
     this.addAssistantToolCallMessage(toolCalls)
 
     // The output limit cut this answer. Each call that the provider did not
-    // run has its error result now (closeTruncatedToolCalls). No call runs,
-    // and the loop goes on, so the model can call again.
+    // run has its error result now (closeTruncatedToolCalls). No call runs.
     if (this.lastFinishReason === 'length') {
-      // A client reads it as a tool turn, so it waits for the next call.
-      this.deferredToolCallRunFinishedChunks =
-        this.deferredToolCallRunFinishedChunks.map((chunk) =>
-          chunk.type === EventType.RUN_FINISHED
-            ? { ...chunk, finishReason: 'tool_calls' }
-            : chunk,
-        )
-      yield* this.flushDeferredToolCallRunFinishedChunks()
-      const results = toolCalls.flatMap((call): Array<ToolResult> => {
-        const result = this.messages.find(
+      const results: Array<ToolResult> = []
+      for (const call of toolCalls) {
+        const stored = this.messages.find(
           (message) =>
             message.role === 'tool' && message.toolCallId === call.id,
         )
-        return result
-          ? [
-              {
-                toolCallId: call.id,
-                toolName: call.function.name,
-                result: result.content,
-                state: 'output-error',
-              },
-            ]
-          : []
-      })
-      for (const chunk of this.buildToolResultChunks(
+        if (!stored) continue
+        // onAfterToolCall can replace the text. The code tells this error
+        // apart from a failed run.
+        const decision = yield* this.runWhileYielding(
+          this.middlewareRunner.runOnAfterToolCall(this.middlewareCtx, {
+            toolCall: call,
+            tool: this.tools.find((tool) => tool.name === call.function.name),
+            toolName: call.function.name,
+            toolCallId: call.id,
+            ok: false,
+            duration: 0,
+            error: Object.assign(new Error(TRUNCATED_TOOL_RESULT), {
+              code: 'max_tokens',
+            }),
+          }),
+        )
+        results.push({
+          toolCallId: call.id,
+          toolName: call.function.name,
+          result: decision ? decision.result : stored.content,
+          state: 'output-error',
+        })
+      }
+      // This also stores the results, so the loop decision reads them.
+      const resultChunks = this.buildToolResultChunks(
         results,
         finishEvent,
         undefined,
         true,
-      )) {
+      )
+      // Ask the strategy and middleware now, with the state that
+      // shouldContinue() gives them after this cycle. shouldContinue() then
+      // uses this answer. The RUN_FINISHED that the client sees depends on it.
+      const continues = yield* this.runWhileYielding(
+        this.loopContinues(this.iterationCount + 1),
+      )
+      this.cutAnswerContinues = continues
+      if (continues) {
+        // A client reads it as a tool turn, so it waits for the next call.
+        // The chunks are already public, so the finish reason is in the
+        // metadata.
+        this.deferredToolCallRunFinishedChunks =
+          this.deferredToolCallRunFinishedChunks.map((chunk) =>
+            chunk.type === EventType.RUN_FINISHED
+              ? withTanstackMetadata(chunk, { finishReason: 'tool_calls' })
+              : chunk,
+          )
+        yield* this.flushDeferredToolCallRunFinishedChunks()
+      }
+      for (const chunk of resultChunks) {
         yield* this.pipeThroughMiddleware(chunk)
       }
+      // A stopped run ends on the `length` RUN_FINISHED, after the results.
+      // Native combined structured output sends it after its harvest, and
+      // drops it when the harvest fails.
+      if (!continues && this.finalStructuredOutput?.nativeCombined) {
+        this.deferredModelRunFinishedChunks.push(
+          ...this.deferredToolCallRunFinishedChunks,
+        )
+        this.deferredToolCallRunFinishedChunks = []
+      } else if (!continues) {
+        yield* this.flushDeferredToolCallRunFinishedChunks()
+      }
       this.toolCallManager.clear()
-      this.setToolPhase('continue')
+      this.setToolPhase(continues ? 'continue' : 'stop')
       return
     }
 
@@ -2971,7 +3007,6 @@ class TextEngine<
     return (
       (this.lastFinishReason === 'tool_calls' ||
         (this.lastFinishReason === 'length' &&
-          this.params.truncatedToolResult !== undefined &&
           // Provider-executed calls have their results. With no other call,
           // the cut answer ends the run like a text answer.
           this.toolCallManager
@@ -3146,16 +3181,16 @@ class TextEngine<
           : [],
       )
     if (cut.length === 0) return
-    const option = this.params.truncatedToolResult
     this.messages = [
       ...this.messages,
-      ...cut.map((call): ModelMessage => {
-        const text =
-          typeof option === 'function'
-            ? option({ toolCallId: call.id, toolName: call.function.name })
-            : (option ?? TRUNCATED_TOOL_RESULT)
-        return { role: 'tool', toolCallId: call.id, content: text, error: text }
-      }),
+      ...cut.map(
+        (call): ModelMessage => ({
+          role: 'tool',
+          toolCallId: call.id,
+          content: TRUNCATED_TOOL_RESULT,
+          error: TRUNCATED_TOOL_RESULT,
+        }),
+      ),
     ]
   }
 
@@ -4253,8 +4288,20 @@ class TextEngine<
       return true
     }
 
+    // The tool phase of a cut answer asked already.
+    const cutAnswerContinues = this.cutAnswerContinues
+    this.cutAnswerContinues = undefined
+
+    return (
+      (cutAnswerContinues ?? (await this.loopContinues(this.iterationCount))) &&
+      this.toolPhase === 'continue'
+    )
+  }
+
+  /** Ask the loop strategy and middleware `onShouldContinue`. */
+  private async loopContinues(iterationCount: number): Promise<boolean> {
     const state = {
-      iterationCount: this.iterationCount,
+      iterationCount,
       messages: this.messages,
       finishReason: this.lastFinishReason,
       toolCallCount: this.toolCallCount,
@@ -4263,16 +4310,13 @@ class TextEngine<
 
     // Evaluate strategy and middleware unconditionally (even when the
     // strategy already says stop) so every onShouldContinue observer still
-    // sees the final counters; AND all three at the end.
+    // sees the final counters.
     const strategyContinues = this.loopStrategy(state)
     const middlewareContinues = await this.middlewareRunner.runOnShouldContinue(
       this.middlewareCtx,
       state,
     )
-
-    return (
-      strategyContinues && middlewareContinues && this.toolPhase === 'continue'
-    )
+    return strategyContinues && middlewareContinues
   }
 
   /**
