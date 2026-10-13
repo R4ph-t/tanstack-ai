@@ -2174,6 +2174,8 @@ class TextEngine<
       if (model !== undefined) metadata.model = model
       if (responseId !== undefined) metadata.responseId = responseId
       if (finishReason) metadata.finishReason = finishReason
+      if (incoming?.responseItems !== undefined)
+        metadata.responseItems = incoming.responseItems
     }
     if (chunk.type === EventType.RUN_ERROR) {
       metadata.stopReason ??= 'error'
