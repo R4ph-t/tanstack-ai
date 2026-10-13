@@ -1012,6 +1012,11 @@
           "label": "Run agents from a harness",
           "to": "harness/subagents",
           "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Self-host the dashboard",
+          "to": "harness/dashboard",
+          "addedAt": "2026-10-13"
         }
       ]
     },

@@ -2393,6 +2393,21 @@ importers:
         specifier: 4.1.10
         version: 4.1.10(vitest@4.1.11)
 
+  packages/ai-dashboard:
+    devDependencies:
+      '@tanstack/ai':
+        specifier: workspace:*
+        version: link:../ai
+      '@tanstack/ai-harness':
+        specifier: workspace:*
+        version: link:../ai-harness
+      '@tanstack/ai-persistence':
+        specifier: workspace:*
+        version: link:../ai-persistence
+      '@vitest/coverage-v8':
+        specifier: 4.1.10
+        version: 4.1.10(vitest@4.1.11)
+
   packages/ai-devtools:
     dependencies:
       '@tanstack/ai':
@@ -3690,6 +3705,9 @@ importers:
       '@tanstack/ai-compaction':
         specifier: workspace:*
         version: link:../../packages/ai-compaction
+      '@tanstack/ai-dashboard':
+        specifier: workspace:*
+        version: link:../../packages/ai-dashboard
       '@tanstack/ai-elevenlabs':
         specifier: workspace:*
         version: link:../../packages/ai-elevenlabs
