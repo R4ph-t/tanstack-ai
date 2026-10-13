@@ -248,8 +248,8 @@ The `turn` has these fields:
 | `operationId` | The id of the operation that runs the turn. |
 | `inputId` | The id of the input, when the turn has one. |
 | `message` | The user message of the input. `undefined` for a resolve and a continue. |
-| `context` | The `context` of the input. It is client data, so do not trust it. |
-| `principal` | Who sent the input. Default: the principal that opened the session. |
+| `context` | The [context of the input](./inputs#send-context-with-a-message). It is client data, so do not trust it. |
+| `principal` | Who sent the input. Default: the principal that opened the session. See [Share a thread](./shared-threads). |
 | `overrides` | The [overrides of the prompt](./turn-control#give-one-prompt-its-own-settings), when it has some. |
 
 The session uses the picks like this:

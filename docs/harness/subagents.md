@@ -178,6 +178,8 @@ A steer joins only a run of the same sender. A steer from another sender runs as
 
 An agent written as plain code, with no `ctx.chat` call, makes no model call. It gets a steer only as a follow-up.
 
+To message a run from the browser, see [Send a message to a running agent](./connect#send-a-message-to-a-running-agent).
+
 ### Find a run by its id
 
 Your server often has only the id of a run, for example from a button in the UI. Use the session:

@@ -934,6 +934,16 @@
           "addedAt": "2026-10-13"
         },
         {
+          "label": "Connect clients",
+          "to": "harness/connect",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Send inputs safely",
+          "to": "harness/inputs",
+          "addedAt": "2026-10-13"
+        },
+        {
           "label": "Durable sessions",
           "to": "harness/durable-sessions",
           "addedAt": "2026-10-13"
@@ -986,6 +996,16 @@
         {
           "label": "Track usage and cost",
           "to": "harness/usage",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Auth and connectors",
+          "to": "harness/auth",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Share a thread between people",
+          "to": "harness/shared-threads",
           "addedAt": "2026-10-13"
         },
         {
