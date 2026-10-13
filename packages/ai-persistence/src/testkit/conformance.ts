@@ -1627,12 +1627,10 @@ export function runPersistenceConformance(
         // Own ids, because the suite shares one persistence.
         const id = (name: string) => `${name}-${crypto.randomUUID()}`
         const thread = id('inbox-thread')
-        const [in1, in2, other, missing] = [
-          'in-1',
-          'in-2',
-          'in-other',
-          'missing',
-        ].map(id)
+        const in1 = id('in-1')
+        const in2 = id('in-2')
+        const other = id('in-other')
+        const missing = id('missing')
 
         const first = await store.append({
           inputId: in1,
