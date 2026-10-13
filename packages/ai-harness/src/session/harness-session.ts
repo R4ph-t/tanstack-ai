@@ -38,6 +38,11 @@ import type { WaitingSteer } from './types'
 export class HarnessSession<
   THarness extends AnyHarness = AnyHarness,
 > extends SessionTurn<THarness> {
+  /** This session, typed as the full class, for the hooks of each layer. */
+  protected override self(): HarnessSession<THarness> {
+    return this
+  }
+
   /** @internal Mount session plugins and replay inputs left in the inbox. */
   async open(): Promise<void> {
     // First: plugins publish events while they mount.

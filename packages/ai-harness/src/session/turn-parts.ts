@@ -1,7 +1,7 @@
 import { LogRecordsCapability, provideLogRecords } from '@tanstack/ai'
 import { bindDurable, createToolStep } from '../durable-tool'
 import { commonPrefix, stepKey } from '../log'
-import { mediaIdOf } from '../media-ref'
+import { mediaIdOf, mediaOfMessage } from '../media-ref'
 import { LEASE } from '../resume'
 import { HARNESS_EVENTS } from '../types'
 import { addUsage, callUsage } from '../usage'
@@ -10,6 +10,7 @@ import {
   asUserMessage,
   createMessageId,
   customEvent,
+  storedPrincipal,
   isSameSender,
   WAKE_METADATA,
   resetContext,
@@ -342,7 +343,7 @@ export abstract class SessionTurnParts<
           let added: TurnAdditions | undefined
           if (steers.length > 0 && onJoin && running) {
             added = await onJoin({
-              session: this,
+              session: this.self(),
               operationId: ctx.runId,
               inputs: steers.map((steer) => ({
                 inputId: steer.inputId,
@@ -695,7 +696,7 @@ export abstract class SessionTurnParts<
     const hooks = this.harness.turn
     if (!hooks?.beforeFinish) return false
     const added = await hooks.beforeFinish({
-      session: this,
+      session: this.self(),
       operationId: operation.id,
       ...(inputId ? { inputId } : {}),
       cycle,

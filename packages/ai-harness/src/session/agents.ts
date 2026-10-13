@@ -7,9 +7,14 @@ import {
 } from '@tanstack/ai'
 import { withPersistence } from '@tanstack/ai-persistence'
 import { withHarnessContext } from '../agents'
-import { mediaMiddleware } from '../media'
+import { mediaCapture, mediaMiddleware } from '../media'
 import { OperationImpl } from '../operation'
-import { checkpointMiddleware, holdRunLease, repairTranscript } from '../resume'
+import {
+  checkpointMiddleware,
+  holdRunLease,
+  repairTranscript,
+  truncationMiddleware,
+} from '../resume'
 import { HARNESS_EVENTS } from '../types'
 import {
   agentKey,
@@ -21,6 +26,7 @@ import {
   createInputId,
   createMessageId,
   customEvent,
+  storedPrincipal,
   isSameSender,
   resetCut,
   referenceNote,
@@ -481,7 +487,11 @@ export abstract class SessionAgents<
     })
     const durableTools = this.durableTools()
     return {
-      middleware: [checkpoint, ...(durableTools ? [durableTools] : [])],
+      middleware: [
+        checkpoint,
+        truncationMiddleware(this.harness.durability?.truncatedToolResult),
+        ...(durableTools ? [durableTools] : []),
+      ],
       step: this.durableBinding(writer, key).step,
     }
   }
@@ -792,6 +802,8 @@ export abstract class SessionAgents<
           ],
           keys: this.keysOf(principal),
           budget: chain.budget,
+          // No parent chat() call to take it from, so the session's retention.
+          promptCache: this.promptCache.retention,
         },
       )
       for await (const chunk of stream) {

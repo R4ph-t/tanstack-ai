@@ -20,6 +20,7 @@ import {
   errorText,
   cacheObject,
   toolCallOf,
+  storedPrincipal,
   turnContext,
   withoutPlugins,
   settingTools,
@@ -454,7 +455,7 @@ export abstract class SessionTurn<
           messages: resetContext([...history, ...(message ? [message] : [])]),
           agents: rootAgents,
           abortSignal: signal,
-          session: this,
+          session: this.self(),
           ...(sentMessage !== undefined ? { input: sentMessage } : {}),
           operationId: operation.id,
           ...(turn.inputId ? { inputId: turn.inputId } : {}),
@@ -571,6 +572,11 @@ export abstract class SessionTurn<
               detachOnShutdown,
               withPersistence(chatPersistence),
               checkpoint,
+              // The same text as the recovery repair. Early, so a later
+              // middleware can still replace the result of a cut call.
+              truncationMiddleware(
+                this.harness.durability?.truncatedToolResult,
+              ),
               // Before the harness middleware, so its change of each model
               // call (`onConfig`) gets the messages that join at that call.
               ...(rootBag ? [] : [this.steering(ephemeral)]),
@@ -584,10 +590,6 @@ export abstract class SessionTurn<
               ...(keepTools ? [keepTools] : []),
               ...(durableTools ? [durableTools] : []),
               this.detachTools(),
-              // The same text as the recovery repair.
-              truncationMiddleware(
-                this.harness.durability?.truncatedToolResult,
-              ),
               ...(rootBag ? [] : [this.syncFold()]),
               // Again: a middleware that returns `messages` (as `syncFold`
               // does) resets what the model gets to the whole transcript.
@@ -751,7 +753,7 @@ export abstract class SessionTurn<
           const answer = isStopped
             ? undefined
             : await turnHooks.onModelError({
-                session: this,
+                session: this.self(),
                 operationId: operation.id,
                 ...(turn.inputId ? { inputId: turn.inputId } : {}),
                 error: runError,

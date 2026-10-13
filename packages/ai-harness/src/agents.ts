@@ -163,7 +163,7 @@ const contexts = new WeakMap<object, HarnessAgentContext>()
  * A harness session gives them to each agent run it starts from code (a
  * session agent, `harnessContext(ctx).agents.start`, a background child).
  * In a tool-mode child or outside a harness, `step.do` runs `fn` each time
- * and `agents.start` throws.
+ * and `agents.start` throws. Pass the `ctx` that `run` gets, not a copy.
  */
 export function harnessContext(ctx: object): HarnessAgentContext {
   return contexts.get(ctx) ?? NO_SESSION

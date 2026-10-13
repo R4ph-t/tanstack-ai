@@ -1,6 +1,7 @@
 import { isProviderExecutedToolCall, normalizeToolResult } from '@tanstack/ai'
 import { isRecord } from './utils'
 import type {
+  AfterToolCallInfo,
   AnyChatMiddleware,
   ModelMessage,
   RunRecord,
@@ -44,9 +45,14 @@ export type PendingTool = {
 const errorText = (error: unknown) =>
   error instanceof Error ? error.message : String(error)
 
-/** chat() gives a call cut at the output limit the error code `max_tokens`. */
-const isCutCall = (error: unknown) =>
-  isRecord(error) && error.code === 'max_tokens'
+/**
+ * chat() reports a call cut at the output limit with the error code
+ * `max_tokens` and no run time. A tool that ran and failed has a duration.
+ */
+const isCutCall = (info: AfterToolCallInfo) =>
+  info.duration === 0 &&
+  isRecord(info.error) &&
+  info.error.code === 'max_tokens'
 
 /** The text of a call cut at the output limit. */
 function truncatedText(
@@ -69,7 +75,7 @@ export function truncationMiddleware(
   return {
     name: 'harness:truncation',
     onAfterToolCall: (_ctx, info) =>
-      isCutCall(info.error)
+      isCutCall(info)
         ? { type: 'replaceResult', result: truncatedText(truncated, info) }
         : undefined,
   }
@@ -180,7 +186,7 @@ export function checkpointMiddleware(options: {
       )
       // A call cut at the output limit never ran: `truncationMiddleware`
       // owns its text, and recovery writes the same one.
-      if (!onToolResult || isCutCall(info.error)) return
+      if (!onToolResult || isCutCall(info)) return
       // The same content the engine puts in its tool message.
       const message: ModelMessage = info.ok
         ? {

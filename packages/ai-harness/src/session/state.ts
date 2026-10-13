@@ -25,6 +25,7 @@ import {
   customEvent,
   tanstackOf,
   toolCallOf,
+  storedPrincipal,
   SETTINGS,
   changeSettings,
 } from './helpers'
@@ -60,6 +61,7 @@ import type {
   InterruptedTurn,
 } from './types'
 import type { SettingNames } from './helpers'
+import type { HarnessSession } from './harness-session'
 
 /**
  * A layer of {@link HarnessSession}: config, thread settings, revert,

@@ -81,6 +81,7 @@ import type {
   AgentRunImpl,
   AgentChain,
 } from './types'
+import type { HarnessSession } from './harness-session'
 
 /**
  * The fields of a {@link HarnessSession}, and the helpers every layer uses. The
@@ -745,6 +746,7 @@ export abstract class SessionBase<THarness extends AnyHarness = AnyHarness> {
   }
 
   // Implemented by a later layer of the class.
+  protected abstract self(): HarnessSession<THarness>
   protected abstract drain(): void
   protected abstract agentGroup<T>(
     options: { onFailure?: 'cancel-siblings' | 'collect' },
