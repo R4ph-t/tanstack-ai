@@ -1727,6 +1727,7 @@ interface PersistencePlan {
   wantsInterrupts: boolean
   wantsArtifactPersistence: boolean
   runs: AIPersistence['stores']['runs']
+  sessions: AIPersistence['stores']['sessions']
 }
 
 function resolvePersistencePlan(persistence: AIPersistence): PersistencePlan {
@@ -1736,6 +1737,7 @@ function resolvePersistencePlan(persistence: AIPersistence): PersistencePlan {
       persistence.stores.artifacts !== undefined &&
       persistence.stores.blobs !== undefined,
     runs: persistence.stores.runs,
+    sessions: persistence.stores.sessions,
   }
 }
 
@@ -2061,7 +2063,7 @@ export function withPersistence<TStores extends ChatTranscriptStores>(
   const snapshotStreaming = options.snapshotStreaming ?? false
   const snapshotIntervalMs = options.snapshotIntervalMs ?? 1000
   const plan = resolvePersistencePlan(persistence)
-  const { wantsInterrupts, runs } = plan
+  const { wantsInterrupts, runs, sessions } = plan
   const messageStore = persistence.stores.messages
   if (!messageStore) {
     // validateChatPersistenceStores already throws; this narrows for TypeScript.
@@ -2100,9 +2102,7 @@ export function withPersistence<TStores extends ChatTranscriptStores>(
     ...(wantsInterrupts && persistence.stores.interrupts
       ? { interrupts: persistence.stores.interrupts }
       : {}),
-    ...(persistence.stores.sessions
-      ? { sessions: persistence.stores.sessions }
-      : {}),
+    ...(sessions ? { sessions } : {}),
   })
 
   function resetStreaming(state: RunStateEntry) {
