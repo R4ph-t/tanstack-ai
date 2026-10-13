@@ -202,16 +202,19 @@ const USER_KEY = 'sk-e2e-user-key-7f3a'
 
 /**
  * `providerKeys()`: `/connect:openai` asks for the key as a secret question,
- * saves the answer, and the next turn calls the model with that key. The
- * spec reads the `authorization` header in aimock's journal.
+ * saves the answer, and the next turn builds the model adapter with that key.
  */
 async function connectedKey(host: HarnessHost, testId: string | undefined) {
-  const gpt = keyedAdapter(openaiByok, (key) =>
-    createOpenaiChat('gpt-6.1-sol', key, {
+  // The keys the adapter is built with. aimock's journal redacts the
+  // authorization header, so the spec reads them here.
+  const keysUsed: Array<string> = []
+  const gpt = keyedAdapter(openaiByok, (key) => {
+    keysUsed.push(key)
+    return createOpenaiChat('gpt-6.1-sol', key, {
       baseURL: `${LLMOCK_DEFAULT_BASE}/v1`,
       ...(testId ? { defaultHeaders: { 'X-Test-Id': testId } } : {}),
-    }),
-  )
+    })
+  })
   const session = await host.open(
     defineHarness({
       name: 'e2e/harness-provider-keys',
@@ -239,6 +242,7 @@ async function connectedKey(host: HarnessHost, testId: string | undefined) {
     connected,
     text: turn.text,
     key: USER_KEY,
+    usedUserKey: keysUsed.includes(USER_KEY),
   }
 }
 

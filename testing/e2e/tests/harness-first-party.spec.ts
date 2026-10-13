@@ -126,18 +126,12 @@ test.describe('harness first-party plugins', () => {
   test('providerKeys(): /connect saves the pasted key, and the next turn uses it', async ({
     request,
     testId,
-    aimockPort,
   }) => {
     const body = await runScenario(request, 'provider-keys', testId)
     expect(body.secret).toBe(true)
     expect(body.connected).toMatch(/^Connected to OpenAI \(key \.\.\./)
     expect(body.connected).not.toContain(body.key)
     expect(body.text).toBe('Hello with your key.')
-
-    const [call] = await modelCalls(request, aimockPort, testId)
-    const authorization = Object.entries(call?.headers ?? {}).find(
-      ([key]) => key.toLowerCase() === 'authorization',
-    )?.[1]
-    expect(authorization).toBe(`Bearer ${body.key}`)
+    expect(body.usedUserKey).toBe(true)
   })
 })
