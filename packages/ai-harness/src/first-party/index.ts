@@ -24,6 +24,12 @@ export { formatTodos, todos } from './todos'
 export type { Todo } from './todos'
 export { fileCommands, projectInstructions } from './files'
 export { compact, usage } from './session-tools'
+export { providerKeys } from './provider-keys'
+export type {
+  KeyProvider,
+  ProviderKeyStatus,
+  ProviderKeysState,
+} from './provider-keys'
 export { agents, builtInAgents } from './agents'
 export type { AgentProfile } from './agents'
 export { question } from './question'

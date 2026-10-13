@@ -926,7 +926,8 @@
         {
           "label": "Build your first harness",
           "to": "harness/overview",
-          "addedAt": "2026-10-13"
+          "addedAt": "2026-10-13",
+          "updatedAt": "2026-10-13"
         },
         {
           "label": "Send and show media",
@@ -998,6 +999,11 @@
         {
           "label": "Switch between agent profiles",
           "to": "harness/agents",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Connect model providers",
+          "to": "harness/provider-keys",
           "addedAt": "2026-10-13"
         },
         {

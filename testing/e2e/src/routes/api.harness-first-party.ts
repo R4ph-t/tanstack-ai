@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { createFileRoute } from '@tanstack/react-router'
-import { defineAgent, toolDefinition } from '@tanstack/ai'
+import { defineAgent, keyedAdapter, toolDefinition } from '@tanstack/ai'
 import {
   createHarnessHost,
   defineHarness,
@@ -15,13 +15,16 @@ import {
   agents,
   permissions,
   projectInstructions,
+  providerKeys,
   title,
 } from '@tanstack/ai-harness/plugins'
+import { createOpenaiChat } from '@tanstack/ai-openai'
+import { openaiByok } from '@tanstack/ai-openai/byok'
 import { memoryPersistence } from '@tanstack/ai-persistence'
 import { z } from 'zod'
 import type { AnyTextAdapter } from '@tanstack/ai'
 import type { HarnessHost } from '@tanstack/ai-harness'
-import { createTextAdapter } from '@/lib/providers'
+import { LLMOCK_DEFAULT_BASE, createTextAdapter } from '@/lib/providers'
 
 const run = promisify(execFile)
 
@@ -194,9 +197,54 @@ async function sessionTitle(
   return { text: turn.text, title: entry?.title, failures }
 }
 
+/** The key that the user pastes in the `provider-keys` scenario. */
+const USER_KEY = 'sk-e2e-user-key-7f3a'
+
+/**
+ * `providerKeys()`: `/connect:openai` asks for the key as a secret question,
+ * saves the answer, and the next turn calls the model with that key. The
+ * spec reads the `authorization` header in aimock's journal.
+ */
+async function connectedKey(host: HarnessHost, testId: string | undefined) {
+  const gpt = keyedAdapter(openaiByok, (key) =>
+    createOpenaiChat('gpt-6.1-sol', key, {
+      baseURL: `${LLMOCK_DEFAULT_BASE}/v1`,
+      ...(testId ? { defaultHeaders: { 'X-Test-Id': testId } } : {}),
+    }),
+  )
+  const session = await host.open(
+    defineHarness({
+      name: 'e2e/harness-provider-keys',
+      adapter: gpt,
+      plugins: () => [providerKeys({ providers: [openaiByok] })],
+    }),
+    { threadId: 'e2e-keys', principal: { id: 'ada' } },
+  )
+  const connecting = session.command('connect:openai')
+  const deadline = Date.now() + 5_000
+  while (
+    session.snapshot().pendingQuestions.length === 0 &&
+    Date.now() < deadline
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  const [question] = session.snapshot().pendingQuestions
+  // Without a question, `connecting` never settles: fail now.
+  if (!question) throw new Error('/connect:openai asked no question.')
+  await session.answer(question.questionId, USER_KEY)
+  const connected = await connecting
+  const turn = await session.prompt('[first-party-keys] hello')
+  return {
+    secret: question.secret ?? false,
+    connected,
+    text: turn.text,
+    key: USER_KEY,
+  }
+}
+
 /**
  * First-party harness plugins, one scenario per request:
- * `?scenario=agents|plan-subagent|env|title&testId=...`. The models are
+ * `?scenario=agents|plan-subagent|env|title|provider-keys&testId=...`. The models are
  * OpenAI adapters against aimock.
  */
 export const Route = createFileRoute('/api/harness-first-party')({
@@ -227,6 +275,9 @@ export const Route = createFileRoute('/api/harness-first-party')({
               testId,
             ).adapter
             return Response.json(await sessionTitle(host, model, titleModel))
+          }
+          if (scenario === 'provider-keys') {
+            return Response.json(await connectedKey(host, testId))
           }
           return Response.json(
             { error: `Unknown scenario ${scenario}` },
