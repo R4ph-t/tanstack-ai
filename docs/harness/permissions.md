@@ -330,7 +330,7 @@ export const planTools = definePlugin({
 
 ## Known limits
 
-- A rule that allows a tool with no `kind` also lets it run in `plan` mode. `plan` denies only edits, commands, and calls that ask.
+- `plan` denies only edits, commands, and calls that ask. A tool with no rule, or with an `allow` rule and no `kind`, still runs in `plan` mode. Give each tool that changes something a rule with a `kind`.
 - A client that can send inputs to the thread can answer the questions, also with `always`. Control who can open a thread.
 - `permissions()` does not follow links. Your own tool can check the real path of a link with `PermissionDecisionCapability`.
 
