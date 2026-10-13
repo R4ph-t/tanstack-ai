@@ -17,7 +17,7 @@ import type {
   UIMessage,
 } from '@tanstack/ai'
 import { mergeStoredMessages } from './merge-stored'
-import type { InterruptStore, MessageStore } from './types'
+import type { InterruptStore, MessageStore, SessionIndexStore } from './types'
 
 function withSubagentInfo(
   metadata: ModelMessage['metadata'],
@@ -255,6 +255,8 @@ export function createSubagentRunRecorder(stores: {
   messages: MessageStore
   runs?: RunStore
   interrupts?: InterruptStore
+  /** When present, each child gets a session index entry. */
+  sessions?: SessionIndexStore
   /** Minimum milliseconds between writes while a child streams. */
   intervalMs?: number
 }) {
@@ -478,6 +480,48 @@ export function createSubagentRunRecorder(stores: {
       children.get(chunk.parentSubagentRunId)?.processor.processChunk(chunk)
     }
     await saveChild(id)
+    const note = children.get(id)
+    if (stores.sessions && note) await indexChild(stores.sessions, id, note)
+  }
+
+  // One index entry per child. `upsert` replaces the whole entry, so keep the
+  // fields that other writers set, like a title. The child has the owner and
+  // the `harness` name of its parent thread, so a list filtered by them shows
+  // it. ponytail: get-then-upsert, use `upsertIf` if two hosts write one child.
+  // Best-effort: the index is a side store, so a failed write never fails the
+  // run.
+  async function indexChild(
+    sessions: SessionIndexStore,
+    subagentRunId: string,
+    note: ChildNote,
+  ) {
+    const childThreadId = childStoreId(subagentRunId)
+    try {
+      const [current, parent] = await Promise.all([
+        sessions.get(childThreadId),
+        sessions.get(note.parentThreadId),
+      ])
+      const now = Date.now()
+      await sessions.upsert({
+        ...current,
+        threadId: childThreadId,
+        parentThreadId: note.parentThreadId,
+        ...(note.parentToolCallId !== undefined && {
+          parentToolCallId: note.parentToolCallId,
+        }),
+        ...(parent?.principal !== undefined && {
+          principal: parent.principal,
+        }),
+        ...(parent?.harness !== undefined && { harness: parent.harness }),
+        createdAt: current?.createdAt ?? now,
+        updatedAt: now,
+      })
+    } catch (error) {
+      console.warn(
+        `[ai-persistence] session index write failed for '${childThreadId}'`,
+        error,
+      )
+    }
   }
 
   /**

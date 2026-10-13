@@ -2100,6 +2100,9 @@ export function withPersistence<TStores extends ChatTranscriptStores>(
     ...(wantsInterrupts && persistence.stores.interrupts
       ? { interrupts: persistence.stores.interrupts }
       : {}),
+    ...(persistence.stores.sessions
+      ? { sessions: persistence.stores.sessions }
+      : {}),
   })
 
   function resetStreaming(state: RunStateEntry) {
