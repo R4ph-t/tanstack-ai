@@ -981,11 +981,23 @@
         {
           "label": "Write a plugin",
           "to": "harness/plugins",
-          "addedAt": "2026-10-13"
+          "addedAt": "2026-10-13",
+          "updatedAt": "2026-10-13"
         },
         {
           "label": "Track usage and cost",
           "to": "harness/usage",
+          "addedAt": "2026-10-13",
+          "updatedAt": "2026-10-13"
+        },
+        {
+          "label": "Ask before risky tool calls",
+          "to": "harness/permissions",
+          "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Switch between agent profiles",
+          "to": "harness/agents",
           "addedAt": "2026-10-13"
         },
         {

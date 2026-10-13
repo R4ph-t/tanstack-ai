@@ -395,3 +395,5 @@ If a `setup` throws, the session keeps working with no plugins. The promise reje
 - A picker that chooses the model of each turn from its message, context, and sender.
 - Plugins that share services, lists, and events without knowing each other.
 - Commands, agents, and whole plugins that change while the session runs.
+
+Next: add the first-party plugins from `@tanstack/ai-harness/plugins`. [Ask before risky tool calls](./permissions) and [Switch between agent profiles](./agents) are two of them.
