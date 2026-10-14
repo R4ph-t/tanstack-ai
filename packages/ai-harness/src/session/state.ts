@@ -281,7 +281,13 @@ export abstract class SessionState<
   }
 
   /** Change a session setting. It applies at the next turn. */
-  async setConfig(key: string, value: unknown): Promise<Receipt> {
+  async setConfig({
+    key,
+    value,
+  }: {
+    key: string
+    value: unknown
+  }): Promise<Receipt> {
     const inputId = createInputId()
     await this.accept(inputId, { op: 'config', key, value })
     const entry = this.sessionPlugins?.config.get(key)
@@ -580,7 +586,9 @@ export abstract class SessionState<
         const isOwn = (record.thread ?? this.logId) === this.threadId
         if (isOwn && record.type === type) found.push(record)
       }
-      if (entries.length < 256) return found
+      // A store can return fewer than `limit` before the end: stop only at
+      // an empty page.
+      if (entries.length === 0) return found
     }
   }
 
@@ -599,7 +607,13 @@ export abstract class SessionState<
   }
 
   /** Answer a question from `ctx.session.ask`. */
-  async answer(questionId: string, value: unknown): Promise<Receipt> {
+  async answer({
+    questionId,
+    value,
+  }: {
+    questionId: string
+    value: unknown
+  }): Promise<Receipt> {
     const inputId = createInputId()
     // A secret (a key or a password) stays out of the inbox. A restart does
     // not replay an answer, so the inbox never needs it.
@@ -620,8 +634,20 @@ export abstract class SessionState<
       }
       checked = result.data
     }
+    // A cancel or another answer can take the question while the check runs.
+    if (this.questions.get(questionId) !== question) {
+      return this.reject(inputId, 'unknown_question')
+    }
     this.questions.delete(questionId)
-    await this.applied(inputId, 'session')
+    try {
+      await this.applied(inputId, 'session')
+    } catch (error) {
+      // The answer was not stored. The question waits again, unless the
+      // session closes: then nobody can answer it.
+      if (this.closing) question.reject(new Error('Session closed.'))
+      else this.questions.set(questionId, question)
+      throw error
+    }
     this.feed.publish(
       question.operationId,
       customEvent(HARNESS_EVENTS.questionAnswered, { questionId }),
@@ -953,12 +979,16 @@ export abstract class SessionState<
     this.interrupted = stopped
   }
 
-  protected ask(question: Question<SchemaInput | undefined>): Promise<unknown> {
+  protected ask(
+    question: Question<SchemaInput | undefined>,
+    owner?: string,
+  ): Promise<unknown> {
     if (this.closing) return Promise.reject(new Error('Session closed.'))
     const questionId = `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`
-    // On the running chat turn, so a client that streams the turn (`POST
-    // run`) sees it. The session stream has every operation's events.
-    const operationId = this.activeTurn?.id ?? 'session'
+    // On the operation that asks (a command), else on the running chat turn,
+    // so a client that streams that operation sees it, and a cancel of it
+    // rejects the question. The session stream has every operation's events.
+    const operationId = owner ?? this.activeTurn?.id ?? 'session'
     return new Promise((resolve, reject) => {
       this.questions.set(questionId, {
         message: question.message,
