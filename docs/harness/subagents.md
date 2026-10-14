@@ -346,6 +346,23 @@ What you get back:
 - A child that failed before it wrote anything gives you one empty message. It holds only the card, so you can still show that it failed.
 - A nested child works the same way. Pass its own `subagentRunId`.
 
+In the browser, `client.agentTranscript` reads the same messages through [your handler](./connect):
+
+```ts group=harness-subagents-transcript-client
+import { createHarnessClient } from '@tanstack/ai-harness/client'
+import type { studio } from './harness'
+
+const client = createHarnessClient<typeof studio>({
+  url: '/api/harness',
+  threadId: 'user-1-thread',
+  headers: { authorization: 'Bearer my-token' },
+})
+
+export async function childMessages(subagentRunId: string) {
+  return client.agentTranscript(subagentRunId)
+}
+```
+
 You get an empty list when the id is unknown, or when the child belongs to another thread. The id can come from a prompt, so a session never reads the children of another thread. A [fork](./fork-and-reset) copies the agent results, but their children stay with the thread that ran them. So in the fork, `agentTranscript` gives an empty list for them.
 
 ## Route a turn to an agent
