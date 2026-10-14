@@ -102,6 +102,34 @@ describe('client reads and actions', () => {
     await host.close()
   })
 
+  it('renames, updates, and forks a session of the user', async () => {
+    const { host, client } = setup()
+    await client.prompt('hi')
+    await vi.waitFor(async () =>
+      expect(await client.transcript()).toHaveLength(2),
+    )
+    const [first] = await client.transcript()
+
+    const renamed = await client.renameSession({
+      threadId: 'thread-r',
+      title: 'Greeting',
+    })
+    const pinned = await client.updateSession({
+      threadId: 'thread-r',
+      pinned: true,
+    })
+    const fork = await client.forkSession({
+      threadId: 'thread-r',
+      at: { through: first?.id ?? '' },
+    })
+
+    expect(renamed).toMatchObject({ threadId: 'thread-r', title: 'Greeting' })
+    expect(pinned).toMatchObject({ title: 'Greeting', pinned: true })
+    expect(fork).toMatchObject({ title: 'Greeting (fork)' })
+    expect(fork.threadId).not.toBe('thread-r')
+    await host.close()
+  })
+
   it('refuses a read without a thread id, or for a thread the user may not open', async () => {
     const { host, handler } = setup()
     const statusOf = async (path: string) =>
