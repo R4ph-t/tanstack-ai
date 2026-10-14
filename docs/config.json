@@ -997,12 +997,14 @@
         {
           "label": "Ask before risky tool calls",
           "to": "harness/permissions",
-          "addedAt": "2026-10-13"
+          "addedAt": "2026-10-13",
+          "updatedAt": "2026-10-14"
         },
         {
           "label": "Switch between agent profiles",
           "to": "harness/agents",
-          "addedAt": "2026-10-13"
+          "addedAt": "2026-10-13",
+          "updatedAt": "2026-10-14"
         },
         {
           "label": "Run agents from a harness",
