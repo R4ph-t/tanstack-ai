@@ -234,7 +234,7 @@ async function connectedKey(host: HarnessHost, testId: string | undefined) {
   const [question] = session.snapshot().pendingQuestions
   // Without a question, `connecting` never settles: fail now.
   if (!question) throw new Error('/connect:openai asked no question.')
-  await session.answer(question.questionId, USER_KEY)
+  await session.answer({ questionId: question.questionId, value: USER_KEY })
   const connected = await connecting
   const turn = await session.prompt('[first-party-keys] hello')
   return {

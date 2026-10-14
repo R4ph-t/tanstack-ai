@@ -170,7 +170,10 @@ export function providerKeys(options: {
             if (key === '') {
               throw new Error(`No ${label} key was given. Nothing was saved.`)
             }
-            await credentials.set(id, { type: 'api_key', value: key })
+            await credentials.set({
+              id,
+              credential: { type: 'api_key', value: key },
+            })
             await refresh(credentials)
             return `Connected to ${label} (key ...${maskKey(key)}).`
           },

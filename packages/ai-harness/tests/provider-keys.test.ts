@@ -70,9 +70,13 @@ async function open(options: {
       events.push(entry)
   })()
   const saveKey = (value: string) =>
-    persistence.stores.credentials.set(USER, 'acme', {
-      type: 'api_key',
-      value,
+    persistence.stores.credentials.set({
+      scope: USER,
+      id: 'acme',
+      credential: {
+        type: 'api_key',
+        value,
+      },
     })
   const close = async () => {
     reader.abort()
@@ -99,7 +103,10 @@ async function connectWith(session: HarnessSession, answer: string) {
     expect(session.snapshot().pendingQuestions).toHaveLength(1),
   )
   const [question] = session.snapshot().pendingQuestions
-  const receipt = await session.answer(question?.questionId ?? '', answer)
+  const receipt = await session.answer({
+    questionId: question?.questionId ?? '',
+    value: answer,
+  })
   return { question, receipt, result: await result }
 }
 
@@ -109,7 +116,10 @@ describe('a keyed main adapter', () => {
     const keyed = keyedMock([() => text('hello from acme')])
     const { session, saveKey, close } = await open({ adapter: keyed.adapter })
     await saveKey(SAVED_KEY)
-    expect(await session.prompt('hi')).toEqual({ text: 'hello from acme' })
+    expect(await session.prompt('hi')).toEqual({
+      text: 'hello from acme',
+      media: [],
+    })
     expect(keyed.keys).toEqual([SAVED_KEY])
     await close()
   })
@@ -149,7 +159,10 @@ describe('a keyed main adapter', () => {
     })
     await saveKey(SAVED_KEY)
     await session.command('model', 'acme')
-    expect(await session.prompt('hi')).toEqual({ text: 'keyed answer' })
+    expect(await session.prompt('hi')).toEqual({
+      text: 'keyed answer',
+      media: [],
+    })
     expect(keyed.keys).toEqual([SAVED_KEY])
     await close()
   })
@@ -191,6 +204,7 @@ describe('ctx.keys in agents', () => {
     await saveKey(SAVED_KEY)
     expect(await session.prompt('write it')).toEqual({
       text: 'The writer is done.',
+      media: [],
     })
     expect(keyed.keys).toEqual([SAVED_KEY])
     await close()
@@ -232,13 +246,38 @@ describe('providerKeys', () => {
       secret: true,
     })
     expect(result).toBe('Connected to Acme (key ...5678).')
-    expect(await persistence.stores.credentials.get(USER, 'acme')).toEqual({
+    expect(
+      await persistence.stores.credentials.get({ scope: USER, id: 'acme' }),
+    ).toEqual({
       type: 'api_key',
       value: PASTED_KEY,
     })
     expect(await session.command('keys')).toContain(
       'Acme: connected (key ...5678)',
     )
+    await close()
+  })
+
+  it('scrubs a key that /connect saved from the errors of the session', async () => {
+    const leaky = defineAgent({
+      name: 'leaky',
+      description: 'Fails with the key in its error',
+      run: async () => {
+        throw new Error(`fetch failed: Bearer ${PASTED_KEY}`)
+      },
+    })
+    const { session, close } = await open({
+      adapter: mockAdapter([]).adapter,
+      agents: [leaky],
+      plugins: [plugin()],
+    })
+    await connectWith(session, PASTED_KEY)
+    const errors: Array<string> = []
+    session.onEvent(EventType.RUN_ERROR, ({ event }) => {
+      errors.push(event.message)
+    })
+    await expect(session.agent('leaky')?.run()).rejects.toThrow('[redacted]')
+    expect(errors).toEqual(['fetch failed: Bearer [redacted]'])
     await close()
   })
 
@@ -250,7 +289,9 @@ describe('providerKeys', () => {
     await expect(connectWith(session, '   ')).rejects.toThrow(
       'No Acme key was given. Nothing was saved.',
     )
-    expect(await persistence.stores.credentials.get(USER, 'acme')).toBeNull()
+    expect(
+      await persistence.stores.credentials.get({ scope: USER, id: 'acme' }),
+    ).toBeNull()
     await close()
   })
 
@@ -266,8 +307,14 @@ describe('providerKeys', () => {
     const [question] = session.snapshot().pendingQuestions
     await connecting.cancel()
     await expect(connecting).rejects.toBeDefined()
-    if (question) await session.answer(question.questionId, PASTED_KEY)
-    expect(await persistence.stores.credentials.get(USER, 'acme')).toBeNull()
+    if (question)
+      await session.answer({
+        questionId: question.questionId,
+        value: PASTED_KEY,
+      })
+    expect(
+      await persistence.stores.credentials.get({ scope: USER, id: 'acme' }),
+    ).toBeNull()
     await close()
   })
 
@@ -280,7 +327,9 @@ describe('providerKeys', () => {
     expect(await session.command('disconnect:acme')).toBe(
       'Disconnected from Acme.',
     )
-    expect(await persistence.stores.credentials.get(USER, 'acme')).toBeNull()
+    expect(
+      await persistence.stores.credentials.get({ scope: USER, id: 'acme' }),
+    ).toBeNull()
     expect(await session.command('keys')).toContain(
       'Acme: missing. Run /connect acme.',
     )
@@ -306,7 +355,9 @@ describe('providerKeys', () => {
       secret: true,
     })
     expect(result).toBe('Connected to Acme (key ...5678).')
-    expect(await persistence.stores.credentials.get(USER, 'acme')).toEqual({
+    expect(
+      await persistence.stores.credentials.get({ scope: USER, id: 'acme' }),
+    ).toEqual({
       type: 'api_key',
       value: PASTED_KEY,
     })
@@ -328,7 +379,9 @@ describe('providerKeys', () => {
     expect(authRequired(events)).toEqual([
       { connector: 'acme', url: 'https://acme.example/sign-in' },
     ])
-    expect(await persistence.stores.credentials.get(USER, 'acme')).toEqual({
+    expect(
+      await persistence.stores.credentials.get({ scope: USER, id: 'acme' }),
+    ).toEqual({
       type: 'api_key',
       value: 'sk-acme-signed-9876',
     })
@@ -378,7 +431,11 @@ describe('providerKeys', () => {
       ]),
     )
     const [question] = session.snapshot().pendingQuestions
-    if (question) await session.answer(question.questionId, PASTED_KEY)
+    if (question)
+      await session.answer({
+        questionId: question.questionId,
+        value: PASTED_KEY,
+      })
     await connecting
     await close()
   })
