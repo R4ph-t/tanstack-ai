@@ -120,7 +120,7 @@ An MCP server can ask the user for input in the middle of a tool call. MCP calls
 - `mcp()` and `mcpConnector` both ask this way, for servers on MCP spec 2025 and on spec 2026-07-28.
 - One tool call can ask more than once. On spec 2026-07-28, one call can ask up to 5 times. One more request fails the tool call.
 
-Answer with `session.answer(questionId, value)`, or from a [`HarnessClient`](./connect). The value tells the server what the user did:
+Answer with `session.answer({ questionId, value })`, or from a [`HarnessClient`](./connect). The value tells the server what the user did:
 
 | Value | The server gets |
 | --- | --- |
@@ -136,7 +136,12 @@ import type { HarnessSession } from '@tanstack/ai-harness'
 
 export async function answerCity(session: HarnessSession) {
   const [question] = session.snapshot().pendingQuestions
-  if (question) await session.answer(question.questionId, { city: 'Paris' })
+  if (question) {
+    await session.answer({
+      questionId: question.questionId,
+      value: { city: 'Paris' },
+    })
+  }
 }
 ```
 

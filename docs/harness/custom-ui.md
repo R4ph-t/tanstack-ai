@@ -170,7 +170,7 @@ Send work:
 
 Change the session:
 
-- `view.setConfig(key, value)`: changes a config value, for example `view.setConfig('mode', 'plan')`.
+- `view.setConfig({ key, value })`: changes a config value, for example `view.setConfig({ key: 'mode', value: 'plan' })`.
 - `view.configure(settings)`: changes the stored settings of the thread, for example `view.configure({ model: 'strong' })`.
 - `view.reset(note)`: the model starts fresh from the next turn, with your `note` first. See [Reset with a handoff note](./fork-and-reset#reset-with-a-handoff-note).
 - `view.revert(messageId)` and `view.unrevert()`: go back to a message, and undo that.
@@ -178,7 +178,7 @@ Change the session:
 Stop work:
 
 - `view.cancel()`: cancels the running turn. `view.cancel(operationId)` cancels one operation, for example a background agent.
-- `view.cancelInput(inputId)`: drops a message from `waitingInputs` before it runs. `view.setDelivery(inputId, 'steer')` moves it into the running turn instead.
+- `view.cancelInput(inputId)`: drops a message from `waitingInputs` before it runs. `view.setDelivery({ inputId, delivery: 'steer' })` moves it into the running turn instead.
 - `view.dispose()`: stops the view when your screen closes. After that, each action throws an error.
 
 On a view with a [`HarnessClient`](#a-ui-in-the-browser), two actions need `expose` in the harness:
@@ -211,12 +211,12 @@ If a turn waits for more than one approval, client tool, or interrupt, the turn 
 
 Message a background agent:
 
-- `agent.send(text, mode)`: sends a message to one item of `state.agents`. `mode` is `'steer'` (the default) or `'followUp'`. See [Message a running agent](./subagents#message-a-running-agent).
+- `agent.send(text, { mode })`: sends a message to one item of `state.agents`. `mode` is `'steer'` (the default) or `'followUp'`. See [Message a running agent](./subagents#message-a-running-agent).
 
 ```ts group=harness-custom-ui
 const [agent] = view.store.get().agents
 if (agent) {
-  await agent.send('Add a title.', 'followUp')
+  await agent.send('Add a title.', { mode: 'followUp' })
 }
 ```
 

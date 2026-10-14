@@ -944,7 +944,8 @@
         {
           "label": "Send inputs safely",
           "to": "harness/inputs",
-          "addedAt": "2026-10-13"
+          "addedAt": "2026-10-13",
+          "updatedAt": "2026-10-14"
         },
         {
           "label": "Durable sessions",
@@ -1008,12 +1009,14 @@
         {
           "label": "Auth and connectors",
           "to": "harness/auth",
-          "addedAt": "2026-10-13"
+          "addedAt": "2026-10-13",
+          "updatedAt": "2026-10-14"
         },
         {
           "label": "Share a thread between people",
           "to": "harness/shared-threads",
-          "addedAt": "2026-10-13"
+          "addedAt": "2026-10-13",
+          "updatedAt": "2026-10-14"
         },
         {
           "label": "Build your own UI",
@@ -1035,7 +1038,8 @@
         {
           "label": "Use MCP servers",
           "to": "harness/mcp",
-          "addedAt": "2026-10-13"
+          "addedAt": "2026-10-13",
+          "updatedAt": "2026-10-14"
         },
         {
           "label": "Use from any MCP client",

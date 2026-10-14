@@ -69,7 +69,7 @@ export const team = defineHarness({
 | --- | --- |
 | `agents` | Run these agents, for example with `client.agents.<name>.start(input)`. |
 | `settings` | Change these [thread settings](./thread-settings) with `client.configure(settings)`. |
-| `config` | Set these plugin config keys with `client.setConfig(key, value)`. |
+| `config` | Set these plugin config keys with `client.setConfig({ key, value })`. |
 | `commands` | Run these commands with `client.command(name)`, or with `/name` in a [session view](./custom-ui) on a client. |
 
 - Any other input of these kinds gets `{ status: 'rejected', reason: 'not_exposed' }`.
@@ -153,14 +153,21 @@ const client = createHarnessClient<typeof studio>({
 })
 
 export async function correct(operationId: string) {
-  const receipt = await client.sendToAgent(operationId, 'Cite papers, not blogs.')
+  const receipt = await client.sendToAgent({
+    operationId,
+    message: 'Cite papers, not blogs.',
+  })
   if (receipt.status === 'rejected') {
     console.warn(receipt.reason)
   }
 }
 
 export function addTitle(operationId: string) {
-  return client.sendToAgent(operationId, 'Add a title.', { mode: 'followUp' })
+  return client.sendToAgent({
+    operationId,
+    message: 'Add a title.',
+    mode: 'followUp',
+  })
 }
 ```
 
