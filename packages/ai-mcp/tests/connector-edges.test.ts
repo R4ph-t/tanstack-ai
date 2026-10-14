@@ -30,7 +30,7 @@ async function setup(
   cleanups.push(() => server.close())
   const persistence = memoryPersistence()
   if (credential)
-    await persistence.stores.credentials.set(scope, 'demo', credential)
+    await persistence.stores.credentials.set({ scope, id: 'demo', credential })
   const host = createHarnessHost({ persistence })
   cleanups.push(() => host.close())
   return { server, persistence, host }
@@ -137,7 +137,9 @@ describe('mcpConnector with a saved sign-in', () => {
       ).toEqual(['refresh_token'])
       expect(server.seen.registrations).toHaveLength(0)
       // A sign-in saved without an issuer gets the issuer of this server.
-      expect(await persistence.stores.credentials.get(scope, 'demo')).toEqual({
+      expect(
+        await persistence.stores.credentials.get({ scope, id: 'demo' }),
+      ).toEqual({
         type: 'oauth',
         accessToken: 'access-2',
         refreshToken: 'refresh-1',
@@ -192,7 +194,10 @@ describe('mcpConnector with a saved sign-in', () => {
       expect(JSON.stringify(model.calls[0]?.systemPrompts)).toContain(
         'run /connect demo',
       )
-      const saved = await persistence.stores.credentials.get(scope, 'demo')
+      const saved = await persistence.stores.credentials.get({
+        scope,
+        id: 'demo',
+      })
       expect(saved?.type === 'oauth' ? saved.accessToken : null).toBe(kept)
     },
   )
@@ -230,7 +235,9 @@ describe('mcpConnector with a saved sign-in', () => {
     expect(JSON.stringify(model.calls[0]?.systemPrompts ?? [])).not.toContain(
       'is not connected',
     )
-    expect(await persistence.stores.credentials.get(scope, 'demo')).toEqual({
+    expect(
+      await persistence.stores.credentials.get({ scope, id: 'demo' }),
+    ).toEqual({
       type: 'oauth',
       accessToken: 'access-1',
     })
@@ -270,7 +277,7 @@ describe('mcpConnector /connect', () => {
       scope: 'read',
     })
     expect(
-      await persistence.stores.credentials.get(scope, 'demo'),
+      await persistence.stores.credentials.get({ scope, id: 'demo' }),
     ).toMatchObject({
       scopes: ['read', 'write'],
       client: {
@@ -307,7 +314,9 @@ describe('mcpConnector /connect', () => {
       cleanups.push(browser.stop)
 
       expect(await session.command('connect:demo')).toBe('Connected to Demo.')
-      expect(await persistence.stores.credentials.get(scope, 'demo')).toEqual({
+      expect(
+        await persistence.stores.credentials.get({ scope, id: 'demo' }),
+      ).toEqual({
         type: 'oauth',
         accessToken: 'access-1',
         client: {
@@ -338,7 +347,7 @@ describe('mcpConnector /connect', () => {
       server.seen.tokenRequests.map((form) => form.get('grant_type')),
     ).toEqual(['authorization_code', 'refresh_token'])
     expect(
-      await persistence.stores.credentials.get(scope, 'demo'),
+      await persistence.stores.credentials.get({ scope, id: 'demo' }),
     ).toMatchObject({
       accessToken: 'access-2',
       refreshToken: 'refresh-1',
@@ -359,7 +368,7 @@ describe('mcpConnector /connect', () => {
     cleanups.push(browser.stop)
     expect(await session.command('connect:demo')).toBe('Connected to Demo.')
     expect(
-      await persistence.stores.credentials.get(scope, 'demo'),
+      await persistence.stores.credentials.get({ scope, id: 'demo' }),
     ).toMatchObject({ accessToken: 'access-1' })
   })
 
@@ -393,9 +402,9 @@ describe('mcpConnector /connect', () => {
       await expect(session.command('connect:demo')).rejects.toMatchObject({
         code: 'invalid_grant',
       })
-      expect(await persistence.stores.credentials.get(scope, 'demo')).toEqual(
-        earlier ?? null,
-      )
+      expect(
+        await persistence.stores.credentials.get({ scope, id: 'demo' }),
+      ).toEqual(earlier ?? null)
       await session.prompt('hi')
       expect(model.toolNames(0)).toEqual(tools)
       expect(
@@ -424,7 +433,9 @@ describe('mcpConnector stored credential shapes', () => {
     expect(await fresh.command('disconnect:demo')).toBe(
       'Disconnected from Demo.',
     )
-    expect(await persistence.stores.credentials.get(scope, 'demo')).toBeNull()
+    expect(
+      await persistence.stores.credentials.get({ scope, id: 'demo' }),
+    ).toBeNull()
   })
 
   it('refreshes a token saved without a client, and keeps a client secret', async () => {
@@ -437,7 +448,10 @@ describe('mcpConnector stored credential shapes', () => {
     const session = await openDemo(bare.host, bare.server.url, model)
     await session.prompt('hi')
     expect(model.toolNames(0)).toEqual(['demo_echo'])
-    const saved = await bare.persistence.stores.credentials.get(scope, 'demo')
+    const saved = await bare.persistence.stores.credentials.get({
+      scope,
+      id: 'demo',
+    })
     expect(saved).toMatchObject({
       accessToken: 'access-2',
       refreshToken: 'refresh-1',
@@ -455,7 +469,10 @@ describe('mcpConnector stored credential shapes', () => {
     const other = await openDemo(withSecret.host, withSecret.server.url)
     await other.prompt('hi')
     expect(
-      await withSecret.persistence.stores.credentials.get(scope, 'demo'),
+      await withSecret.persistence.stores.credentials.get({
+        scope,
+        id: 'demo',
+      }),
     ).toMatchObject({
       accessToken: 'access-2',
       client: { clientId: 'client-1', clientSecret: 'secret-1' },

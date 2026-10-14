@@ -619,7 +619,10 @@ export function createHarnessHandler(
           return json({ error: 'not found' }, 404)
         switch (op.op) {
           case 'rename': {
-            const renamed = await host.sessions.rename(op.threadId, op.title)
+            const renamed = await host.sessions.rename({
+              threadId: op.threadId,
+              title: op.title,
+            })
             return renamed ? json(renamed) : json({ error: 'not found' }, 404)
           }
           case 'update': {
@@ -631,11 +634,11 @@ export function createHarnessHandler(
             if (op.change.metadata !== undefined && !harness.metadataSchema)
               return json({ error: 'not_exposed' }, 403)
             try {
-              const updated = await host.sessions.update(
+              const updated = await host.sessions.update({
                 harness,
-                op.threadId,
-                op.change,
-              )
+                threadId: op.threadId,
+                update: op.change,
+              })
               return updated ? json(updated) : json({ error: 'not found' }, 404)
             } catch (error) {
               if (error instanceof SessionMetadataError)
@@ -653,7 +656,13 @@ export function createHarnessHandler(
             // The host can run more harnesses than this handler serves.
             if (entry.harness !== undefined && entry.harness !== harness.name)
               return json({ error: 'other_harness' }, 409)
-            return json(await host.sessions.fork(harness, op.threadId, op.at))
+            return json(
+              await host.sessions.fork({
+                harness,
+                threadId: op.threadId,
+                at: op.at,
+              }),
+            )
         }
       }
 

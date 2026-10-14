@@ -134,10 +134,10 @@ describe('mcpConnector', () => {
       protectedServer.seen.tokenRequests[0]?.get('code_verifier'),
     ).toBeTruthy()
 
-    const saved = await persistence.stores.credentials.get(
-      { threadId: 't', userId: 'user-1' },
-      'demo',
-    )
+    const saved = await persistence.stores.credentials.get({
+      scope: { threadId: 't', userId: 'user-1' },
+      id: 'demo',
+    })
     expect(saved).toMatchObject({
       type: 'oauth',
       accessToken: 'access-1',
@@ -155,10 +155,10 @@ describe('mcpConnector', () => {
 
     await session.command('disconnect:demo')
     expect(
-      await persistence.stores.credentials.get(
-        { threadId: 't', userId: 'user-1' },
-        'demo',
-      ),
+      await persistence.stores.credentials.get({
+        scope: { threadId: 't', userId: 'user-1' },
+        id: 'demo',
+      }),
     ).toBeNull()
   })
 
@@ -184,7 +184,10 @@ describe('mcpConnector', () => {
     const browser = approveSignIns(session, 'code-1')
     cleanups.push(browser.stop)
     const savedFor = (userId: string) =>
-      persistence.stores.credentials.get({ threadId: 't', userId }, 'demo')
+      persistence.stores.credentials.get({
+        scope: { threadId: 't', userId },
+        id: 'demo',
+      })
 
     await session.command('connect:demo', undefined, { principal: bob })
     expect(await savedFor('bob')).not.toBeNull()
@@ -218,10 +221,14 @@ describe('mcpConnector', () => {
       [first, 'first-token'],
       [second, 'second-token'],
     ] as const) {
-      await persistence.stores.credentials.set(
-        { threadId: 't', tenantId: principal.tenantId, userId: principal.id },
-        'demo',
-        {
+      await persistence.stores.credentials.set({
+        scope: {
+          threadId: 't',
+          tenantId: principal.tenantId,
+          userId: principal.id,
+        },
+        id: 'demo',
+        credential: {
           type: 'oauth',
           accessToken,
           client: {
@@ -230,7 +237,7 @@ describe('mcpConnector', () => {
             issuer: protectedServer.issuer,
           },
         },
-      )
+      })
     }
     const initialized: Array<string> = []
     const toolLists: Array<string> = []
@@ -350,11 +357,11 @@ describe('mcpConnector', () => {
       const trips = await start()
       const persistence = memoryPersistence()
       // A saved sign-in, so the test skips the OAuth steps.
-      await persistence.stores.credentials.set(
-        { threadId: 't', userId: 'user-1' },
-        'trips',
-        { type: 'oauth', accessToken: 'access-1' },
-      )
+      await persistence.stores.credentials.set({
+        scope: { threadId: 't', userId: 'user-1' },
+        id: 'trips',
+        credential: { type: 'oauth', accessToken: 'access-1' },
+      })
       const model = recorder('trips_book')
       const host = createHarnessHost({ persistence })
       cleanups.push(() => host.close())
@@ -385,7 +392,10 @@ describe('mcpConnector', () => {
         message: 'Which city?',
         schema: tripForm.requestedSchema,
       })
-      await session.answer(question?.questionId ?? '', { city: 'Rome' })
+      await session.answer({
+        questionId: question?.questionId ?? '',
+        value: { city: 'Rome' },
+      })
       await turn
       expect(trips.answers).toEqual([
         { action: 'accept', content: { city: 'Rome' } },

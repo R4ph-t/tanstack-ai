@@ -137,23 +137,23 @@ export interface SessionViewSource {
   followUp?: (message: UserInput) => Promise<Receipt>
   continue?: () => unknown
   cancelInput?: (inputId: string) => Promise<Receipt>
-  setDelivery?: (
-    inputId: string,
-    delivery: WaitingInput['delivery'],
-  ) => Promise<Receipt>
+  setDelivery?: (change: {
+    inputId: string
+    delivery: WaitingInput['delivery']
+  }) => Promise<Receipt>
   configure?: (settings: ThreadSettingsChange) => Promise<Receipt>
   reset?: (note?: string) => Promise<Receipt>
   revert?: (messageId: string) => Promise<Receipt>
   unrevert?: () => Promise<Receipt>
-  answer: (questionId: string, value: unknown) => Promise<Receipt>
+  answer: (answer: { questionId: string; value: unknown }) => Promise<Receipt>
   command: (name: string, input?: unknown) => unknown
-  setConfig: (key: string, value: unknown) => Promise<Receipt>
+  setConfig: (change: { key: string; value: unknown }) => Promise<Receipt>
   /** Send a message to an agent run. Without it, an agent's `send` rejects. */
-  sendToAgent?: (
-    operationId: string,
-    message: UserInput,
-    options?: { mode?: 'steer' | 'followUp' },
-  ) => Promise<Receipt>
+  sendToAgent?: (options: {
+    operationId: string
+    message: UserInput
+    mode?: 'steer' | 'followUp'
+  }) => Promise<Receipt>
   events: (options: {
     from?: Cursor
     signal?: AbortSignal
@@ -225,7 +225,7 @@ export interface SessionView {
   /** Store a file. Send its record with `send(text, [record])`. */
   upload: (body: MediaBody, info: MediaInfo) => Promise<MediaRecord>
   command: (name: string, input?: unknown) => Promise<void>
-  setConfig: (key: string, value: unknown) => Promise<void>
+  setConfig: (change: { key: string; value: unknown }) => Promise<void>
   /** Change the stored settings of the thread, for example the model. */
   configure: (settings: ThreadSettingsChange) => Promise<void>
   /** Stop the running turn, or the operation `operationId`. */
@@ -233,10 +233,10 @@ export interface SessionView {
   /** Drop an input from `waitingInputs` before it runs. */
   cancelInput: (inputId: string) => Promise<void>
   /** Move a waiting input: `'steer'` joins the running turn, `'queue'` waits for its own turn. */
-  setDelivery: (
-    inputId: string,
-    delivery: WaitingInput['delivery'],
-  ) => Promise<void>
+  setDelivery: (change: {
+    inputId: string
+    delivery: WaitingInput['delivery']
+  }) => Promise<void>
   /** Start a fresh model context. The model sees `note` first. */
   reset: (note?: string) => Promise<void>
   /** Go back to the message `messageId`. `unrevert` undoes it. */
@@ -607,23 +607,23 @@ export function createSessionView(source: SessionViewSource) {
       ...(question.url ? { url: question.url } : {}),
       answer: (value) => {
         alive()
-        return source.answer(question.questionId, value)
+        return source.answer({ questionId: question.questionId, value })
       },
     }),
     agent: (operation) => ({
       ...operation,
-      send: (message, mode) => {
+      send: (message, options) => {
         alive()
         if (!source.sendToAgent) {
           return Promise.reject(
             new Error('This view source cannot send messages to agents.'),
           )
         }
-        return source.sendToAgent(
-          operation.id,
+        return source.sendToAgent({
+          operationId: operation.id,
           message,
-          mode ? { mode } : undefined,
-        )
+          ...(options?.mode ? { mode: options.mode } : {}),
+        })
       },
       cancel: () => {
         alive()
@@ -974,7 +974,7 @@ export function createSessionView(source: SessionViewSource) {
       alive()
       settle(source.command(name, input))
     },
-    setConfig: (key, value) => act(() => source.setConfig(key, value)),
+    setConfig: (change) => act(() => source.setConfig(change)),
     configure: (settings) =>
       act(() =>
         source.configure ? source.configure(settings) : missing('configure'),
@@ -986,10 +986,10 @@ export function createSessionView(source: SessionViewSource) {
           ? source.cancelInput(inputId)
           : missing('cancel inputs'),
       ),
-    setDelivery: (inputId, delivery) =>
+    setDelivery: (change) =>
       act(() =>
         source.setDelivery
-          ? source.setDelivery(inputId, delivery)
+          ? source.setDelivery(change)
           : missing('move inputs'),
       ),
     reset: (note) =>

@@ -172,7 +172,10 @@ export interface ViewAgent {
    * `'followUp'`, as in `AgentRun.send`. Rejects when the view's source
    * cannot send messages to agents.
    */
-  send: (message: UserInput, mode?: 'steer' | 'followUp') => Promise<Receipt>
+  send: (
+    message: UserInput,
+    options?: { mode?: 'steer' | 'followUp' },
+  ) => Promise<Receipt>
   /** Stop this run, and the runs it started. */
   cancel: () => Promise<Receipt>
 }

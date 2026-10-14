@@ -400,10 +400,10 @@ export async function createHarnessMcpServer(options: HarnessMcpServerOptions) {
     const session = await open(args)
     const questionId = textArg(args, 'questionId')
     const from = session.snapshot().cursor
-    const receipt = await session.answer(
+    const receipt = await session.answer({
       questionId,
-      isRecord(args) ? args.value : undefined,
-    )
+      value: isRecord(args) ? args.value : undefined,
+    })
     if (receipt.status === 'rejected') {
       throw new Error(
         `The harness refused the answer: ${receipt.reason ?? 'no reason'}.`,

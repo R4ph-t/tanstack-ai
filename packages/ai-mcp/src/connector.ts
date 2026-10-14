@@ -137,21 +137,26 @@ function credentialProvider(
       }
       // A new sign-in replaces the old one, with all its tokens. On a
       // refresh, the SDK passes the old refresh token itself.
-      await credentials.set(id, {
-        type: 'oauth',
-        accessToken: tokens.access_token,
-        ...(tokens.refresh_token ? { refreshToken: tokens.refresh_token } : {}),
-        ...(tokens.expires_in
-          ? { expiresAt: Date.now() + tokens.expires_in * 1000 }
-          : {}),
-        ...(tokens.scope ? { scopes: tokens.scope.split(' ') } : {}),
-        client: {
-          clientId: information.client_id,
-          ...(information.client_secret
-            ? { clientSecret: information.client_secret }
+      await credentials.set({
+        id,
+        credential: {
+          type: 'oauth',
+          accessToken: tokens.access_token,
+          ...(tokens.refresh_token
+            ? { refreshToken: tokens.refresh_token }
             : {}),
-          redirectUri: options.redirectUri,
-          issuer: information.issuer,
+          ...(tokens.expires_in
+            ? { expiresAt: Date.now() + tokens.expires_in * 1000 }
+            : {}),
+          ...(tokens.scope ? { scopes: tokens.scope.split(' ') } : {}),
+          client: {
+            clientId: information.client_id,
+            ...(information.client_secret
+              ? { clientSecret: information.client_secret }
+              : {}),
+            redirectUri: options.redirectUri,
+            issuer: information.issuer,
+          },
         },
       })
     },

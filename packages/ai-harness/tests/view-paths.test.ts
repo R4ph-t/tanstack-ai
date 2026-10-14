@@ -92,9 +92,10 @@ function createFake(overrides: Partial<SessionViewSource>) {
     steer: (message) => accept({ op: 'steer', message }),
     resolve: (resume) => accept({ op: 'resolve', resume }),
     cancel: () => accept({ op: 'cancel' }),
-    answer: (questionId, value) => accept({ op: 'answer', questionId, value }),
+    answer: ({ questionId, value }) =>
+      accept({ op: 'answer', questionId, value }),
     command: (name, input) => accept({ op: 'command', name, input }),
-    setConfig: (key, value) => accept({ op: 'config', key, value }),
+    setConfig: ({ key, value }) => accept({ op: 'config', key, value }),
     events: (options) => stream.open(options),
     snapshot: () => sessionSnapshot(),
     transcript: async () => [],
@@ -425,7 +426,7 @@ describe('session view actions', () => {
   it('sends settings, cancels, and slash commands with input to the source', async () => {
     const { view, inputs } = await openView()
 
-    await view.setConfig('mode', 'plan')
+    await view.setConfig({ key: 'mode', value: 'plan' })
     await view.cancel()
     await view.send('/goal ship it')
 
@@ -446,7 +447,7 @@ describe('session view actions', () => {
     {
       action: 'setConfig',
       overrides: { setConfig: down },
-      act: (view) => view.setConfig('mode', 'plan'),
+      act: (view) => view.setConfig({ key: 'mode', value: 'plan' }),
     },
     {
       action: 'cancel',
@@ -595,7 +596,7 @@ describe('session view on()', () => {
     const stop = view.on('error', (message) => heard.push(message))
 
     stop()
-    await view.setConfig('mode', 'plan')
+    await view.setConfig({ key: 'mode', value: 'plan' })
 
     expect(errors).toEqual(['config down'])
     expect(heard).toEqual([])
@@ -609,7 +610,7 @@ describe('session view on()', () => {
     })
     view.on('error', (message) => heard.push(message))
 
-    await view.setConfig('mode', 'plan')
+    await view.setConfig({ key: 'mode', value: 'plan' })
 
     expect(heard).toEqual(['config down'])
   })
@@ -842,7 +843,7 @@ describe('session view inputs', () => {
     await view.continue()
     await view.cancel('op-2')
     await view.cancelInput('in-1')
-    await view.setDelivery('in-2', 'steer')
+    await view.setDelivery({ inputId: 'in-2', delivery: 'steer' })
     await view.configure({ model: 'strong' })
     await view.reset('Start over.')
     await view.revert('m1')
@@ -854,7 +855,7 @@ describe('session view inputs', () => {
       ['continue'],
       ['cancel', 'op-2'],
       ['cancelInput', 'in-1'],
-      ['setDelivery', 'in-2', 'steer'],
+      ['setDelivery', { inputId: 'in-2', delivery: 'steer' }],
       ['configure', { model: 'strong' }],
       ['reset', 'Start over.'],
       ['revert', 'm1'],
@@ -1405,7 +1406,10 @@ describe('session view dispose', () => {
   }> = [
     { action: 'notice', act: (view) => view.notice('hi') },
     { action: 'command', act: (view) => view.command('ping') },
-    { action: 'setConfig', act: (view) => view.setConfig('mode', 'plan') },
+    {
+      action: 'setConfig',
+      act: (view) => view.setConfig({ key: 'mode', value: 'plan' }),
+    },
     { action: 'cancel', act: (view) => view.cancel() },
     { action: 'approveAll', act: (view) => view.approveAll() },
     {

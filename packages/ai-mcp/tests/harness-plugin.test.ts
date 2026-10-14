@@ -218,7 +218,7 @@ if (process.env[childEnv] === '1') {
         expect(question?.message).toBe('Which city?')
         expect(question?.schema).toMatchObject(tripForm.requestedSchema)
         expect(question?.url).toBeUndefined()
-        await session.answer(question?.questionId ?? '', value)
+        await session.answer({ questionId: question?.questionId ?? '', value })
         await turn
         expect(trips.answers).toEqual([expected])
         expect(JSON.stringify(model.calls[1]?.messages)).toContain('booked')
@@ -246,7 +246,10 @@ if (process.env[childEnv] === '1') {
         message: 'Pay for the trip, then come back.',
         url: 'https://pay.example.com/trip',
       })
-      await session.answer(question?.questionId ?? '', 'done')
+      await session.answer({
+        questionId: question?.questionId ?? '',
+        value: 'done',
+      })
       await turn
       expect(trips.answers).toEqual([{ action: 'accept' }])
     })
@@ -276,7 +279,7 @@ if (process.env[childEnv] === '1') {
 
         expect(question?.message).toBe('Which city?')
         expect(question?.schema).toMatchObject(tripForm.requestedSchema)
-        await session.answer(question?.questionId ?? '', value)
+        await session.answer({ questionId: question?.questionId ?? '', value })
         await turn
         expect(trips.answers).toEqual([expected])
         expect(JSON.stringify(model.calls[1]?.messages)).toContain('booked')
@@ -306,7 +309,10 @@ if (process.env[childEnv] === '1') {
         message: 'Pay for the trip, then come back.',
         url: 'https://pay.example.com/trip',
       })
-      await session.answer(question?.questionId ?? '', 'done')
+      await session.answer({
+        questionId: question?.questionId ?? '',
+        value: 'done',
+      })
       await turn
       expect(trips.answers).toEqual([{ action: 'accept' }])
     })
@@ -338,7 +344,7 @@ if (process.env[childEnv] === '1') {
           expect(session.snapshot().pendingQuestions[0]?.message).toBe(message),
         )
         const [question] = session.snapshot().pendingQuestions
-        await session.answer(question?.questionId ?? '', value)
+        await session.answer({ questionId: question?.questionId ?? '', value })
       }
       await turn
       expect(trips.answers).toEqual([
@@ -363,7 +369,10 @@ if (process.env[childEnv] === '1') {
           expect(session.snapshot().pendingQuestions).toHaveLength(1),
         )
         const [question] = session.snapshot().pendingQuestions
-        await session.answer(question?.questionId ?? '', { city: 'Paris' })
+        await session.answer({
+          questionId: question?.questionId ?? '',
+          value: { city: 'Paris' },
+        })
       }
       await turn
       expect(trips.answers).toHaveLength(5)

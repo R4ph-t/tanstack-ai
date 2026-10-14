@@ -84,13 +84,20 @@ describe('client reads and actions', () => {
     )
     const [question] = (await client.snapshot()).pendingQuestions
     expect(
-      (await client.answer(question?.questionId ?? '', 'yes')).status,
+      (
+        await client.answer({
+          questionId: question?.questionId ?? '',
+          value: 'yes',
+        })
+      ).status,
     ).toBe('accepted')
     await vi.waitFor(async () =>
       expect((await client.snapshot()).pendingQuestions).toHaveLength(0),
     )
 
-    expect((await client.setConfig('tone', 'warm')).status).toBe('accepted')
+    expect(
+      (await client.setConfig({ key: 'tone', value: 'warm' })).status,
+    ).toBe('accepted')
     expect((await client.describe()).config[0]?.value).toBe('warm')
     await host.close()
   })
