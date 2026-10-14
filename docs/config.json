@@ -1009,7 +1009,8 @@
         {
           "label": "Connect model providers",
           "to": "harness/provider-keys",
-          "addedAt": "2026-10-13"
+          "addedAt": "2026-10-13",
+          "updatedAt": "2026-10-14"
         },
         {
           "label": "Run agents from a harness",

@@ -86,18 +86,15 @@ const session = await host.open(assistant, {
 `/connect:openai` asks the user for the key. The question has `secret: true`, so show a password field for it:
 
 ```ts group=harness-provider-keys
-const connecting = session.command('connect:openai')
+const stopAsking = session.onEvent('CUSTOM', async ({ event }) => {
+  if (event.name !== 'harness.question') return
+  const [question] = session.snapshot().pendingQuestions
+  // question.secret is true. Read the key without showing it.
+  if (question) await session.answer({ questionId: question.questionId, value: 'sk-proj-...' })
+})
 
-for await (const { event } of session.events()) {
-  if (event.type === 'CUSTOM' && event.name === 'harness.question') {
-    const [question] = session.snapshot().pendingQuestions
-    // question.secret is true. Read the key without showing it.
-    if (question) await session.answer(question.questionId, 'sk-proj-...')
-    break
-  }
-}
-
-console.log(await connecting) // Connected to OpenAI (key ...abcd).
+console.log(await session.command('connect:openai')) // Connected to OpenAI (key ...abcd).
+stopAsking()
 ```
 
 - With `keyUrl`, the page to make a key opens first. The session sends a `harness.auth_required` event with the URL, and your app opens it.
