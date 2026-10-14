@@ -998,6 +998,11 @@
           "label": "Add skills",
           "to": "harness/skills",
           "addedAt": "2026-10-13"
+        },
+        {
+          "label": "Use a harness from an editor (ACP)",
+          "to": "harness/acp",
+          "addedAt": "2026-10-13"
         }
       ]
     },
