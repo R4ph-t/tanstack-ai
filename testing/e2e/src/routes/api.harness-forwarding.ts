@@ -1,6 +1,10 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { createAnthropicChat } from '@tanstack/ai-anthropic'
-import { createHarnessHost, defineHarness } from '@tanstack/ai-harness'
+import {
+  createHarnessHost,
+  defineHarness,
+  definePlugin,
+} from '@tanstack/ai-harness'
 import { memoryLogStore, memoryPersistence } from '@tanstack/ai-persistence'
 
 /**
@@ -11,6 +15,9 @@ import { memoryLogStore, memoryPersistence } from '@tanstack/ai-persistence'
  * - `?inbox=1`: the follow-up waits in `stores.inbox`, and the owner runs it
  *   after its turn.
  * - Without it: the second host refuses the follow-up.
+ * - `?plugin=1` (with `?inbox=1`): the second host opens the thread while
+ *   the turn runs, and a plugin writes its state as it mounts, as the MCP
+ *   plugin does. That state stays off the log of the owner.
  *
  * In both, the owner's turn ends normally. A custom `fetch` answers with
  * canned Anthropic streams and holds the first answer until the follow-up
@@ -67,7 +74,9 @@ export const Route = createFileRoute('/api/harness-forwarding')({
   server: {
     handlers: {
       POST: async ({ request }) => {
-        const withInbox = new URL(request.url).searchParams.get('inbox') === '1'
+        const params = new URL(request.url).searchParams
+        const withInbox = params.get('inbox') === '1'
+        const withPlugin = params.get('plugin') === '1'
         let release!: () => void
         const released = new Promise<void>((resolve) => {
           release = resolve
@@ -92,21 +101,33 @@ export const Route = createFileRoute('/api/harness-forwarding')({
             ...(withInbox ? { inbox } : {}),
           },
         }
+        const status = definePlugin({
+          name: 'e2e/status',
+          setup: (ctx) => {
+            void ctx
+              .state({ connected: false })
+              .update(() => ({ connected: true }))
+            return {}
+          },
+        })
         const harness = defineHarness({
           name: 'e2e/harness-forwarding',
           adapter: createAnthropicChat(MODEL, DUMMY_KEY, {
             fetch: scriptedFetch,
           }),
+          plugins: () => (withPlugin ? [status] : []),
         })
         const ownerHost = createHarnessHost({ persistence })
         const otherHost = createHarnessHost({ persistence })
         try {
           const threadId = 'e2e-harness-forwarding'
           const owner = await ownerHost.open(harness, { threadId })
-          const other = await otherHost.open(harness, { threadId })
-
           const turn = owner.send('[harness-forwarding] go')
           await turn.receipt
+          const other = await otherHost.open(harness, { threadId })
+          // The plugin state write of the second host had time to land.
+          if (withPlugin)
+            await new Promise((resolve) => setTimeout(resolve, 50))
           const receipt = await other.send('[harness-forwarding] and then', {
             mode: 'followUp',
           }).receipt

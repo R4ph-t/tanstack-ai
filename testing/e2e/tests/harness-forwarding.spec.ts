@@ -30,6 +30,20 @@ test.describe('harness: an input on a host that does not own the thread', () => 
     ])
   })
 
+  test('keeps the plugin state of the second host off the log, and the owner turn ends normally', async ({
+    request,
+  }) => {
+    const res = await request.post('/api/harness-forwarding?inbox=1&plugin=1')
+    expect(res.ok()).toBe(true)
+    const result: Result = await res.json()
+    expect(result.error ?? null).toBeNull()
+
+    expect(result.receipt.status).toBe('queued')
+    expect(result.first).toBe('One.')
+    expect(result.followUp).toBe('completed')
+    expect(result.calls).toBe(2)
+  })
+
   test('is refused without an inbox, and the owner turn ends normally', async ({
     request,
   }) => {

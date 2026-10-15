@@ -201,6 +201,59 @@ describe('an input that reaches a host that does not own the thread', () => {
     await other.close()
   })
 
+  it('keeps the plugin state of another host off the log while the owner runs a tool', async () => {
+    const persistence = sharedStores()
+    const release = gate()
+    const wait = toolDefinition({
+      name: 'wait',
+      description: 'Wait',
+      inputSchema: z.object({}),
+    }).server(async () => {
+      await release.opened
+      return 'waited'
+    })
+    // Like the MCP plugin: each host reports its own connection on mount.
+    const status = definePlugin({
+      name: 'test/status',
+      setup: (ctx) => {
+        void ctx.state({ connected: false }).update(() => ({ connected: true }))
+        return {}
+      },
+    })
+    const { adapter, calls } = mockAdapter([
+      () => toolCall('wait', {}),
+      () => text('One.'),
+      () => text('Two.'),
+    ])
+    const harness = defineHarness({
+      name: NAME,
+      adapter,
+      tools: [wait],
+      plugins: () => [status],
+    })
+    const owner = await createHarnessHost({ persistence }).open(harness, {
+      threadId: THREAD,
+    })
+    const turn = owner.send('Go.')
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+
+    const other = await createHarnessHost({ persistence }).open(harness, {
+      threadId: THREAD,
+    })
+    const receipt = await other.send('And then?', { mode: 'followUp' }).receipt
+    expect(receipt.status).toBe('queued')
+    // The other host's state write had time to land on the log.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    release.open()
+    expect((await turn).text).toBe('One.')
+    const settled = await vi.waitFor(() => owner.settled(receipt.inputId), {
+      timeout: 3_000,
+    })
+    expect(settled.outcome).toBe('completed')
+    expect(calls).toHaveLength(3)
+    await other.close()
+  })
+
   it('answers a question that waits on another host', async () => {
     const persistence = sharedStores()
     const deploy = definePlugin({

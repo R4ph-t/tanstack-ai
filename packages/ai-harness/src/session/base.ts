@@ -201,6 +201,12 @@ export abstract class SessionBase<THarness extends AnyHarness = AnyHarness> {
   protected inboxWatch: ReturnType<typeof setInterval> | undefined
   /** The open skipped recovery: another host owned the thread then. */
   protected recoveryDeferred = false
+  /**
+   * Another host held a live claim on this thread when this host last read
+   * it. Session events of this host then stay off the log: an append here
+   * would take the log from the owner.
+   */
+  protected ownerElsewhere = false
   private draining: Promise<void> | undefined
   /** Called each time the thread goes idle. See `onIdle`. */
   protected readonly idleListeners = new Set<() => void>()
@@ -701,6 +707,7 @@ export abstract class SessionBase<THarness extends AnyHarness = AnyHarness> {
           until: Date.now() + ttlMs,
         })
         this.claimLost = !isHeld
+        this.ownerElsewhere = !isHeld
       } catch (error) {
         // The work goes on without a claim.
         this.warnClaim(error)
@@ -738,9 +745,9 @@ export abstract class SessionBase<THarness extends AnyHarness = AnyHarness> {
     const claims = this.persistence.stores.workClaims
     if (!this.writer || !claims) return false
     const held = await claims.get(this.threadId)
-    return (
+    this.ownerElsewhere =
       held !== null && held.ownerId !== this.hostId && held.until > Date.now()
-    )
+    return this.ownerElsewhere
   }
 
   /**
@@ -792,6 +799,7 @@ export abstract class SessionBase<THarness extends AnyHarness = AnyHarness> {
         ownerId: this.hostId,
         until: Date.now() + (this.lease?.ttlMs ?? LEASE.ttlMs),
       })
+      this.ownerElsewhere = !isHeld
       if (!isHeld) return
       // This host takes the thread from an owner that stopped. Its inputs
       // run first, as on an open.
