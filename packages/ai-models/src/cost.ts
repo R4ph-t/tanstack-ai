@@ -1,7 +1,8 @@
 import type { Cost, ModelRecord, TokenCounts } from './types'
 
 /**
- * What a call cost in USD: each price is per 1M tokens, so the cost of a part
+ * What a call cost, in the currency of `model.cost` (USD unless
+ * `cost.currency` says otherwise): each price is per 1M tokens, so the cost of a part
  * is `price / 1_000_000 * tokens`. pi's rules:
  * - A call with more input than a tier's `inputTokensAbove` uses that tier's
  *   prices: the tier with the highest threshold below the input (uncached +

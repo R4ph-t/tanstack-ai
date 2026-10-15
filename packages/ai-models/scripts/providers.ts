@@ -11,33 +11,31 @@ export interface Wire {
   baseUrl: string
 }
 
-/** What a provider row can read from a models.dev model. */
+/** What a provider row can read from a modelschemas row. */
 export interface SourceModel {
   id: string
-  /** The AI SDK package models.dev lists for this model, when it differs from the provider's. */
-  npm?: string
+  /** The endpoint path modelschemas lists for this model, for example `inference/v1/messages`. */
+  endpoint?: string
 }
 
 /**
  * One provider, by hand. The quirk rules follow pi's `detectCompat()`
  * (`pi-ai/dist/api/openai-completions.js`) and the values pi sets on every
- * model of the provider. Per-model hints come from models.dev (see
+ * model of the provider. Per-model hints come from modelschemas (see
  * `rules.ts`), and the model value wins.
  */
 export interface ProviderRow {
   id: string
   name: string
-  /** models.dev provider ids to read models from. The first one wins on a clash. */
+  /** modelschemas provider ids to read models from. The first one wins on a clash. */
   sources: ReadonlyArray<string>
   baseUrl: string
   env: ReadonlyArray<ReadonlyArray<string>>
   /** Wire and endpoint per model. Default: `api` at `baseUrl`. */
   api: WireApi
   wire?: (model: SourceModel) => Wire
-  /** The model id the catalog uses, from the models.dev id. Default: the same. */
+  /** The model id the catalog uses, from the modelschemas id. Default: the same. */
   modelId?: (sourceId: string) => string
-  /** `true`: leave this models.dev model out, for example one on another wire. */
-  exclude?: (model: SourceModel) => boolean
   /** Quirks of every model of this provider. */
   compat?: ModelCompat
   /** Quirks of some models of this provider, by model id. */
@@ -67,15 +65,15 @@ const deepseekFamily = (id: string): ModelCompat | undefined =>
       }
     : undefined
 
-/** OpenCode serves each model on the wire of the SDK models.dev lists. */
+/** OpenCode serves each model on the endpoint modelschemas lists for it. */
 const opencodeWire =
   (root: string) =>
-  (model: SourceModel): Wire => {
-    if (model.npm === '@ai-sdk/anthropic')
+  ({ endpoint = '' }: SourceModel): Wire => {
+    if (endpoint.endsWith('/messages'))
       return { api: 'anthropic-messages', baseUrl: root }
-    if (model.npm === '@ai-sdk/google')
+    if (endpoint.includes('/models/'))
       return { api: 'google-generative-ai', baseUrl: `${root}/v1` }
-    if (model.npm === '@ai-sdk/openai')
+    if (endpoint.endsWith('/responses'))
       return { api: 'openai-responses', baseUrl: `${root}/v1` }
     return completions(`${root}/v1`)
   }
@@ -122,7 +120,7 @@ export const PROVIDERS: ReadonlyArray<ProviderRow> = [
   {
     id: 'ant-ling',
     name: 'Ant Ling',
-    sources: [],
+    sources: ['ant-ling'],
     baseUrl: 'https://api.ant-ling.com/v1',
     api: 'openai-completions',
     env: [['ANT_LING_API_KEY']],
@@ -159,9 +157,6 @@ export const PROVIDERS: ReadonlyArray<ProviderRow> = [
     // Each Azure resource has its own endpoint.
     baseUrl: '',
     api: 'azure-openai-responses',
-    // A model with its own SDK (Claude, and the Foundry models) is not on
-    // the Azure OpenAI wire.
-    exclude: (model) => model.npm !== undefined,
     env: [['AZURE_OPENAI_API_KEY']],
   },
   {
@@ -261,7 +256,7 @@ export const PROVIDERS: ReadonlyArray<ProviderRow> = [
   {
     id: 'fireworks',
     name: 'Fireworks AI',
-    sources: ['fireworks-ai'],
+    sources: ['fireworks'],
     baseUrl: 'https://api.fireworks.ai/inference/v1',
     api: 'openai-completions',
     env: [['FIREWORKS_API_KEY']],
@@ -291,7 +286,7 @@ export const PROVIDERS: ReadonlyArray<ProviderRow> = [
   {
     id: 'google',
     name: 'Google',
-    sources: ['google'],
+    sources: ['gemini'],
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
     api: 'google-generative-ai',
     env: [['GEMINI_API_KEY']],
@@ -302,9 +297,6 @@ export const PROVIDERS: ReadonlyArray<ProviderRow> = [
     sources: ['google-vertex'],
     baseUrl: 'https://{location}-aiplatform.googleapis.com',
     api: 'google-vertex',
-    // Claude on Vertex speaks the Anthropic Messages wire, which the Gemini
-    // adapter cannot call. pi lists no Claude models on Vertex either.
-    exclude: (model) => model.id.startsWith('claude-'),
     // An API key, or Application Default Credentials with a project and a location.
     env: [
       ['GOOGLE_CLOUD_API_KEY'],
@@ -383,7 +375,7 @@ export const PROVIDERS: ReadonlyArray<ProviderRow> = [
     (id): ProviderRow => ({
       id,
       name: id === 'moonshotai' ? 'Moonshot AI' : 'Moonshot AI (China)',
-      sources: [id],
+      sources: [id === 'moonshotai' ? 'moonshot' : id],
       baseUrl:
         id === 'moonshotai'
           ? 'https://api.moonshot.ai/v1'
@@ -479,21 +471,21 @@ export const PROVIDERS: ReadonlyArray<ProviderRow> = [
       [
         'qwen-token-plan',
         'Qwen Token Plan',
-        'alibaba',
+        'dashscope',
         'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
         'QWEN_TOKEN_PLAN_API_KEY',
       ],
       [
         'qwen-token-plan-cn',
         'Qwen Token Plan (China)',
-        'alibaba-cn',
+        'dashscope-cn',
         'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
         'QWEN_TOKEN_PLAN_CN_API_KEY',
       ],
       [
         'qwen-token-plan-individual',
         'Qwen Token Plan (Individual)',
-        'alibaba',
+        'dashscope',
         'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
         'QWEN_TOKEN_PLAN_API_KEY',
       ],
@@ -517,7 +509,7 @@ export const PROVIDERS: ReadonlyArray<ProviderRow> = [
   {
     id: 'together',
     name: 'Together AI',
-    sources: ['togetherai'],
+    sources: ['together'],
     baseUrl: 'https://api.together.ai/v1',
     api: 'openai-completions',
     env: [['TOGETHER_API_KEY']],
@@ -542,7 +534,7 @@ export const PROVIDERS: ReadonlyArray<ProviderRow> = [
   {
     id: 'xai',
     name: 'xAI',
-    sources: ['xai'],
+    sources: ['grok'],
     baseUrl: 'https://api.x.ai/v1',
     api: 'openai-responses',
     env: [['XAI_API_KEY']],

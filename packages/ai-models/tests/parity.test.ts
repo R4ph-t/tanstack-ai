@@ -56,7 +56,7 @@ describe.skipIf(!snapshotPath)('parity with pi', () => {
       }
     }
     console.log(
-      `pi parity: ${total - missing.length}/${total} resolve. Fields that differ (newer models.dev data is fine):`,
+      `pi parity: ${total - missing.length}/${total} resolve. Fields that differ (newer modelschemas data is fine):`,
       differs,
     )
     expect(missing).toEqual([])

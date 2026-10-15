@@ -96,8 +96,10 @@ export interface ModelCompat {
   supportsExplicitPromptCacheMode?: boolean
 }
 
-/** Prices in USD per 1M tokens. */
+/** Prices per 1M tokens, in USD unless `currency` says otherwise. */
 export interface ModelCostRates {
+  /** An ISO 4217 code, for example `'CNY'`. Absent: USD. */
+  currency?: string
   input: number
   output: number
   cacheRead: number
@@ -138,8 +140,6 @@ export interface ModelRecord {
   maxTokens: number
   headers?: Readonly<Record<string, string>>
   compat?: ModelCompat
-  /** The data came from the same model at another provider, for example `'anthropic/claude-sonnet-4-5'`. */
-  borrowedFrom?: string
 }
 
 /** One provider. */
@@ -170,7 +170,7 @@ export interface TokenCounts {
   cacheWrite1h?: number
 }
 
-/** What a call cost, in USD. */
+/** What a call cost, in the currency of the record (USD unless `cost.currency` says otherwise). */
 export interface Cost {
   input: number
   output: number

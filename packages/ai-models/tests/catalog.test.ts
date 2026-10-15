@@ -25,12 +25,12 @@ describe('the catalog', () => {
   })
 
   it('finds a model and gives its quirks (DeepSeek replays reasoning)', () => {
-    const model = getModel('deepseek', 'deepseek-v4-flash')
+    const model = getModel('deepseek', 'deepseek-v4-pro')
     expect(model).toMatchObject({
       provider: 'deepseek',
       api: 'openai-completions',
       baseUrl: 'https://api.deepseek.com',
-      reasoning: { levels: { off: 'none', max: 'max' }, budget: false },
+      reasoning: { levels: { low: 'low', max: 'max' }, budget: false },
       compat: {
         thinkingFormat: 'deepseek',
         maxTokensField: 'max_tokens',
@@ -72,11 +72,18 @@ describe('the catalog', () => {
     expect(vertex?.env[0]).toEqual(['GOOGLE_CLOUD_API_KEY'])
   })
 
-  it('marks a model whose data came from another provider', () => {
-    expect(
-      getModel('cloudflare-ai-gateway', 'workers-ai/@cf/openai/gpt-oss-120b')
-        ?.borrowedFrom,
-    ).toBe('cloudflare-workers-ai/@cf/openai/gpt-oss-120b')
+  it('gives an alias a record of its own', () => {
+    const dated = getModel('anthropic', 'claude-sonnet-4-5-20250929')
+    expect(dated).toBeDefined()
+    expect(getModel('anthropic', 'claude-sonnet-4-5')).toEqual({
+      ...dated,
+      id: 'claude-sonnet-4-5',
+    })
+  })
+
+  it('names the currency of a price that is not in USD', () => {
+    expect(getModel('ant-ling', 'Ling-2.6-1T')?.cost.currency).toBe('CNY')
+    expect(getModel('openai', 'gpt-5.5')?.cost.currency).toBeUndefined()
   })
 })
 
@@ -171,7 +178,7 @@ describe('modelCost', () => {
     ).toBeCloseTo(2.4, 10)
   })
 
-  it('has the models.dev tiers on catalog records', () => {
+  it('has the rate card tiers on catalog records', () => {
     const record = getModel('openai', 'gpt-5.5')
     expect(record?.cost.tiers).toEqual([
       expect.objectContaining({ inputTokensAbove: 272000 }),

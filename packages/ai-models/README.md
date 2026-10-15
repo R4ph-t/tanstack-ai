@@ -20,7 +20,7 @@
 
 # @tanstack/ai-models
 
-A model catalog you can read at runtime: each model's context window, price, reasoning levels, input kinds, and wire quirks, for about 1,850 models across 38 providers.
+A model catalog you can read at runtime: each model's context window, price, reasoning levels, input kinds, and wire quirks, for more than 1,900 models across 38 providers.
 
 ```ts
 import { getModel, modelCost, clampReasoningLevel } from '@tanstack/ai-models'
@@ -28,13 +28,13 @@ import { getModel, modelCost, clampReasoningLevel } from '@tanstack/ai-models'
 const model = getModel('deepseek', 'deepseek-v4-flash')
 if (model) {
   model.contextWindow // 1000000
-  modelCost(model, { input: 12_000, output: 800 }).total // USD
+  modelCost(model, { input: 12_000, output: 800 }).total // USD, unless model.cost.currency says otherwise
   clampReasoningLevel(model, 'medium') // 'high': the nearest level the model has
 }
 ```
 
 - No dependencies, and no Node.js APIs, so it runs on edge runtimes too.
 - One subpath per provider (`@tanstack/ai-models/deepseek`), so a build ships only the providers it imports.
-- The data comes from [models.dev](https://models.dev) and the OpenRouter and Vercel model lists. `pnpm generate:models` refreshes it.
+- The data comes from [modelschemas](https://modelschemas.com). `pnpm generate:models` refreshes it.
 
 Read the guide: [Model catalog](https://tanstack.com/ai/latest/docs/models/catalog).

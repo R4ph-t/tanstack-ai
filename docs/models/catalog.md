@@ -5,13 +5,13 @@ description: "Look up models, reasoning levels, prices, and context windows at r
 keywords:
   - tanstack ai
   - model catalog
-  - models.dev
+  - modelschemas
   - model metadata
   - reasoning levels
   - model pricing
 ---
 
-A model picker, a cost display, or a settings menu needs facts about models at runtime: which models a provider has, which reasoning levels a model takes, and what a call costs. `@tanstack/ai-models` is a catalog of that data for more than 1,800 models across 38 providers.
+A model picker, a cost display, or a settings menu needs facts about models at runtime: which models a provider has, which reasoning levels a model takes, and what a call costs. `@tanstack/ai-models` is a catalog of that data for more than 1,900 models across 38 providers.
 
 ## Install
 
@@ -67,7 +67,7 @@ This is the same shape as `ModelReasoning` in `@tanstack/ai`.
 
 ## Work out what a call cost
 
-Prices are in USD per million tokens. `modelCost` turns token counts into a cost. `input` is the uncached input:
+Prices are per million tokens, in USD. A record with `cost.currency` (for example `"CNY"`) is priced in that currency instead. `modelCost` turns token counts into a cost, in the same currency. `input` is the uncached input:
 
 ```typescript
 import { getModel, modelCost } from "@tanstack/ai-models";
@@ -122,4 +122,4 @@ console.log(provider.baseUrl, models.length);
 
 ## Keep it up to date
 
-The catalog comes from [models.dev](https://models.dev) and the OpenRouter and Vercel AI Gateway model lists. `generatedAt` is the date of the last update. A record with `borrowedFrom` took its data from the same model at another provider.
+The catalog comes from [modelschemas](https://modelschemas.com), which reads each provider's own model list, docs, and price page. `generatedAt` is the date of the last update.

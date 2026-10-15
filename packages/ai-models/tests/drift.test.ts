@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { getModels, getProviders } from '../src'
-import { BORROW, ONLY } from '../scripts/known-ids'
-import { EXTRA_MODELS, MODEL_OVERRIDES } from '../scripts/overrides'
+import { ONLY } from '../scripts/known-ids'
 import { PROVIDERS } from '../scripts/providers'
 
 const rowIds = new Set(PROVIDERS.map((row) => row.id))
@@ -20,8 +19,7 @@ describe('drift', () => {
   })
 
   it('every hand-kept list names a provider with a rule row', () => {
-    for (const list of [BORROW, ONLY, EXTRA_MODELS, MODEL_OVERRIDES])
-      for (const id of Object.keys(list)) expect(rowIds.has(id), id).toBe(true)
+    for (const id of Object.keys(ONLY)) expect(rowIds.has(id), id).toBe(true)
   })
 
   it('every provider has at least one model', () => {
