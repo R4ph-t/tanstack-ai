@@ -1,8 +1,8 @@
 /**
- * Fetches the modelschemas rows of the providers in
- * `packages/ai-models/scripts/providers.ts` and writes the fields the
- * generator reads to `modelschemas.models.json`: chat rows only, one row per
- * line, so a daily refresh has a small diff. Deprecated rows are left out.
+ * Fetches the modelschemas catalog in one call. Writes the fields the
+ * generator reads, for the providers in `packages/ai-models/scripts/providers.ts`,
+ * to `modelschemas.models.json`: chat rows only, one row per line, so a daily
+ * refresh has a small diff. Deprecated rows are left out.
  *
  * Usage:
  *   pnpm tsx scripts/fetch-modelschemas.ts
@@ -22,7 +22,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const OUTPUT_PATH = resolve(__dirname, 'modelschemas.models.json')
 const API_URL = 'https://modelschemas.com/v1/models'
 
-type ApiModel = SchemaModel & { deprecatedAt?: number | null }
+type ApiModel = SchemaModel & {
+  provider: string
+  deprecatedAt?: number | null
+}
 
 const trimModel = (model: ApiModel): SchemaModel => ({
   rawId: model.rawId,
@@ -53,8 +56,9 @@ const trimModel = (model: ApiModel): SchemaModel => ({
   },
 })
 
-async function fetchProvider(id: string): Promise<Array<SchemaModel>> {
-  const url = `${API_URL}?provider=${encodeURIComponent(id)}&pricing=1`
+async function main() {
+  // One call: modelschemas allows 60 anonymous calls an hour.
+  const url = `${API_URL}?pricing=1`
   const response = await fetch(url)
   if (!response.ok)
     throw new Error(
@@ -64,27 +68,24 @@ async function fetchProvider(id: string): Promise<Array<SchemaModel>> {
     count: number
     models: Array<ApiModel>
   }
-  if (body.models.length === 0)
-    throw new Error(`modelschemas has no models for provider '${id}'`)
   if (body.models.length !== body.count)
     throw new Error(
-      `modelschemas page is incomplete for '${id}': count ${body.count}, got ${body.models.length}`,
+      `modelschemas page is incomplete: count ${body.count}, got ${body.models.length}`,
     )
-  return body.models
-    .filter((model) => !model.deprecatedAt && makesText(model))
-    .map(trimModel)
-    .sort((a, b) => a.rawId.localeCompare(b.rawId))
-}
 
-async function main() {
   const ids = [...new Set(PROVIDERS.flatMap((row) => row.sources))].sort()
-  // One at a time: modelschemas answers 500 to a burst of parallel calls.
-  const catalog: Record<string, Array<SchemaModel>> = {}
-  for (const id of ids) catalog[id] = await fetchProvider(id)
-  const providers = Object.entries(catalog).map(
-    ([id, models]) =>
-      `  ${JSON.stringify(id)}: [\n${models.map((model) => `    ${JSON.stringify(model)}`).join(',\n')}\n  ]`,
-  )
+  const providers = ids.map((id) => {
+    const models = body.models
+      .filter(
+        (model) =>
+          model.provider === id && !model.deprecatedAt && makesText(model),
+      )
+      .map(trimModel)
+      .sort((a, b) => a.rawId.localeCompare(b.rawId))
+    if (models.length === 0)
+      throw new Error(`modelschemas has no chat models for provider '${id}'`)
+    return `  ${JSON.stringify(id)}: [\n${models.map((model) => `    ${JSON.stringify(model)}`).join(',\n')}\n  ]`
+  })
   await writeFile(OUTPUT_PATH, `{\n${providers.join(',\n')}\n}\n`)
   console.log(`Wrote ${ids.length} providers to ${OUTPUT_PATH}`)
 }

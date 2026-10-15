@@ -371,7 +371,13 @@ export const models: ReadonlyArray<ModelRecord> = [
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
     input: ['text', 'image', 'audio', 'video', 'document'],
     reasoning: {
-      levels: { low: 'low', medium: 'medium', high: 'high' },
+      levels: {
+        off: 'off',
+        minimal: 'minimal',
+        low: 'low',
+        medium: 'medium',
+        high: 'high',
+      },
       budget: false,
     },
     cost: {
@@ -400,7 +406,13 @@ export const models: ReadonlyArray<ModelRecord> = [
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
     input: ['text', 'image', 'audio', 'video', 'document'],
     reasoning: {
-      levels: { low: 'low', medium: 'medium', high: 'high' },
+      levels: {
+        off: 'off',
+        minimal: 'minimal',
+        low: 'low',
+        medium: 'medium',
+        high: 'high',
+      },
       budget: false,
     },
     cost: {
@@ -598,13 +610,7 @@ export const models: ReadonlyArray<ModelRecord> = [
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
     input: ['text'],
     reasoning: {
-      levels: {
-        off: 'off',
-        minimal: 'minimal',
-        low: 'low',
-        medium: 'medium',
-        high: 'high',
-      },
+      levels: { low: 'low', medium: 'medium', high: 'high' },
       budget: false,
     },
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

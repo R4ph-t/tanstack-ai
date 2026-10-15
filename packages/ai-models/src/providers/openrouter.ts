@@ -279,7 +279,7 @@ export const models: ReadonlyArray<ModelRecord> = [
       levels: { off: 'none', low: 'low', high: 'high', max: 'max' },
       budget: false,
     },
-    cost: { input: 0.41, output: 14.9, cacheRead: 0.4, cacheWrite: 0 },
+    cost: { input: 0.4, output: 14, cacheRead: 0.3, cacheWrite: 0 },
     contextWindow: 1048576,
     maxTokens: 943718,
     compat: {
@@ -11420,7 +11420,7 @@ export const models: ReadonlyArray<ModelRecord> = [
       levels: { off: 'none', high: 'high', xhigh: 'xhigh' },
       budget: false,
     },
-    cost: { input: 0.037, output: 4.4, cacheRead: 0.036, cacheWrite: 0 },
+    cost: { input: 0.037, output: 7, cacheRead: 0.036, cacheWrite: 0 },
     contextWindow: 1048576,
     maxTokens: 943718,
     compat: {
