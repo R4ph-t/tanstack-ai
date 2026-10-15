@@ -1038,6 +1038,11 @@
           "updatedAt": "2026-10-14"
         },
         {
+          "label": "Code mode in a harness",
+          "to": "harness/code-mode",
+          "addedAt": "2026-10-13"
+        },
+        {
           "label": "Run agents from a harness",
           "to": "harness/subagents",
           "addedAt": "2026-10-13",
