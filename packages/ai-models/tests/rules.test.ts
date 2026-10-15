@@ -21,6 +21,13 @@ const effort = (
   reasoning: { mode: 'effort', mandatory, efforts },
 })
 
+// Narrows past `false` so a test can read `.levels`.
+const levelsOf = (model: SchemaModel) => {
+  const reasoning = reasoningFrom(model)
+  if (!reasoning) throw new Error('expected reasoning')
+  return reasoning.levels
+}
+
 describe('reasoningFrom (modelschemas reasoning to levels)', () => {
   it('maps efforts to their levels, and none to off', () => {
     expect(
@@ -38,7 +45,7 @@ describe('reasoningFrom (modelschemas reasoning to levels)', () => {
   })
 
   it('keeps the provider case of a value', () => {
-    expect(reasoningFrom(effort(['LOW', 'HIGH'])).levels).toEqual({
+    expect(levelsOf(effort(['LOW', 'HIGH']))).toEqual({
       low: 'LOW',
       high: 'HIGH',
     })
@@ -53,32 +60,32 @@ describe('reasoningFrom (modelschemas reasoning to levels)', () => {
 
   it('a model that is not mandatory gets off (Claude adaptive)', () => {
     expect(
-      reasoningFrom({
+      levelsOf({
         rawId: 'm',
         reasoning: { mode: 'adaptive', mandatory: false, efforts: ['high'] },
-      }).levels,
+      }),
     ).toEqual({ off: 'none', high: 'high' })
   })
 
   it('a mandatory model has no off, even with a none effort', () => {
-    expect(reasoningFrom(effort(['none', 'high'], true)).levels).toEqual({
+    expect(levelsOf(effort(['none', 'high'], true))).toEqual({
       high: 'high',
     })
   })
 
   it('takes the off value from the request map', () => {
     expect(
-      reasoningFrom({
+      levelsOf({
         ...effort(['low', 'high'], false),
         requestMap: {
           thinking: { levels: { off: 'disabled', medium: 'high' } },
         },
-      }).levels,
+      }),
     ).toEqual({ off: 'disabled', low: 'low', high: 'high' })
   })
 
   it('default with no high is the high value (Groq)', () => {
-    expect(reasoningFrom(effort(['none', 'default'])).levels).toEqual({
+    expect(levelsOf(effort(['none', 'default']))).toEqual({
       off: 'none',
       high: 'default',
     })
