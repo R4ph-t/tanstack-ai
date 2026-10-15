@@ -3,7 +3,7 @@ import type { APIRequestContext } from '@playwright/test'
 
 /**
  * First-party harness plugins in a session: `agents()`, `permissions()`,
- * `projectInstructions()`, `title()`, `goal()`, and `codeMode()`. Each test runs one scenario of
+ * `projectInstructions()`, `title()`, `goal()`, `providerKeys()`, and `codeMode()`. Each test runs one scenario of
  * `/api/harness-first-party`. The model is the OpenAI adapter against
  * aimock, and aimock's journal shows what each model call sent.
  */
@@ -122,6 +122,18 @@ test.describe('harness first-party plugins', () => {
       title: 'Trip to Rome',
       failures: [],
     })
+  })
+
+  test('providerKeys(): /connect saves the pasted key, and the next turn uses it', async ({
+    request,
+    testId,
+  }) => {
+    const body = await runScenario(request, 'provider-keys', testId)
+    expect(body.secret).toBe(true)
+    expect(body.connected).toMatch(/^Connected to OpenAI \(key \.\.\./)
+    expect(body.connected).not.toContain(body.key)
+    expect(body.text).toBe('Hello with your key.')
+    expect(body.usedUserKey).toBe(true)
   })
 
   test('goal(): the judge says that the goal is met after one turn', async ({

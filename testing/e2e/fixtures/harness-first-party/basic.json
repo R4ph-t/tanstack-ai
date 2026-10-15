@@ -123,6 +123,14 @@
     },
     {
       "match": {
+        "userMessage": "[first-party-keys] hello"
+      },
+      "response": {
+        "content": "Hello with your key."
+      }
+    },
+    {
+      "match": {
         "userMessage": "[first-party-code-mode] which tools"
       },
       "response": {
