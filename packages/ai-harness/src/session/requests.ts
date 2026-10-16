@@ -735,6 +735,9 @@ export abstract class SessionRequests<
     }
   }
 
+  /** Operations that follow an input another host runs, or that ran before. */
+  private readonly followers = new Set<OperationImpl<ChatTurnResult>>()
+
   /**
    * Stop every running operation, wait for them, then dispose session plugins.
    * Safe to call twice.
@@ -750,9 +753,6 @@ export abstract class SessionRequests<
    * await session.close({ recoverable: true })
    * ```
    */
-  /** Operations that follow an input another host runs, or that ran before. */
-  private readonly followers = new Set<OperationImpl<ChatTurnResult>>()
-
   close(options?: { recoverable?: boolean }): Promise<void> {
     this.closing ??= (async () => {
       // A thread with work keeps its claim, so a sweep finds that work after

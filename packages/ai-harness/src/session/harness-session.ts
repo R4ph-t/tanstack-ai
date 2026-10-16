@@ -666,7 +666,7 @@ export class HarnessSession<
             continue
           }
           await this.failStoppedAgent({
-            operationId: input.operationId ?? '',
+            operationId: appliedOperationId(input),
             agent: first.input.agent,
             inputId: input.inputId,
             wake: first.input.detached,
@@ -690,9 +690,9 @@ export class HarnessSession<
           error: { message: 'The host stopped during this turn.' },
         })
       }
-      const operationId = input.operationId
+      const operationId = appliedOperationId(input)
       // The inputs that joined this turn settle with it, in one append.
-      const joined = this.joinedInputs(operationId ?? '', input.inputId)
+      const joined = this.joinedInputs(operationId, input.inputId)
       const ended = (settlement: SettlementOutcome) =>
         this.settle(
           ...[input.inputId, ...joined].map((inputId) => ({
@@ -872,4 +872,17 @@ export class HarnessSession<
       })
     }
   }
+}
+
+/**
+ * The operation of an input that the log says was applied. An applied record
+ * always names one: a missing id is a corrupt log, not an empty operation.
+ */
+function appliedOperationId(input: InputState): string {
+  if (input.operationId === undefined) {
+    throw new Error(
+      `The log has an applied input "${input.inputId}" with no operation id.`,
+    )
+  }
+  return input.operationId
 }

@@ -15,7 +15,7 @@ import {
 import { KEPT_SETTLED, SessionBase } from './base'
 import type { OperationImpl } from '../operation'
 import type { LogRecord } from '@tanstack/ai-persistence'
-import type { HarnessRecord } from '../log'
+import type { HarnessRecord, InputState } from '../log'
 import type { AnyHarness } from '../define'
 import type {
   ChatTurnResult,
@@ -564,7 +564,11 @@ export abstract class SessionInputs<
     if (logged?.settlement) return logged.settlement
     const refused =
       logged?.status === 'rejected'
-        ? { inputId, status: 'rejected' as const, reason: logged.reason ?? '' }
+        ? {
+            inputId,
+            status: 'rejected' as const,
+            reason: rejectedReason(logged),
+          }
         : this.receipts.get(inputId)
     if (refused?.status === 'rejected') throw new InputRejectedError(refused)
     return this.settlements.get(inputId)
@@ -739,4 +743,14 @@ export abstract class SessionInputs<
     }
     this.publishFinished(operation)
   }
+}
+
+/** The reason of a rejected input record. A rejected record always has one. */
+function rejectedReason(logged: InputState): string {
+  if (logged.reason === undefined) {
+    throw new Error(
+      `The log has a rejected input "${logged.inputId}" with no reason.`,
+    )
+  }
+  return logged.reason
 }

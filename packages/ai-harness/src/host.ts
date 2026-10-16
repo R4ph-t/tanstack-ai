@@ -860,7 +860,7 @@ export function createHarnessHost<TLogState = undefined>(
       if (failures.length > 0) {
         throw new AggregateError(
           failures,
-          `resumePending opened  threads;  failed to open.`,
+          `resumePending opened ${opened.length} threads; ${failures.length} failed to open.`,
         )
       }
       return opened

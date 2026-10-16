@@ -165,7 +165,9 @@ declare module '@tanstack/ai' {
    * `ctx.harness` in the `run` of an agent: `step` and `agents`. A harness
    * session gives them to each agent run it starts from code (a session
    * agent, `ctx.harness.agents.start`, a background child), and to the
-   * children those runs start through `ctx.chat({ subagents })`.
+   * children those runs start through `ctx.chat({ subagents })`. A run
+   * that a plain `chat()` starts outside a harness has no `harness` at
+   * run time: such an agent reads `ctx.harness` only inside a harness.
    */
   interface SubagentContextExtension {
     harness: HarnessAgentContext

@@ -129,10 +129,12 @@ export abstract class SessionTurn<
     let checked: unknown = input
     // A JSON Schema input runs unchecked, as a JSON Schema tool input does in
     // core. A Standard Schema input is validated and its parsed value runs.
+    // A bare `/name` sends no input: an object schema with only optional
+    // fields accepts `{}`.
     if (isStandardSchema(entry.command.input)) {
       const result = await validateWithStandardSchema(
         entry.command.input,
-        input,
+        input ?? {},
       )
       if (!result.success) {
         const reason = `Input validation failed for command ${name}: ${result.issues
@@ -261,7 +263,7 @@ export abstract class SessionTurn<
         inputId,
         operationId: operation.id,
         ...(error ? { outcome: 'failed', error } : { outcome: 'completed' }),
-      }).catch(() => {})
+      }).catch((failure: unknown) => this.warnSession('harness:log', failure))
     }
     if (error) operation.fail('failed', new Error(error.message))
     else operation.finish('completed', { text: '', media: [] })
@@ -290,7 +292,7 @@ export abstract class SessionTurn<
           operationId: operation.id,
           outcome: 'failed',
           error: { message },
-        }).catch(() => {})
+        }).catch((failure: unknown) => this.warnSession('harness:log', failure))
       }
       operation.fail('failed', failure)
       this.publishFinished(operation)

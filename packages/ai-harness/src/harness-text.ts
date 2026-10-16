@@ -348,8 +348,10 @@ export function harnessText(
         } finally {
           // A long-lived signal must not keep one listener per call.
           signal?.removeEventListener('abort', cancel)
-          // The host keeps the thread; the live session must not stay open.
-          await session.close().catch(() => {})
+          // A per-call thread ends with the call. A thread the caller named
+          // stays open on the host, for the next call and for the caller.
+          if (chatOptions.threadId === undefined)
+            await session.close().catch(() => {})
         }
       })(),
     structuredOutput: () =>
