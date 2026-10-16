@@ -712,7 +712,7 @@
           "label": "Build Your Own Adapter",
           "to": "persistence/build-your-own-adapter",
           "addedAt": "2026-08-04",
-          "updatedAt": "2026-10-13"
+          "updatedAt": "2026-10-16"
         },
         {
           "label": "Migrations",
@@ -761,7 +761,7 @@
           "label": "Store Reference",
           "to": "persistence/store-reference",
           "addedAt": "2026-08-04",
-          "updatedAt": "2026-10-15"
+          "updatedAt": "2026-10-16"
         },
         {
           "label": "How Persistence Works",
@@ -1034,7 +1034,7 @@
           "label": "Auth and connectors",
           "to": "harness/auth",
           "addedAt": "2026-10-13",
-          "updatedAt": "2026-10-15"
+          "updatedAt": "2026-10-16"
         },
         {
           "label": "Share a thread between people",
@@ -1046,7 +1046,7 @@
           "label": "Connect model providers",
           "to": "harness/provider-keys",
           "addedAt": "2026-10-13",
-          "updatedAt": "2026-10-14"
+          "updatedAt": "2026-10-16"
         },
         {
           "label": "Build your own UI",
@@ -1079,7 +1079,7 @@
           "label": "Use MCP servers",
           "to": "harness/mcp",
           "addedAt": "2026-10-13",
-          "updatedAt": "2026-10-15"
+          "updatedAt": "2026-10-16"
         },
         {
           "label": "Use from any MCP client",
@@ -1303,7 +1303,12 @@
           "label": "Bring Your Own Key",
           "to": "advanced/byok",
           "addedAt": "2026-08-18",
-          "updatedAt": "2026-10-13"
+          "updatedAt": "2026-10-16"
+        },
+        {
+          "label": "Keep Keys on the Server",
+          "to": "advanced/server-keys",
+          "addedAt": "2026-10-16"
         },
         {
           "label": "Debug Logging",

@@ -1,3 +1,4 @@
+import { memoryCredentialStore } from '@tanstack/ai/byok/server'
 import { describe, expect, it } from 'vitest'
 import { toolDefinition } from '@tanstack/ai'
 import { memoryLogStore, memoryPersistence } from '@tanstack/ai-persistence'
@@ -92,8 +93,8 @@ function nextEnd(session: HarnessSession) {
 
 /** The stores of a durable host, so a second host reads the same thread. */
 function durableStores() {
-  const { runs, metadata, credentials } = memoryPersistence().stores
-  return { log: memoryLogStore(), runs, metadata, credentials }
+  const { runs, metadata } = memoryPersistence().stores
+  return { log: memoryLogStore(), runs, metadata }
 }
 
 describe('require with wait', () => {
@@ -340,12 +341,13 @@ describe('sign-ins in a shared thread', () => {
       () => text('One issue.'),
     ])
     const persistence = memoryPersistence()
-    await persistence.stores.credentials.set({
+    const credentials = memoryCredentialStore()
+    await credentials.set({
       scope: { threadId: 't', userId: 'alice' },
       id: 'github',
       credential: { type: 'api_key', value: 'alice-key' },
     })
-    const host = createHarnessHost({ persistence })
+    const host = createHarnessHost({ persistence, credentials })
     const session = await host.open(
       defineHarness({
         name: 'test/auth-wait-shared',
@@ -377,7 +379,8 @@ describe('sign-ins in a shared thread', () => {
       () => text('One issue.'),
     ])
     const persistence = memoryPersistence()
-    const host = createHarnessHost({ persistence })
+    const credentials = memoryCredentialStore()
+    const host = createHarnessHost({ persistence, credentials })
     const harness = defineHarness({
       name: 'test/auth-wait-shared-http',
       adapter,
@@ -418,7 +421,6 @@ describe('sign-ins in a shared thread', () => {
     expect(await ended).toMatchObject({ outcome: 'completed' })
     expect(seen).toEqual(['bob-key'])
     expect(calls).toHaveLength(2)
-    const { credentials } = persistence.stores
     expect(
       await credentials.get({
         scope: { threadId: 't', userId: 'bob' },

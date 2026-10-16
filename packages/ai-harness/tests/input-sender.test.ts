@@ -1,3 +1,4 @@
+import { memoryCredentialStore } from '@tanstack/ai/byok/server'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { defineAgent, keyedAdapter, toolDefinition } from '@tanstack/ai'
@@ -49,8 +50,8 @@ function whoami() {
 }
 
 function durablePersistence() {
-  const { runs, metadata, credentials } = memoryPersistence().stores
-  return { stores: { log: memoryLogStore(), runs, metadata, credentials } }
+  const { runs, metadata } = memoryPersistence().stores
+  return { stores: { log: memoryLogStore(), runs, metadata } }
 }
 
 describe('the sender of each input', () => {
@@ -100,14 +101,15 @@ describe('the sender of each input', () => {
       return mockAdapter([() => text(`answered with ${key}`)]).adapter
     })
     const persistence = memoryPersistence()
+    const credentials = memoryCredentialStore()
     for (const user of ['alice', 'bob']) {
-      await persistence.stores.credentials.set({
+      await credentials.set({
         scope: { threadId: THREAD, userId: user },
         id: 'acme',
         credential: { type: 'api_key', value: `${user}-key` },
       })
     }
-    const host = createHarnessHost({ persistence })
+    const host = createHarnessHost({ persistence, credentials })
     const session = await host.open(
       defineHarness({ name: 'test/sender-keys', adapter }),
       { threadId: THREAD, principal: alice },
@@ -395,8 +397,9 @@ describe('the sender of each input', () => {
       }),
     })
     const persistence = memoryPersistence()
+    const credentials = memoryCredentialStore()
     for (const user of ['alice', 'bob']) {
-      await persistence.stores.credentials.set({
+      await credentials.set({
         scope: { threadId: THREAD, userId: user },
         id: 'acme',
         credential: { type: 'api_key', value: `${user}-key` },
@@ -406,7 +409,7 @@ describe('the sender of each input', () => {
       () => toolCall('startWriter', {}, 'c1'),
       () => text('started'),
     ])
-    const host = createHarnessHost({ persistence })
+    const host = createHarnessHost({ persistence, credentials })
     const session = await host.open(
       defineHarness({
         name: 'test/sender-agent',
@@ -667,8 +670,9 @@ describe('the tenant of a principal', () => {
       }),
     })
     const persistence = memoryPersistence()
+    const credentials = memoryCredentialStore()
     for (const tenantId of ['org-a', 'org-b']) {
-      await persistence.stores.credentials.set({
+      await credentials.set({
         scope: { threadId: THREAD, userId: 'u1', tenantId },
         id: 'github',
         credential: { type: 'api_key', value: `${tenantId}-token` },
@@ -680,7 +684,7 @@ describe('the tenant of a principal', () => {
       () => toolCall('readToken', {}, 'c2'),
       () => text('ok'),
     ])
-    const host = createHarnessHost({ persistence })
+    const host = createHarnessHost({ persistence, credentials })
     const session = await host.open(
       defineHarness({ name: 'test/tenant', adapter, plugins: () => [plugin] }),
       { threadId: THREAD, principal: { id: 'u1', tenantId: 'org-a' } },
@@ -696,7 +700,7 @@ describe('the tenant of a principal', () => {
   })
 
   it("reads the tenant's credential when the user has none, and the user's own first", async () => {
-    const store = memoryPersistence().stores.credentials
+    const store = memoryCredentialStore()
     // Saved without a userId: it belongs to the whole tenant.
     await store.set({
       scope: { threadId: THREAD, tenantId: 'org-a' },

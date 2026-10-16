@@ -14,6 +14,7 @@ import type {
   Principal,
   UserInput,
 } from '@tanstack/ai-harness'
+import type { CredentialStore } from '@tanstack/ai/byok'
 import type {
   SessionView,
   SessionViewSource,
@@ -38,8 +39,14 @@ export interface RunCliOptions {
   /** Where sessions keep state. Default: in memory. Do not set it with `host`. */
   persistence?: HarnessPersistence
   /**
+   * Where users' keys and sign-ins are saved. Default: in memory. Do not set
+   * it with `host`.
+   */
+  credentials?: CredentialStore
+  /**
    * Your own host, so the CLI keeps its hooks: leases, recovery, and stores.
-   * You own it: the CLI does not close it. Do not set it with `persistence`.
+   * You own it: the CLI does not close it. Do not set it with `persistence`
+   * or `credentials`.
    */
   host?: HarnessHost
   /**
@@ -133,15 +140,18 @@ export async function runCli(
     return EXIT.ok
   }
 
-  if (options.host && options.persistence) {
-    stderr.write('Give runCli a host or persistence, not both.\n')
+  if (options.host && (options.persistence || options.credentials)) {
+    stderr.write(
+      'Give runCli a host, or persistence and credentials, not both.\n',
+    )
     return EXIT.failed
   }
   const host =
     options.host ??
-    createHarnessHost(
-      options.persistence ? { persistence: options.persistence } : {},
-    )
+    createHarnessHost({
+      ...(options.persistence ? { persistence: options.persistence } : {}),
+      ...(options.credentials ? { credentials: options.credentials } : {}),
+    })
   const { principal } = options
   const approvals = args.yes ? 'auto' : 'ask'
   try {

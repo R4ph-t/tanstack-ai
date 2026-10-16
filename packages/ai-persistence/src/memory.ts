@@ -13,8 +13,6 @@ import type {
   BlobRange,
   BlobRecord,
   BlobStore,
-  Credential,
-  CredentialStore,
   GenerationRunRecord,
   GenerationRunStore,
   InboxEntry,
@@ -29,7 +27,6 @@ import type {
   MetadataStore,
   RunRecord,
   RunStore,
-  Scope,
   SessionIndexEntry,
   SessionIndexListOptions,
   SessionIndexPage,
@@ -683,56 +680,6 @@ class MemoryInboxStore implements InboxStore {
   }
 }
 
-class MemoryCredentialStore implements CredentialStore {
-  private readonly values = new Map<string, Map<string, Credential>>()
-  // A credential without a userId belongs to the tenant.
-  private owner(scope: Scope): string {
-    return JSON.stringify([scope.tenantId ?? null, scope.userId ?? null])
-  }
-  get({ scope, id }: { scope: Scope; id: string }): Promise<Credential | null> {
-    const stored = this.values.get(this.owner(scope))?.get(id)
-    return Promise.resolve(stored ? structuredClone(stored) : null)
-  }
-  set({
-    scope,
-    id,
-    credential,
-  }: {
-    scope: Scope
-    id: string
-    credential: Credential
-  }): Promise<void> {
-    const key = this.owner(scope)
-    let bucket = this.values.get(key)
-    if (!bucket) {
-      bucket = new Map()
-      this.values.set(key, bucket)
-    }
-    bucket.set(id, structuredClone(credential))
-    return Promise.resolve()
-  }
-  delete({ scope, id }: { scope: Scope; id: string }): Promise<void> {
-    this.values.get(this.owner(scope))?.delete(id)
-    return Promise.resolve()
-  }
-  list(
-    scope: Scope,
-  ): Promise<
-    Array<{ id: string; type: Credential['type']; expiresAt?: number }>
-  > {
-    const bucket = this.values.get(this.owner(scope))
-    return Promise.resolve(
-      [...(bucket?.entries() ?? [])].map(([id, credential]) => ({
-        id,
-        type: credential.type,
-        ...(credential.type === 'oauth' && credential.expiresAt !== undefined
-          ? { expiresAt: credential.expiresAt }
-          : {}),
-      })),
-    )
-  }
-}
-
 /** A JSON copy, so the log never shares an object with a caller. */
 function copyRecord(record: LogRecord): LogRecord {
   return JSON.parse(JSON.stringify(record))
@@ -1004,7 +951,6 @@ interface MemoryPersistenceStores {
   artifacts: ArtifactStore
   blobs: BlobStore
   inbox: InboxStore
-  credentials: CredentialStore
   workClaims: WorkClaimStore
   sessions: SessionIndexStore
 }
@@ -1013,7 +959,7 @@ interface MemoryPersistenceStores {
  * In-process reference backend for the full state + generation store set.
  *
  * Returns messages + activities + runs + generationRuns + interrupts +
- * metadata + artifacts + blobs + inbox + credentials + workClaims + sessions.
+ * metadata + artifacts + blobs + inbox + workClaims + sessions.
  * The session log is not included: a host can turn on more behavior when
  * `stores.log` is present, so add `memoryLogStore()` yourself (see its
  * example: a durable harness host takes no `messages` or `inbox`). Locks are not
@@ -1031,7 +977,6 @@ export function memoryPersistence() {
     artifacts: new MemoryArtifactStore(),
     blobs: new MemoryBlobStore(),
     inbox: new MemoryInboxStore(),
-    credentials: new MemoryCredentialStore(),
     workClaims: new MemoryWorkClaimStore(),
     sessions: new MemorySessionIndexStore(),
   }

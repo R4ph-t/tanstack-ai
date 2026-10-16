@@ -1,3 +1,4 @@
+import { memoryCredentialStore } from '@tanstack/ai/byok/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { inputRequired } from '@modelcontextprotocol/server'
 import { EventType } from '@tanstack/ai'
@@ -95,7 +96,8 @@ describe('mcpConnector', () => {
     const protectedServer = await startProtectedServer()
     cleanups.push(() => protectedServer.close())
     const persistence = memoryPersistence()
-    const host = createHarnessHost({ persistence })
+    const credentials = memoryCredentialStore()
+    const host = createHarnessHost({ persistence, credentials })
     cleanups.push(() => host.close())
     const harness = defineHarness({
       name: 'test/mcp-connector',
@@ -134,7 +136,7 @@ describe('mcpConnector', () => {
       protectedServer.seen.tokenRequests[0]?.get('code_verifier'),
     ).toBeTruthy()
 
-    const saved = await persistence.stores.credentials.get({
+    const saved = await credentials.get({
       scope: { threadId: 't', userId: 'user-1' },
       id: 'demo',
     })
@@ -155,7 +157,7 @@ describe('mcpConnector', () => {
 
     await session.command('disconnect:demo')
     expect(
-      await persistence.stores.credentials.get({
+      await credentials.get({
         scope: { threadId: 't', userId: 'user-1' },
         id: 'demo',
       }),
@@ -167,7 +169,8 @@ describe('mcpConnector', () => {
     cleanups.push(() => protectedServer.close())
     const model = recorder()
     const persistence = memoryPersistence()
-    const host = createHarnessHost({ persistence })
+    const credentials = memoryCredentialStore()
+    const host = createHarnessHost({ persistence, credentials })
     cleanups.push(() => host.close())
     const alice = { id: 'alice' }
     const bob = { id: 'bob' }
@@ -184,7 +187,7 @@ describe('mcpConnector', () => {
     const browser = approveSignIns(session, 'code-1')
     cleanups.push(browser.stop)
     const savedFor = (userId: string) =>
-      persistence.stores.credentials.get({
+      credentials.get({
         scope: { threadId: 't', userId },
         id: 'demo',
       })
@@ -217,11 +220,12 @@ describe('mcpConnector', () => {
     const first = { tenantId: 'a', id: 'b:c' }
     const second = { tenantId: 'a:b', id: 'c' }
     const persistence = memoryPersistence()
+    const credentials = memoryCredentialStore()
     for (const [principal, accessToken] of [
       [first, 'first-token'],
       [second, 'second-token'],
     ] as const) {
-      await persistence.stores.credentials.set({
+      await credentials.set({
         scope: {
           threadId: 't',
           tenantId: principal.tenantId,
@@ -281,7 +285,7 @@ describe('mcpConnector', () => {
       })
     }
     const model = recorder()
-    const host = createHarnessHost({ persistence })
+    const host = createHarnessHost({ persistence, credentials })
     cleanups.push(() => host.close())
     const session = await host.open(
       defineHarness({
@@ -356,14 +360,15 @@ describe('mcpConnector', () => {
     async (_name, start) => {
       const trips = await start()
       const persistence = memoryPersistence()
+      const credentials = memoryCredentialStore()
       // A saved sign-in, so the test skips the OAuth steps.
-      await persistence.stores.credentials.set({
+      await credentials.set({
         scope: { threadId: 't', userId: 'user-1' },
         id: 'trips',
         credential: { type: 'oauth', accessToken: 'access-1' },
       })
       const model = recorder('trips_book')
-      const host = createHarnessHost({ persistence })
+      const host = createHarnessHost({ persistence, credentials })
       cleanups.push(() => host.close())
       const session = await host.open(
         defineHarness({

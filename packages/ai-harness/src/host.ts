@@ -1,5 +1,7 @@
 import { EventType } from '@tanstack/ai'
+import { memoryCredentialStore } from '@tanstack/ai/byok/server'
 import { memoryPersistence } from '@tanstack/ai-persistence'
+import type { CredentialStore } from '@tanstack/ai/byok'
 import { SharedLog, loadLogState } from './log'
 import { LEASE } from './resume'
 import { HarnessSession } from './session/index'
@@ -12,7 +14,6 @@ import type {
   ArtifactStore,
   BlobStore,
   ChatTranscriptStores,
-  CredentialStore,
   GenerationRunStore,
   InboxStore,
   InterruptStore,
@@ -32,7 +33,6 @@ import type { LeaseOptions } from './resume'
 import type { ForkPoint, Principal } from './types'
 
 type SharedStores = {
-  credentials?: CredentialStore
   artifacts?: ArtifactStore
   blobs?: BlobStore
   generationRuns?: GenerationRunStore
@@ -87,6 +87,12 @@ export type HarnessPersistence =
 export interface HarnessHostOptions<TLogState = undefined> {
   /** Where sessions keep their state. Default: in memory, lost on restart. */
   persistence?: HarnessPersistence
+  /**
+   * Where users' API keys and OAuth tokens are saved: a table in your own
+   * database, or a secrets manager. Encrypt the secrets at rest. Default: in
+   * memory, lost on restart.
+   */
+  credentials?: CredentialStore
   /**
    * How a durable host folds your own log records into the model context.
    * Only a host with `stores.log` reads it.
@@ -585,9 +591,9 @@ export function createHarnessHost<TLogState = undefined>(
   // to keep accepted inputs across restarts. A durable host keeps them in
   // the log instead.
   const inbox = persistence.stores.inbox ?? memory.inbox
-  // ponytail: memory credentials when the stores have none. Pass
-  // `stores.credentials` to keep sign-ins across restarts.
-  const credentials = persistence.stores.credentials ?? memory.credentials
+  // ponytail: memory credentials when none are given. Pass `credentials`
+  // to keep sign-ins across restarts.
+  const credentials = options.credentials ?? memoryCredentialStore()
   // ponytail: memory media stores when the stores have none. Pass
   // `stores.artifacts`, `stores.blobs`, and `stores.generationRuns` to keep
   // media across restarts.

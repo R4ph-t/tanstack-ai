@@ -1,3 +1,4 @@
+import type { CredentialStore } from '@tanstack/ai/byok'
 import type {
   SubagentBudget,
   Interrupt,
@@ -12,7 +13,6 @@ import type {
   AIPersistence,
   ArtifactStore,
   BlobStore,
-  CredentialStore,
   GenerationRunStore,
   InboxStore,
   LogStore,

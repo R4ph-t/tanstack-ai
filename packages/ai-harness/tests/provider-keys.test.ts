@@ -1,3 +1,4 @@
+import { memoryCredentialStore } from '@tanstack/ai/byok/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EventType, defineAgent } from '@tanstack/ai'
 import { defineByokProvider, keyedAdapter } from '@tanstack/ai/byok'
@@ -52,7 +53,8 @@ async function open(options: {
   subagents?: Array<AnyAgent>
 }) {
   const persistence = memoryPersistence()
-  const host = createHarnessHost({ persistence })
+  const credentials = memoryCredentialStore()
+  const host = createHarnessHost({ persistence, credentials })
   const session = await host.open(
     defineHarness({
       name: 'test/provider-keys',
@@ -70,7 +72,7 @@ async function open(options: {
       events.push(entry)
   })()
   const saveKey = (value: string) =>
-    persistence.stores.credentials.set({
+    credentials.set({
       scope: USER,
       id: 'acme',
       credential: {
@@ -83,7 +85,7 @@ async function open(options: {
     await reading
     await host.close()
   }
-  return { session, persistence, events, saveKey, close }
+  return { session, persistence, credentials, events, saveKey, close }
 }
 
 /** The connectors named by the `harness.auth_required` events. */
@@ -236,7 +238,7 @@ describe('providerKeys', () => {
   }
 
   it('saves a pasted key and shows it masked', async () => {
-    const { session, persistence, close } = await open({
+    const { session, credentials, close } = await open({
       adapter: mockAdapter([]).adapter,
       plugins: [plugin()],
     })
@@ -246,9 +248,7 @@ describe('providerKeys', () => {
       secret: true,
     })
     expect(result).toBe('Connected to Acme (key ...5678).')
-    expect(
-      await persistence.stores.credentials.get({ scope: USER, id: 'acme' }),
-    ).toEqual({
+    expect(await credentials.get({ scope: USER, id: 'acme' })).toEqual({
       type: 'api_key',
       value: PASTED_KEY,
     })
@@ -282,21 +282,19 @@ describe('providerKeys', () => {
   })
 
   it('refuses an empty key', async () => {
-    const { session, persistence, close } = await open({
+    const { session, credentials, close } = await open({
       adapter: mockAdapter([]).adapter,
       plugins: [plugin()],
     })
     await expect(connectWith(session, '   ')).rejects.toThrow(
       'No Acme key was given. Nothing was saved.',
     )
-    expect(
-      await persistence.stores.credentials.get({ scope: USER, id: 'acme' }),
-    ).toBeNull()
+    expect(await credentials.get({ scope: USER, id: 'acme' })).toBeNull()
     await close()
   })
 
   it('stops a cancelled /connect, and a late answer saves nothing', async () => {
-    const { session, persistence, close } = await open({
+    const { session, credentials, close } = await open({
       adapter: mockAdapter([]).adapter,
       plugins: [plugin()],
     })
@@ -312,14 +310,12 @@ describe('providerKeys', () => {
         questionId: question.questionId,
         value: PASTED_KEY,
       })
-    expect(
-      await persistence.stores.credentials.get({ scope: USER, id: 'acme' }),
-    ).toBeNull()
+    expect(await credentials.get({ scope: USER, id: 'acme' })).toBeNull()
     await close()
   })
 
   it('deletes the key on disconnect', async () => {
-    const { session, persistence, saveKey, close } = await open({
+    const { session, credentials, saveKey, close } = await open({
       adapter: mockAdapter([]).adapter,
       plugins: [plugin()],
     })
@@ -327,9 +323,7 @@ describe('providerKeys', () => {
     expect(await session.command('disconnect:acme')).toBe(
       'Disconnected from Acme.',
     )
-    expect(
-      await persistence.stores.credentials.get({ scope: USER, id: 'acme' }),
-    ).toBeNull()
+    expect(await credentials.get({ scope: USER, id: 'acme' })).toBeNull()
     expect(await session.command('keys')).toContain(
       'Acme: missing. Run /connect acme.',
     )
@@ -337,7 +331,7 @@ describe('providerKeys', () => {
   })
 
   it('opens the key page of a provider with keyUrl before it asks', async () => {
-    const { session, persistence, events, close } = await open({
+    const { session, credentials, events, close } = await open({
       adapter: mockAdapter([]).adapter,
       plugins: [
         providerKeys({
@@ -355,9 +349,7 @@ describe('providerKeys', () => {
       secret: true,
     })
     expect(result).toBe('Connected to Acme (key ...5678).')
-    expect(
-      await persistence.stores.credentials.get({ scope: USER, id: 'acme' }),
-    ).toEqual({
+    expect(await credentials.get({ scope: USER, id: 'acme' })).toEqual({
       type: 'api_key',
       value: PASTED_KEY,
     })
@@ -369,7 +361,7 @@ describe('providerKeys', () => {
       ctx.open('https://acme.example/sign-in')
       return 'sk-acme-signed-9876'
     }
-    const { session, persistence, events, close } = await open({
+    const { session, credentials, events, close } = await open({
       adapter: mockAdapter([]).adapter,
       plugins: [providerKeys({ providers: [{ ...acme, signIn }] })],
     })
@@ -379,9 +371,7 @@ describe('providerKeys', () => {
     expect(authRequired(events)).toEqual([
       { connector: 'acme', url: 'https://acme.example/sign-in' },
     ])
-    expect(
-      await persistence.stores.credentials.get({ scope: USER, id: 'acme' }),
-    ).toEqual({
+    expect(await credentials.get({ scope: USER, id: 'acme' })).toEqual({
       type: 'api_key',
       value: 'sk-acme-signed-9876',
     })

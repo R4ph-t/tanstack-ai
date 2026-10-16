@@ -167,7 +167,7 @@ Use `keyOf` in `get`, `set`, `delete`, and `list` of the store in [Keep credenti
 Some services have one key for the whole organization, for example a company account. Save that key once, with no `userId`. Every user of the tenant can then use it:
 
 ```ts group=harness-shared-threads
-import type { CredentialStore } from '@tanstack/ai-persistence'
+import type { CredentialStore } from '@tanstack/ai/byok'
 
 // Your admin code. A credential without a userId belongs to the tenant.
 export async function shareKey(
@@ -176,14 +176,12 @@ export async function shareKey(
   value: string,
 ) {
   await store.set({
-    scope: { threadId: 'admin', tenantId },
+    scope: { tenantId },
     id: 'linear',
     credential: { type: 'api_key', value },
   })
 }
 ```
-
-The store keys credentials by user and tenant, so the `threadId` of this scope has no effect.
 
 - A turn reads the credential of its sender first. If the sender has none, the turn reads the credential of the tenant.
 - A save from a turn goes to the sender only. This includes `connect:<id>` and `ctx.credentials.set`. The credential of the tenant does not change.

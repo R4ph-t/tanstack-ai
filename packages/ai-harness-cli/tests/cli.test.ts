@@ -1,3 +1,4 @@
+import { memoryCredentialStore } from '@tanstack/ai/byok/server'
 import { Readable } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
 import { EventType, defineAgent, toolDefinition } from '@tanstack/ai'
@@ -339,6 +340,7 @@ describe('secret answers in line mode', () => {
   ) {
     const stdout = capture()
     const persistence = memoryPersistence()
+    const credentials = memoryCredentialStore()
     await runCli(
       defineHarness({
         name: 'test/secret',
@@ -351,9 +353,10 @@ describe('secret answers in line mode', () => {
         stdout,
         stderr: capture(),
         persistence,
+        credentials,
       },
     )
-    const saved = await persistence.stores.credentials.get({
+    const saved = await credentials.get({
       scope: { threadId: 'main' },
       id: 'acme',
     })
@@ -388,7 +391,8 @@ describe('secret answers in line mode', () => {
 describe('a host and a principal', () => {
   it('uses the given host, leaves it open, and saves keys for the principal', async () => {
     const persistence = memoryPersistence()
-    const host = createHarnessHost({ persistence })
+    const credentials = memoryCredentialStore()
+    const host = createHarnessHost({ persistence, credentials })
     const close = vi.spyOn(host, 'close')
     const code = await runCli(
       defineHarness({
@@ -410,7 +414,7 @@ describe('a host and a principal', () => {
     expect(code).toBe(EXIT.ok)
     expect(close).not.toHaveBeenCalled()
     const saved = (userId?: string) =>
-      persistence.stores.credentials.get({
+      credentials.get({
         scope: { threadId: 'main', ...(userId ? { userId } : {}) },
         id: 'acme',
       })
@@ -459,13 +463,14 @@ describe('a host and a principal', () => {
       },
     )
     expect(code).toBe(EXIT.failed)
-    expect(stderr.text).toContain('host or persistence')
+    expect(stderr.text).toContain('not both')
     await host.close()
   })
 
   it('serves as the principal', async () => {
     const persistence = memoryPersistence()
-    const host = createHarnessHost({ persistence })
+    const credentials = memoryCredentialStore()
+    const host = createHarnessHost({ persistence, credentials })
     const server = await serve({
       host,
       harness: defineHarness({
@@ -505,7 +510,7 @@ describe('a host and a principal', () => {
       })
       await vi.waitFor(async () =>
         expect(
-          await persistence.stores.credentials.get({
+          await credentials.get({
             scope: { threadId: 't', userId: 'ada' },
             id: 'acme',
           }),

@@ -9,7 +9,7 @@
  *
  * Covers the five chat state stores (`messages`, `activities`, `runs`,
  * `interrupts`, `metadata`), the three generation stores (`generationRuns`,
- * `artifacts`, `blobs`), and the opt-in session stores (`credentials`, `inbox`,
+ * `artifacts`, `blobs`), and the opt-in session stores (`inbox`,
  * `workClaims`, `log`, `leases`, `sessions`). The session store cases run only
  * when the store is present, so they need no `skip` entry. Locks are not part of
  * this suite — they are a separate coordination concern (`LockStore` +
@@ -1581,52 +1581,6 @@ export function runPersistenceConformance(
 
     // The session stores below are opt-in. A backend without one skips its
     // cases and needs no `skip` entry.
-    describe('credentials', () => {
-      it('keys by user and tenant, lists without values, and deletes', async (ctx) => {
-        const store = persistence.stores.credentials
-        if (!store) return ctx.skip('credentials store not provided')
-
-        const user = { threadId: 't', userId: 'u1', tenantId: 'org' }
-        const tenant = { threadId: 't', tenantId: 'org' }
-        await store.set({
-          scope: user,
-          id: 'github',
-          credential: {
-            type: 'oauth',
-            accessToken: 'secret-access',
-            refreshToken: 'secret-refresh',
-            expiresAt: 100,
-          },
-        })
-        await store.set({
-          scope: tenant,
-          id: 'notion',
-          credential: {
-            type: 'api_key',
-            value: 'secret-key',
-          },
-        })
-
-        expect(await store.get({ scope: user, id: 'github' })).toMatchObject({
-          accessToken: 'secret-access',
-        })
-        // A user credential is not visible at tenant scope, and the other way around.
-        expect(await store.get({ scope: tenant, id: 'github' })).toBeNull()
-        expect(await store.get({ scope: user, id: 'notion' })).toBeNull()
-
-        const listed = await store.list(user)
-        expect(listed).toEqual([
-          { id: 'github', type: 'oauth', expiresAt: 100 },
-        ])
-        // `list` never returns secret values.
-        expect(JSON.stringify(listed)).not.toContain('secret')
-
-        await store.delete({ scope: user, id: 'github' })
-        expect(await store.get({ scope: user, id: 'github' })).toBeNull()
-        expect(await store.list(user)).toEqual([])
-      })
-    })
-
     describe('inbox', () => {
       it('appends idempotently, lists pending oldest first, and settles entries', async (ctx) => {
         const store = persistence.stores.inbox
