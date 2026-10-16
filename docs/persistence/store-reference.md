@@ -610,7 +610,7 @@ Write the input to the inbox before you answer the client. `InboxStore` keeps on
 entry per `inputId`.
 
 ```ts
-type InboxStatus = 'pending' | 'applied' | 'rejected' | 'expired'
+type InboxStatus = 'pending' | 'applied' | 'rejected'
 
 interface InboxEntry {
   inputId: string // the idempotency key
@@ -805,7 +805,7 @@ Rules for an implementation:
 - `renew` and `release` for a lease you do not hold can do nothing.
 - Key a lease by input id and attempt. Two attempts of one input are two leases.
 
-This store keeps leases in a `Map`:
+`memoryLeaseStore()` is the reference store. It is not part of `memoryPersistence()`, so add it yourself. This store does the same with a `Map`:
 
 ```ts
 import type {
@@ -1100,11 +1100,11 @@ erDiagram
 
 ## Typing an adapter
 
-Each store except `leases` has a `define*Store` helper (`defineMessageStore`,
+Each store has a `define*Store` helper (`defineMessageStore`,
 `defineRunStore`, `defineInterruptStore`, `defineMetadataStore`,
 `defineActivityStore`, `defineGenerationRunStore`, `defineArtifactStore`,
 `defineBlobStore`, `defineInboxStore`, `defineCredentialStore`, `defineLogStore`,
-`defineWorkClaimStore`, `defineSessionIndexStore`). They compose into `defineAIPersistence`, which tracks
+`defineWorkClaimStore`, `defineSessionIndexStore`, `defineLeaseStore`). They compose into `defineAIPersistence`, which tracks
 exact presence: the stores you passed autocomplete on `persistence.stores`, and
 reading one you did not pass is a compile error.
 

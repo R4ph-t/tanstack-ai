@@ -78,7 +78,7 @@ export const greeter = definePlugin({
 })
 ```
 
-- `session.command('greet', { name: 'Ada' })` runs the command. The input is checked against its schema.
+- `session.command('greet', { name: 'Ada' })` runs the command. A Standard Schema input (zod here) is checked, and the command gets the parsed value. A JSON Schema input is not checked, the same as a JSON Schema tool input.
 - `session.setConfig({ key: 'tone', value: 'warm' })` changes the setting. A value the option does not accept is rejected.
 - `ask` waits for `session.answer({ questionId, value })`. The question shows up in `session.snapshot().pendingQuestions`.
 
@@ -166,7 +166,7 @@ export const helpers = definePlugin({
 
 ## Keep state
 
-`ctx.state(initial)` gives a plugin its own state, saved in the metadata store. Clients see each change as an AG-UI `STATE_SNAPSHOT` event.
+`ctx.state(initial)` gives a plugin its own state, saved in the metadata store. Without a metadata store, the state stays in memory, and a restart loses it. Clients see each change as an AG-UI `STATE_SNAPSHOT` event.
 
 ```ts group=harness-plugins
 export const counter = definePlugin({

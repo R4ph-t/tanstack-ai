@@ -20,7 +20,7 @@ A review command needs an explorer to collect facts, then a reviewer to judge th
 
 ```ts group=harness-subagents
 import { defineAgent } from '@tanstack/ai'
-import { defineCommand, definePlugin, harnessContext } from '@tanstack/ai-harness'
+import { defineCommand, definePlugin } from '@tanstack/ai-harness'
 import { openaiText } from '@tanstack/ai-openai'
 import { z } from 'zod'
 
@@ -61,6 +61,7 @@ export const review = definePlugin({
 
 - `ctx.agents.run(agent, input)` runs one agent and resolves with its result.
 - `ctx.agents.start(agent, input, { wake: true })` runs it in the background and starts a turn when it finishes or fails.
+- `ctx.agents.start(agent, input, { principal })` runs it as that user. Without `principal`, it runs as the user of the current turn. The wake turn runs as the same user.
 - `ctx.agents.group(options, body)` runs several. With `onFailure: 'cancel-siblings'`, one failure cancels the others. With `'collect'`, use `group.runSettled` to get every result or error. Every child settles before `group` returns.
 
 The turn that `wake: true` starts sends the model a user message from the harness, for example `Background agent pricer finished: ...`. The user did not write it. So the transcript marks it with `metadata.harness.wake: true`. In your chat UI, skip the user messages with this mark.
@@ -87,7 +88,7 @@ const migrator = defineAgent({
   description: 'Moves the data of one customer to the new region',
   inputSchema: z.object({ customer: z.string() }),
   run: async (ctx) => {
-    const { step } = harnessContext(ctx)
+    const { step } = ctx.harness
     // Each side effect is a step. A finished step does not run again.
     const exportId = await step.do('export', () => startExport(ctx.input.customer))
     await step.do('import', () => importInto('eu-west', exportId))
@@ -118,10 +119,10 @@ export const migrations = definePlugin({
 ```
 
 1. Give the host a session log (`stores.log`). See [Durable sessions](./durable-sessions). Without a log, `start` with `resume: true` throws.
-2. Put each side effect in `harnessContext(ctx).step.do(name, fn)`. The agent code runs again from its start, and a finished step returns its stored value.
+2. Put each side effect in `ctx.harness.step.do(name, fn)`. The agent code runs again from its start, and a finished step returns its stored value.
 3. Give each step a name that is the same on every run, and return a JSON value from `fn`.
 
-`harnessContext` comes from `@tanstack/ai-harness`. Outside a run that a session started, `step.do` runs `fn` each time.
+`ctx.harness` is on the context of every agent run that a session starts. Outside such a run, `step.do` runs `fn` each time.
 
 What the next host does:
 
@@ -138,7 +139,7 @@ A background agent drafts a post for ten minutes. Halfway through, the user sees
 
 ```ts group=harness-subagents-messages
 import { defineAgent } from '@tanstack/ai'
-import { createHarnessHost, defineHarness, harnessContext } from '@tanstack/ai-harness'
+import { createHarnessHost, defineHarness } from '@tanstack/ai-harness'
 import { memoryPersistence } from '@tanstack/ai-persistence'
 import { openaiText } from '@tanstack/ai-openai'
 
@@ -213,14 +214,14 @@ A run and all of its follow-ups keep their messages in one thread: `<threadId>:<
 
 ### Start agents from agent code
 
-An agent can start other agents in the background with `harnessContext(ctx).agents.start(agent, input, options)`. It returns a run that you can await, message, and cancel:
+An agent can start other agents in the background with `ctx.harness.agents.start(agent, input, options)`. It returns a run that you can await, message, and cancel:
 
 ```ts group=harness-subagents-messages
 const editor = defineAgent({
   name: 'editor',
   description: 'Starts two drafts and joins them',
   run: async (ctx) => {
-    const { agents } = harnessContext(ctx)
+    const { agents } = ctx.harness
     const intro = agents.start(drafter)
     const outro = agents.start(drafter)
     await intro.send('Keep it under 100 words.')
@@ -328,6 +329,7 @@ const studio = defineHarness({
 
 const host = createHarnessHost({ persistence: memoryPersistence() })
 const session = await host.open(studio, { threadId: 'user-1-thread' })
+await session.prompt('Write a short intro, then have the writer edit it.')
 
 for (const message of await session.transcript()) {
   if (message.role !== 'tool' || typeof message.content !== 'string') continue

@@ -7,7 +7,7 @@ Add opt-in session stores. The chat and generation middleware work as before wit
 - `inbox` (`InboxStore`): the inputs a host accepted, with an idempotent `append` by `inputId`, `listPending`, `markApplied`, `markRejected`, and `get`.
 - `credentials` (`CredentialStore`): API keys and OAuth tokens by scope and id. An `oauth` credential can keep the OAuth `client` it was issued to. `list` never returns secret values.
 - `log` (`LogStore`): an append-only log per thread. `append` writes a batch at a position, all or nothing, and rejects with `LogConflictError` when another writer took that position. `read` and `subscribe` complete it. `memoryLogStore()` is the reference store. It is not part of `memoryPersistence()`.
-- `leases` (`LeaseStore`, `TurnLease`, `TurnLeaseKey`): turn leases from a system that already has them.
+- `leases` (`LeaseStore`, `TurnLease`, `TurnLeaseKey`): turn leases from a system that already has them. `defineLeaseStore()` types a custom one, `memoryLeaseStore()` is the reference store, and the conformance testkit covers it. It is not part of `memoryPersistence()`.
 - `workClaims` (`WorkClaimStore`): claims on threads that have pending work, with `claim`, `release`, and `listExpired`.
 - `sessions` (`SessionIndexStore`): one index entry per thread, with `upsert`, `get`, `list`, and `delete`. `list` filters by parent thread, owner, title `search`, `harness` name, and exact `metadata` values, and pages with a cursor. The optional `getVersioned` and `upsertIf` give compare-and-set writes.
 
