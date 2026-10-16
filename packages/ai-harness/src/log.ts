@@ -15,6 +15,7 @@ import type {
   Cursor,
   HarnessInput,
   InputSettlement,
+  SettlementOutcome,
   SessionEvent,
   WaitingInput,
 } from './types'
@@ -52,13 +53,11 @@ export type HarnessRecord =
       inputId: string
       delivery: WaitingInput['delivery']
     }
-  | {
+  | ({
       type: 'harness.input.settled'
       inputId: string
-      outcome: InputSettlement['outcome']
       operationId?: string
-      error?: InputSettlement['error']
-    }
+    } & SettlementOutcome)
   | { type: 'harness.tool.result'; toolCallId: string; message: ModelMessage }
   | {
       type: 'harness.tool.started'
@@ -425,9 +424,10 @@ export function foldEntry(
         status: 'settled',
         settlement: {
           inputId: record.inputId,
-          outcome: record.outcome,
           ...(record.operationId ? { operationId: record.operationId } : {}),
-          ...(record.error ? { error: record.error } : {}),
+          ...(record.outcome === 'failed'
+            ? { outcome: 'failed', error: record.error }
+            : { outcome: record.outcome }),
         },
       }))
       return

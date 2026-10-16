@@ -65,12 +65,14 @@ export type OperationStatus =
   | 'cancelled'
 
 /** The immediate answer to an input. `applied` arrives later as an event. */
-export interface Receipt {
-  inputId: string
-  status: 'accepted' | 'queued' | 'rejected'
-  operationId?: string
-  reason?: string
-}
+export type Receipt = { inputId: string } & (
+  | {
+      status: 'accepted' | 'queued'
+      /** The operation that runs the input, when the session knows it already. */
+      operationId?: string
+    }
+  | { status: 'rejected'; reason: string; operationId?: never }
+)
 
 /** Opaque position in a session's event stream. */
 export type Cursor = string
@@ -272,18 +274,32 @@ export type ThreadSettingsChange = {
 }
 
 /** How an input ended. `session.settled(inputId)` resolves to it. */
-export interface InputSettlement {
+export type InputSettlement = {
   inputId: string
-  /**
-   * `interrupted`: the turn stopped for human input. The `resolve` that
-   * answers it is a new input with its own settlement.
-   */
-  outcome: 'completed' | 'failed' | 'aborted' | 'interrupted'
   /** The operation that ran the input, when one started. */
   operationId?: string
-  /** Set for `failed`. `code` is `'attempts_exhausted'`, `'timeout'`, or absent. */
-  error?: { message: string; code?: string }
-}
+} & (
+  | {
+      /**
+       * `interrupted`: the turn stopped for human input. The `resolve` that
+       * answers it is a new input with its own settlement.
+       */
+      outcome: 'completed' | 'aborted' | 'interrupted'
+      error?: never
+    }
+  | {
+      outcome: 'failed'
+      /** `code` is `'attempts_exhausted'`, `'timeout'`, or absent. */
+      error: { message: string; code?: string }
+    }
+)
+
+/** The `outcome` of a settlement, with its `error` when it failed. */
+export type SettlementOutcome = InputSettlement extends infer S
+  ? S extends InputSettlement
+    ? Omit<S, 'inputId' | 'operationId'>
+    : never
+  : never
 
 /**
  * An awaited operation rejects with this error when the session refused its
@@ -294,18 +310,22 @@ export class InputRejectedError extends Error {
   readonly receipt: Receipt
 
   constructor(receipt: Receipt) {
-    super(rejectionMessage(receipt.reason))
+    super(
+      rejectionMessage(
+        receipt.status === 'rejected' ? receipt.reason : 'not rejected',
+      ),
+    )
     this.name = 'InputRejectedError'
     this.receipt = receipt
   }
 }
 
-function rejectionMessage(reason: string | undefined) {
+function rejectionMessage(reason: string) {
   if (reason === 'busy') return 'A chat turn is already running.'
   if (reason === 'conflict') {
     return 'An earlier input has this inputId and another payload.'
   }
-  return `The session rejected the input: ${reason ?? 'rejected'}.`
+  return `The session rejected the input: ${reason}.`
 }
 
 /** Who sent an input, from the host's `authorize`. */
@@ -392,6 +412,8 @@ export interface Operation<TResult> extends PromiseLike<TResult> {
 
 /** A background agent run. `send` adds a message to it. */
 export interface AgentRun<TResult> extends Operation<TResult> {
+  readonly kind: 'agent'
+  readonly agent: string
   /**
    * Add a message to this run. `mode: 'steer'` (default) gives it to the
    * run's next model call. When the run makes no further model call, it
@@ -410,7 +432,7 @@ export interface AgentRun<TResult> extends Operation<TResult> {
 export type MediaKind = 'image' | 'audio' | 'video' | 'document'
 
 /** A file in a thread's media store: sent by a user or made by an agent. */
-export interface MediaRecord {
+export type MediaRecord = {
   id: string
   threadId: string
   kind: MediaKind
@@ -418,14 +440,18 @@ export interface MediaRecord {
   name: string
   /** Size in bytes. */
   size: number
-  source: 'user' | 'generated'
   /** Epoch milliseconds. */
   createdAt: number
-  /** The operation that made generated media. */
-  runId?: string
-  /** The child agent run that made it, when a subagent did. */
-  subagentRunId?: string
-}
+} & (
+  | { source: 'user'; runId?: never; subagentRunId?: never }
+  | {
+      source: 'generated'
+      /** The operation that made it. */
+      runId: string
+      /** The child agent run that made it, when a subagent did. */
+      subagentRunId?: string
+    }
+)
 
 /** Names of the `CUSTOM` events a harness session adds to the stream. */
 export const HARNESS_EVENTS = {

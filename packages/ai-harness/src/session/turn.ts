@@ -53,7 +53,7 @@ import type { AnyHarness } from '../define'
 import type { ModelErrorContext } from '../turn'
 import type { MountedPlugins } from '../plugins'
 import type {
-  InputSettlement,
+  SettlementOutcome,
   MediaRecord,
   Operation,
   Principal,
@@ -160,8 +160,9 @@ export abstract class SessionTurn<
       await this.settle({
         inputId,
         operationId: operation.id,
-        outcome: cancelled ? 'aborted' : 'failed',
-        error: { message },
+        ...(cancelled
+          ? { outcome: 'aborted' }
+          : { outcome: 'failed', error: { message } }),
       }).catch((failure: unknown) =>
         this.warnSession('harness:commands', failure),
       )
@@ -240,8 +241,7 @@ export abstract class SessionTurn<
       await this.settle({
         inputId,
         operationId: operation.id,
-        outcome: error ? 'failed' : 'completed',
-        ...(error ? { error } : {}),
+        ...(error ? { outcome: 'failed', error } : { outcome: 'completed' }),
       }).catch(() => {})
     }
     if (error) operation.fail('failed', new Error(error.message))
@@ -999,9 +999,7 @@ export abstract class SessionTurn<
       ...this.joinedInputs(operation.id, inputId),
     ]
     this.turnJoins.delete(operation.id)
-    const settleTurn = async (
-      settlement: Omit<InputSettlement, 'inputId' | 'operationId'>,
-    ) => {
+    const settleTurn = async (settlement: SettlementOutcome) => {
       if (settled.length > 0 && !this.logFailure) {
         await this.settle(
           ...settled.map((id) => ({

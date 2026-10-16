@@ -28,7 +28,7 @@ import type { InboxEntry } from '@tanstack/ai-persistence'
 import type { InputState, LogWriter } from '../log'
 import type { AnyHarness } from '../define'
 import type { RecoverContext, RecoverDecision } from '../turn'
-import type { HarnessInput, InputSettlement } from '../types'
+import type { HarnessInput, SettlementOutcome } from '../types'
 import type { WaitingSteer } from './types'
 
 /**
@@ -583,11 +583,8 @@ export class HarnessSession<
             : { action: 'run' },
         )
         if (decision.action === 'settle') {
-          await this.settle({
-            inputId: input.inputId,
-            outcome: decision.outcome,
-            ...(decision.error ? { error: decision.error } : {}),
-          })
+          const { action: _action, ...outcome } = decision
+          await this.settle({ inputId: input.inputId, ...outcome })
           continue
         }
         if (input.input.op === 'continue') {
@@ -688,7 +685,7 @@ export class HarnessSession<
       const operationId = input.operationId
       // The inputs that joined this turn settle with it, in one append.
       const joined = this.joinedInputs(operationId ?? '', input.inputId)
-      const ended = (settlement: Omit<InputSettlement, 'inputId'>) =>
+      const ended = (settlement: SettlementOutcome) =>
         this.settle(
           ...[input.inputId, ...joined].map((inputId) => ({
             inputId,
@@ -746,10 +743,8 @@ export class HarnessSession<
         interruptedTools,
       )
       if (decision.action === 'settle') {
-        await ended({
-          outcome: decision.outcome,
-          ...(decision.error ? { error: decision.error } : {}),
-        })
+        const { action: _action, ...outcome } = decision
+        await ended(outcome)
         continue
       }
       if (input.input.op === 'resolve') {

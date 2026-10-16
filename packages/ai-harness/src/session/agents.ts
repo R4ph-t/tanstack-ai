@@ -49,6 +49,7 @@ import type {
   AgentRun,
   ChatTurnResult,
   InputSettlement,
+  SettlementOutcome,
   MediaRecord,
   Principal,
   Receipt,
@@ -386,12 +387,17 @@ export abstract class SessionAgents<
       agent,
       id,
     )
-    const run = Object.assign(operation, {
-      send: (
-        message: UserInput,
-        options?: { mode?: 'steer' | 'followUp'; inputId?: string },
-      ) => this.sendToAgent({ ...options, operationId: operation.id, message }),
-    })
+    const run = Object.assign(
+      // `kind` and `agent` are fixed by the constructor call above.
+      operation as OperationImpl<unknown> & { kind: 'agent'; agent: string },
+      {
+        send: (
+          message: UserInput,
+          options?: { mode?: 'steer' | 'followUp'; inputId?: string },
+        ) =>
+          this.sendToAgent({ ...options, operationId: operation.id, message }),
+      },
+    )
     this.track(run)
     return run
   }
@@ -874,7 +880,7 @@ export abstract class SessionAgents<
     const end = async (
       run: Pick<RunRecord, 'status'> &
         Partial<Pick<RunRecord, 'error' | 'result'>>,
-      settlement: Pick<InputSettlement, 'outcome' | 'error'>,
+      settlement: SettlementOutcome,
     ) => {
       if (this.logFailure) return
       await runs?.update(operation.id, { ...run, finishedAt: Date.now() })
