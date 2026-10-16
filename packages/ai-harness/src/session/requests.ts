@@ -9,6 +9,7 @@ import {
   errorText,
   inputKey,
   SHUTDOWN_REASON,
+  isElsewhere,
 } from './helpers'
 import { SessionState } from './state'
 import type {
@@ -32,6 +33,7 @@ import type {
   WaitingInput,
 } from '../types'
 import type { QueuedTurn, WaitingSteer } from './types'
+import type { Admission } from './inputs'
 
 /**
  * A layer of {@link HarnessSession}: prompt, steer, follow-up, continue, reset,
@@ -144,8 +146,14 @@ export abstract class SessionRequests<
     const known = this.knownTurn(inputId, stored, principal)
     if (known) return known
     const runId = options?.runId
+    // A prompt that this host passed on comes back from the inbox when its
+    // owner stopped. It runs on the operation that its caller holds.
+    const passed = this.forwarded.has(inputId)
+      ? this.turnOperations.get(inputId)
+      : undefined
     // A run id must not take the id of another operation.
     if (
+      !passed &&
       runId !== undefined &&
       (this.operations.has(runId) || this.retiredIds.has(runId))
     ) {
@@ -153,10 +161,10 @@ export abstract class SessionRequests<
       this.refuse(refused, { inputId, status: 'rejected', reason: 'conflict' })
       return refused
     }
-    const operation = this.createTurnOperation(runId)
+    const operation = passed ?? this.createTurnOperation(runId)
     this.bindTurn(inputId, operation)
     void this.admitting(() =>
-      this.accept(inputId, stored, principal).then(
+      this.accept(inputId, stored, principal, runId).then(
         async (admission) => {
           if (admission !== 'new') {
             this.answerDuplicate(operation, inputId, admission)
@@ -369,13 +377,22 @@ export abstract class SessionRequests<
     return this.admitting(async () => {
       const inputId = options?.inputId ?? createInputId()
       const principal = options?.principal ?? this.principal
+      const runId = options?.runId
       const admission = await this.accept(
         inputId,
         { op: 'resolve', resume },
         principal,
+        runId,
       )
-      if (admission !== 'new') return this.duplicateReceipt(inputId, admission)
-      const runId = options?.runId
+      if (admission !== 'new') {
+        const receipt = this.duplicateReceipt(inputId, admission)
+        // The owner runs a forwarded resume as `runId`.
+        return admission === 'forwarded' &&
+          runId !== undefined &&
+          receipt.status !== 'rejected'
+          ? { ...receipt, operationId: runId }
+          : receipt
+      }
       // A run id must not take the id of another operation or stored run.
       const isTaken =
         runId !== undefined &&
@@ -430,9 +447,14 @@ export abstract class SessionRequests<
     })
   }
 
-  async cancel(operationId?: string): Promise<Receipt> {
-    const inputId = createInputId()
-    await this.accept(inputId, { op: 'cancel', operationId })
+  async cancel(
+    operationId?: string,
+    /** @internal The id of a forwarded input, so a replay is a duplicate. */
+    options?: { inputId?: string },
+  ): Promise<Receipt> {
+    const inputId = options?.inputId ?? createInputId()
+    const admission = await this.accept(inputId, { op: 'cancel', operationId })
+    if (admission !== 'new') return this.duplicateReceipt(inputId, admission)
     const target = operationId
       ? this.operations.get(operationId)
       : this.activeTurn
@@ -524,13 +546,17 @@ export abstract class SessionRequests<
    *
    * @example
    * ```ts
-   * await session.followUp('Then write the tests.', { inputId: 'tests' })
+   * await session.send('Then write the tests.', { mode: 'followUp', inputId: 'tests' })
    * await session.cancelInput('tests')
    * ```
    */
   async cancelInput(target: string): Promise<Receipt> {
     const inputId = createInputId()
-    await this.accept(inputId, { op: 'cancelInput', inputId: target })
+    const admission = await this.accept(inputId, {
+      op: 'cancelInput',
+      inputId: target,
+    })
+    if (isElsewhere(admission)) return this.duplicateReceipt(inputId, admission)
     const taken = this.takeWaiting(target) ?? this.takeQueuedContinue(target)
     if (!taken) return this.reject(inputId, 'not_waiting')
     await this.applyControl(inputId, {
@@ -540,7 +566,11 @@ export abstract class SessionRequests<
     // Without a log, the inbox entry must not stay pending: a restart runs
     // pending entries.
     if (!this.writer)
-      await this.inbox.markRejected({ inputId: target, reason: 'cancelled' })
+      await this.inbox.markRejected({
+        threadId: this.threadId,
+        inputId: target,
+        reason: 'cancelled',
+      })
     const { operation } = taken
     await this.settle({
       inputId: target,
@@ -563,7 +593,7 @@ export abstract class SessionRequests<
    *
    * @example
    * ```ts
-   * await session.followUp('Use tabs, not spaces.', { inputId: 'style' })
+   * await session.send('Use tabs, not spaces.', { mode: 'followUp', inputId: 'style' })
    * await session.setDelivery({ inputId: 'style', delivery: 'steer' })
    * ```
    */
@@ -575,7 +605,12 @@ export abstract class SessionRequests<
     delivery: WaitingInput['delivery']
   }): Promise<Receipt> {
     const inputId = createInputId()
-    await this.accept(inputId, { op: 'setDelivery', inputId: target, delivery })
+    const admission = await this.accept(inputId, {
+      op: 'setDelivery',
+      inputId: target,
+      delivery,
+    })
+    if (isElsewhere(admission)) return this.duplicateReceipt(inputId, admission)
     const current = this.inputs().find((input) => input.inputId === target)
     if (current?.delivery !== delivery) {
       const taken = this.takeWaiting(target)
@@ -715,6 +750,9 @@ export abstract class SessionRequests<
    * await session.close({ recoverable: true })
    * ```
    */
+  /** Operations that follow an input another host runs, or that ran before. */
+  private readonly followers = new Set<OperationImpl<ChatTurnResult>>()
+
   close(options?: { recoverable?: boolean }): Promise<void> {
     this.closing ??= (async () => {
       // A thread with work keeps its claim, so a sweep finds that work after
@@ -728,6 +766,13 @@ export abstract class SessionRequests<
         await this.refreshTurnInterrupts(turn.operation)
         turn.operation.fail('cancelled', new Error('Session closed.'))
       }
+      // A follower waits for a settlement in the log. The log view closes
+      // with the session, so it ends now.
+      for (const operation of this.followers) {
+        if (!operation.isSettled())
+          operation.fail('cancelled', new Error('Session closed.'))
+      }
+      this.followers.clear()
       const running = [...this.operations.values()].filter(
         (operation) => !operation.isSettled(),
       )
@@ -862,7 +907,7 @@ export abstract class SessionRequests<
   protected answerDuplicate(
     operation: OperationImpl<ChatTurnResult>,
     inputId: string,
-    admission: 'duplicate' | 'conflict' | 'closed',
+    admission: Exclude<Admission, 'new'>,
   ) {
     const receipt = this.duplicateReceipt(inputId, admission)
     if (receipt.status === 'rejected') {
@@ -870,6 +915,7 @@ export abstract class SessionRequests<
       return
     }
     operation.resolveReceipt(receipt)
+    this.followers.add(operation)
     if (!this.writer) {
       // Without a log, the result of an input from before a restart, or of
       // one the session no longer keeps, is gone.
@@ -881,10 +927,12 @@ export abstract class SessionRequests<
       )
       return
     }
-    void this.settled(inputId).then(
-      (settlement) => this.settleOperation(operation, settlement),
-      (error: unknown) => operation.fail('failed', error),
-    )
+    void this.settled(inputId)
+      .then(
+        (settlement) => this.settleOperation(operation, settlement),
+        (error: unknown) => operation.fail('failed', error),
+      )
+      .finally(() => this.followers.delete(operation))
   }
 
   /**

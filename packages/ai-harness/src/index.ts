@@ -25,7 +25,7 @@ export type {
   ToolStep,
 } from './durable-tool'
 
-export { logMessageStore } from './log'
+export { LogVersionError, logMessageStore } from './log'
 export type { ProjectOptions, ProjectRecord, ReduceOptions } from './log'
 export type { LeaseOptions } from './resume'
 export type {
@@ -49,6 +49,21 @@ export type {
 } from './plugins'
 
 export { createExtensionPoint, createPluginEvent } from './extensions'
+// Portable (no Node imports), so edge-safe plugins such as code mode can read
+// the permission rules and resources without the Node-only `./plugins` entry.
+export {
+  PermissionDecisionCapability,
+  PermissionResources,
+  PermissionRules,
+  decidePermission,
+} from './first-party/permissions'
+export type {
+  CallResources,
+  PermissionDecision,
+  PermissionMode,
+  PermissionRule,
+  ToolResources,
+} from './first-party/permissions'
 export type { ExtensionItem, ExtensionPoint, PluginEvent } from './extensions'
 
 export { checkConfigValue, configOption } from './config'
@@ -110,6 +125,7 @@ export type {
   SessionSnapshot,
 } from './session/index'
 export type { SessionUsage, UsageCounts } from './usage'
+export type { OnHarnessEvent } from './feed'
 
 export type {
   FinishContext,
@@ -128,6 +144,7 @@ export { HARNESS_EVENTS, InputRejectedError } from './types'
 export type {
   AgentRun,
   AgentSendOptions,
+  AuthRequest,
   BusyPolicy,
   ChatTurnResult,
   Cursor,
@@ -141,6 +158,7 @@ export type {
   Operation,
   OperationKind,
   OperationStatus,
+  PendingQuestion,
   Principal,
   Receipt,
   SendOptions,
@@ -151,6 +169,7 @@ export type {
   ThreadSettingsChange,
   TurnInfo,
   TurnOverrides,
+  UsageUpdate,
   UserInput,
   WaitingInput,
 } from './types'
@@ -168,8 +187,40 @@ export {
 export { MediaError } from './media'
 export type { MediaOptions } from './media'
 
+export {
+  HARNESS_PROTOCOL_VERSION,
+  applyInput,
+  capabilitiesOf,
+  parseControlFrame,
+  parseHarnessInput,
+} from './protocol'
+export type { ControlFrame, HostFrame } from './protocol'
+
+export { createHarnessHandler, handleHarnessSocket } from './http'
+export type {
+  Authorize,
+  CanAccess,
+  HarnessHandlerOptions,
+  HarnessSocketOptions,
+} from './http'
+
 export { harnessText } from './harness-text'
 export type { HarnessTextOptions, RemoteHarness } from './harness-text'
+
+export {
+  buildAuthorizationUrl,
+  createPkce,
+  deviceLogin,
+  exchangeCode,
+  isExpired,
+  loopbackLogin,
+  refreshCredential,
+  startLoopbackReceiver,
+} from './oauth'
+export type { OAuthConfig } from './oauth'
+
+export { oauthConnector } from './connectors'
+export type { OAuthConnectorOptions } from './connectors'
 
 export { harnessAgent } from './harness-agent'
 export { DEFAULT_SUBAGENT_LIMITS } from './session/index'

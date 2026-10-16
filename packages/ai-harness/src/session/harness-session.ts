@@ -63,6 +63,8 @@ export class HarnessSession<
       await this.openEntry()
       if (this.writer) {
         await this.recoverFromLog(this.writer)
+        // Inputs that waited for an owner that stopped.
+        void this.drainInbox()
         return
       }
       await this.loadUsage()
@@ -475,6 +477,12 @@ export class HarnessSession<
    * again.
    */
   protected async recoverFromLog(writer: LogWriter): Promise<void> {
+    // A live owner runs its own inputs, also one that has no run lease yet.
+    // A sweep recovers them after its claim expires.
+    if (await this.isOwnedElsewhere()) {
+      this.recoveryDeferred = true
+      return
+    }
     // True for an input that this session stored or took. Else the session
     // takes it now, so `recover()` does not take it again.
     const taken: Array<string> = []
