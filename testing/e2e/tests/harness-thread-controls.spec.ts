@@ -108,7 +108,9 @@ test.describe('harness thread controls', () => {
   }) => {
     const user = client(request, testId, aimockPort)
     const threadId = `usage-${testId}`
-    expect(await user.send(threadId, '[harness-usage] hello')).toBe('Counted.')
+    expect(await user.prompt(threadId, '[harness-usage] hello')).toBe(
+      'Counted.',
+    )
 
     const { usage } = await user.read('snapshot', threadId)
     // aimock reports no token counts for this adapter, so the call count is
@@ -160,7 +162,7 @@ test.describe('harness thread controls', () => {
       }),
     ).toMatchObject({ status: 'rejected', reason: 'not_exposed' })
 
-    expect(await user.send(threadId, '[harness-settings] hi')).toBe('Strong.')
+    expect(await user.prompt(threadId, '[harness-settings] hi')).toBe('Strong.')
     const [call] = await user.modelCalls()
     expect(call?.body?.model).toBe('gpt-4.1')
     const system = (call?.body?.messages ?? [])
@@ -185,14 +187,14 @@ test.describe('harness thread controls', () => {
     const user = client(request, testId, aimockPort)
     const threadId = `cwd-${testId}`
     // A new thread gets no note, so the note needs a first turn.
-    expect(await user.send(threadId, '[harness-cwd] start')).toBe('Started.')
+    expect(await user.prompt(threadId, '[harness-cwd] start')).toBe('Started.')
     expect(
       await user.control(threadId, {
         op: 'configure',
         settings: { cwd: '/repo/app' },
       }),
     ).toMatchObject({ status: 'accepted' })
-    expect(await user.send(threadId, '[harness-cwd] where')).toBe('Moved.')
+    expect(await user.prompt(threadId, '[harness-cwd] where')).toBe('Moved.')
 
     const [, call] = await user.modelCalls()
     const seen = (call?.body?.messages ?? [])
@@ -214,13 +216,13 @@ test.describe('harness thread controls', () => {
     const user = client(request, testId, aimockPort)
     const threadId = `reset-${testId}`
     const note = 'Summary: the user asked a first question.'
-    expect(await user.send(threadId, '[harness-reset] first')).toBe(
+    expect(await user.prompt(threadId, '[harness-reset] first')).toBe(
       'First answer.',
     )
     expect(await user.control(threadId, { op: 'reset', note })).toMatchObject({
       status: 'accepted',
     })
-    expect(await user.send(threadId, '[harness-reset] second')).toBe(
+    expect(await user.prompt(threadId, '[harness-reset] second')).toBe(
       'Second answer.',
     )
 
@@ -254,14 +256,18 @@ test.describe('harness thread controls', () => {
         headers: user.json,
         data: { op: 'update', threadId, ...data },
       })
-    expect(await user.send(threadId, '[harness-chips] one')).toBe('Chips one.')
+    expect(await user.prompt(threadId, '[harness-chips] one')).toBe(
+      'Chips one.',
+    )
 
     const updated = await update({
       pinned: true,
       metadata: { chips: ['a.ts'] },
     })
     expect(updated.status()).toBe(200)
-    expect(await user.send(threadId, '[harness-chips] two')).toBe('Chips two.')
+    expect(await user.prompt(threadId, '[harness-chips] two')).toBe(
+      'Chips two.',
+    )
 
     const entry = async () => {
       const list = await request.get('/api/harness-protocol/sessions', {
@@ -291,8 +297,8 @@ test.describe('harness thread controls', () => {
   }) => {
     const user = client(request, testId, aimockPort)
     const threadId = `fork-${testId}`
-    expect(await user.send(threadId, '[harness-fork] one')).toBe('One.')
-    expect(await user.send(threadId, '[harness-fork] two')).toBe('Two.')
+    expect(await user.prompt(threadId, '[harness-fork] one')).toBe('One.')
+    expect(await user.prompt(threadId, '[harness-fork] two')).toBe('Two.')
     const source: Array<Message> = await user.read('transcript', threadId)
     const at = source.find((message) => message.role === 'assistant')?.id
     if (!at) throw new Error('The first answer has no message id.')

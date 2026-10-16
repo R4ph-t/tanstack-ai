@@ -433,10 +433,11 @@ export function createSessionView(source: SessionViewSource) {
   const missing = (what: string) =>
     Promise.reject(new Error(`This view source cannot ${what}.`))
   /** The receipt of a source call: an operation's receipt, or the call's result. */
-  const receiptOf = (result: unknown): Promise<Receipt> =>
-    isOperation(result)
-      ? (result.then(undefined, () => {}), result.receipt)
-      : (Promise.resolve(result) as Promise<Receipt>)
+  const receiptOf = (result: unknown): Promise<Receipt> => {
+    if (!isOperation(result)) return Promise.resolve(result) as Promise<Receipt>
+    result.then(undefined, () => {})
+    return result.receipt
+  }
   /** A local operation reports failures as events. A remote call that throws did not arrive. */
   const settle = (result: unknown) => {
     if (isOperation(result)) {
