@@ -427,6 +427,22 @@ describe('skills()', () => {
     expect(names()).toContain('gamma')
   })
 
+  it('watches the nearest folder that exists when the parent is missing too', async () => {
+    const root = await tempDir()
+    const dir = join(root, 'a', 'b', 'skills')
+    const { names, list } = await open({ dirs: [dir] })
+    await list()
+    expect(watchersOf(root)).toHaveLength(1)
+
+    await mkdir(join(root, 'a', 'b'), { recursive: true })
+    await list()
+    expect(watchersOf(join(root, 'a', 'b'))).toHaveLength(1)
+    await addSkill(dir, 'gamma')
+    await list()
+    expect(watchersOf(dir)).toHaveLength(1)
+    expect(names()).toContain('gamma')
+  })
+
   it('watches a folder without recursive where the platform has none', async () => {
     const dir = await tempDir()
     await addSkill(dir, 'alpha')

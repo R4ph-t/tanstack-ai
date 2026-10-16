@@ -35,6 +35,9 @@ import type {
   SessionIndexPage,
   SessionIndexStore,
   WorkClaimStore,
+  LeaseStore,
+  TurnLease,
+  TurnLeaseKey,
 } from './types'
 
 const compareUtf8Bytes = (left: string, right: string): number => {
@@ -1003,4 +1006,50 @@ export function memoryPersistence() {
     sessions: new MemorySessionIndexStore(),
   }
   return defineAIPersistence({ stores })
+}
+
+/**
+ * In-process {@link LeaseStore}, for tests and single-process hosts. A real
+ * backend puts the lease in the system that already has one (a job queue).
+ *
+ * @example
+ * ```ts
+ * const { metadata, workClaims, sessions } = memoryPersistence().stores
+ * const persistence = defineAIPersistence({
+ *   stores: { log: memoryLogStore(), leases: memoryLeaseStore(), metadata, workClaims, sessions },
+ * })
+ * ```
+ */
+export function memoryLeaseStore(): LeaseStore {
+  const leases = new Map<string, TurnLease>()
+  const keyOf = (key: TurnLeaseKey) =>
+    `${key.threadId}\u0000${key.inputId}\u0000${key.operationId}\u0000${key.attempt}`
+  return {
+    acquire: (lease) => {
+      leases.set(keyOf(lease), { ...lease })
+      return Promise.resolve()
+    },
+    renew: (lease) => {
+      const held = leases.get(keyOf(lease))
+      // Only the owner renews. Another host's expired lease is taken over.
+      if (
+        !held ||
+        held.ownerId === lease.ownerId ||
+        held.expiresAt <= Date.now()
+      ) {
+        leases.set(keyOf(lease), { ...lease })
+      }
+      return Promise.resolve()
+    },
+    release: (lease) => {
+      if (leases.get(keyOf(lease))?.ownerId === lease.ownerId) {
+        leases.delete(keyOf(lease))
+      }
+      return Promise.resolve()
+    },
+    isAlive: (key) => {
+      const held = leases.get(keyOf(key))
+      return Promise.resolve(held !== undefined && held.expiresAt > Date.now())
+    },
+  }
 }

@@ -275,6 +275,30 @@ export abstract class SessionInputs<
     return taken
   }
 
+  /** Take a queued `continue()` out of the queue, for `cancelInput`. */
+  protected takeQueuedContinue(
+    inputId: string,
+  ): Pick<WaitingSteer, 'operation'> | undefined {
+    const turn = this.queue.find(
+      (item) => item.inputId === inputId && item.isContinue,
+    )
+    if (!turn) return undefined
+    this.queue.splice(this.queue.indexOf(turn), 1)
+    return { operation: turn.operation }
+  }
+
+  /**
+   * The thread waits for interrupts and nothing queued or running can
+   * resolve them, so a new turn would fail with `pending_interrupts`.
+   */
+  protected waitsForInterrupts(): boolean {
+    return (
+      this.interrupted !== undefined &&
+      this.activeTurn === undefined &&
+      this.queue.length === 0
+    )
+  }
+
   /**
    * Mark a `cancelInput` or `setDelivery` input applied. On a durable host,
    * `change` lands in the same append, so a crash never keeps one without
@@ -345,9 +369,10 @@ export abstract class SessionInputs<
         })
         // The inbox had the id before this session: a restart.
         if (stored.createdAt !== at || stored.status !== 'pending') {
-          return inputKey(stored.input, stored.principal) === payload
-            ? 'duplicate'
-            : 'conflict'
+          if (inputKey(stored.input, stored.principal) === payload)
+            return 'duplicate'
+          this.admitted.delete(inputId)
+          return 'conflict'
         }
       }
     } catch (error) {
@@ -421,6 +446,7 @@ export abstract class SessionInputs<
         .catch((error: unknown) => this.warnSession('harness:inbox', error))
     }
     const receipt: Receipt = { inputId, status: 'rejected', reason }
+    this.admitted.delete(inputId)
     this.receipts.set(inputId, receipt)
     this.feed.publish(
       'session',
@@ -445,6 +471,10 @@ export abstract class SessionInputs<
       )
     }
     for (const settlement of settlements) {
+      // A turn input leaves the set with its operation (`forget`): a client
+      // may send its id again until then. Other inputs leave now.
+      if (!this.turnOperations.has(settlement.inputId))
+        this.admitted.delete(settlement.inputId)
       this.settlements.set(settlement.inputId, settlement)
       this.feed.publish(
         settlement.operationId ?? 'session',

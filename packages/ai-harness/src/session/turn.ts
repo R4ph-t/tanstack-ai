@@ -4,6 +4,7 @@ import {
   chat,
   compactForModel,
   modelMessagesToUIMessages,
+  isStandardSchema,
   validateWithStandardSchema,
 } from '@tanstack/ai'
 import { toRunErrorPayload } from '@tanstack/ai/adapter-internals'
@@ -107,10 +108,12 @@ export abstract class SessionTurn<
       return
     }
     let checked: unknown = input
-    if (entry.command.input !== undefined) {
+    // A JSON Schema input runs unchecked, as a JSON Schema tool input does in
+    // core. A Standard Schema input is validated and its parsed value runs.
+    if (isStandardSchema(entry.command.input)) {
       const result = await validateWithStandardSchema(
         entry.command.input,
-        input ?? {},
+        input,
       )
       if (!result.success) {
         const reason = `Input validation failed for command ${name}: ${result.issues
@@ -140,17 +143,29 @@ export abstract class SessionTurn<
           result: compactForModel(result),
         }),
       )
+      await this.settle({
+        inputId,
+        operationId: operation.id,
+        outcome: 'completed',
+      })
       operation.finish('completed', result)
     } catch (error) {
+      const message = this.scrub(errorText(error))
       operation.publish({
         type: EventType.RUN_ERROR,
-        message: this.scrub(errorText(error)),
+        message,
         timestamp: Date.now(),
       })
-      operation.fail(
-        operation.abortController.signal.aborted ? 'cancelled' : 'failed',
-        error,
+      const cancelled = operation.abortController.signal.aborted
+      await this.settle({
+        inputId,
+        operationId: operation.id,
+        outcome: cancelled ? 'aborted' : 'failed',
+        error: { message },
+      }).catch((failure: unknown) =>
+        this.warnSession('harness:commands', failure),
       )
+      operation.fail(cancelled ? 'cancelled' : 'failed', error)
     }
     this.publishFinished(operation)
   }
@@ -641,7 +656,9 @@ export abstract class SessionTurn<
                 ),
                 transcribe: this.harness.media?.transcribe,
               }),
-            ],
+              // The registry types of the harness interrupts do not line up
+              // with the middleware tuple chat() infers. Only this field.
+            ] as never,
             ...(bag
               ? {
                   subagents: {
@@ -667,7 +684,8 @@ export abstract class SessionTurn<
             ...(this.harness.interrupts
               ? { interrupts: this.harness.interrupts }
               : {}),
-            ...(context !== undefined ? { context } : {}),
+            // The context type narrows per harness; chat() wants it exact.
+            ...(context !== undefined ? { context: context as never } : {}),
             ...(reasoning !== undefined ? { reasoning } : {}),
             promptCache,
             threadId: this.threadId,
@@ -676,7 +694,7 @@ export abstract class SessionTurn<
             ...(resume ? { resume } : {}),
             abortController: operation.abortController,
             stream: true,
-          } as never) as AsyncIterable<StreamChunk>
+          }) as AsyncIterable<StreamChunk>
 
           routedFrom = undefined
           for await (const raw of stream) {

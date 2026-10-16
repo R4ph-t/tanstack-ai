@@ -6,7 +6,6 @@ import {
   validateWithStandardSchema,
 } from '@tanstack/ai'
 import { withPersistence } from '@tanstack/ai-persistence'
-import { withHarnessContext } from '../agents'
 import { mediaCapture, mediaMiddleware } from '../media'
 import { OperationImpl } from '../operation'
 import {
@@ -42,7 +41,8 @@ import type {
   SubagentBinding,
 } from '@tanstack/ai'
 import type { InputState, LogWriter } from '../log'
-import type { AgentStarter, AnyAgent } from '../agents'
+import { NO_SESSION_CONTEXT } from '../agents'
+import type { AgentStarter, AnyAgent, HarnessAgentContext } from '../agents'
 import type { AnyHarness } from '../define'
 import type { AgentGroup, MountedPlugins } from '../plugins'
 import type {
@@ -308,6 +308,7 @@ export abstract class SessionAgents<
       // No `promptCache`: a tool-mode child then uses the retention of the
       // turn's chat() call, so a turn override reaches it.
       ...(start && { start }),
+      extend: () => ({ harness: NO_SESSION_CONTEXT }),
     } satisfies SubagentBinding
   }
 
@@ -328,7 +329,8 @@ export abstract class SessionAgents<
     this.markBusy()
     // The agent runs for the sender of the turn that starts it, also after
     // that turn ends. A child of agent code runs for its parent run's sender.
-    const principal = parent ? parent.current.principal : this.sender()
+    const principal =
+      options.principal ?? (parent ? parent.current.principal : this.sender())
     const sender = principal ? { principal } : {}
     const fromParent = parent
       ? {
@@ -356,7 +358,7 @@ export abstract class SessionAgents<
   }
 
   /**
-   * `harnessContext(ctx).agents` in the runs of `chain`: start a child in the
+   * `ctx.harness.agents` in the runs of `chain`: start a child in the
    * background.
    * The child counts against the chain's tree budget, and over it `start`
    * throws. The child records the run that started it, and runs for that
@@ -460,7 +462,7 @@ export abstract class SessionAgents<
 
   /**
    * What a resumable agent run adds on a durable host: checkpoints of its
-   * `ctx.chat` tool phases, and `harnessContext(ctx).step` values in the
+   * `ctx.chat` tool phases, and `ctx.harness.step` values in the
    * session log, under the key of the input the run applies.
    */
   protected resumable(inputId: string) {
@@ -786,11 +788,12 @@ export abstract class SessionAgents<
           : saved
       const binding = this.binding(operation, [], principal)
       const durable = options.resume ? this.resumable(inputId) : undefined
+      const harnessContext: HarnessAgentContext = {
+        step: durable?.step ?? NO_SESSION_CONTEXT.step,
+        agents: this.agentStarter(chain),
+      }
       const stream = runAgentStream(
-        withHarnessContext(agent, {
-          ...(durable ? { step: durable.step } : {}),
-          agents: this.agentStarter(chain),
-        }),
+        agent,
         {
           input: checkedInput,
           // A prompt is one more user message at the end, as in core.
@@ -828,6 +831,7 @@ export abstract class SessionAgents<
           budget: chain.budget,
           // No parent chat() call to take it from, so the session's retention.
           promptCache: this.promptCache.retention,
+          extend: () => ({ harness: harnessContext }),
         },
       )
       for await (const raw of stream) {
@@ -883,8 +887,13 @@ export abstract class SessionAgents<
           operationId: operation.id,
           ...settlement,
         })),
-      ).catch(() => {})
+      ).catch((error: unknown) => this.warnSession('harness:agents', error))
     }
+    // The run settled already: a note that fails must not leave it open.
+    const note = (ended: 'finished' | 'failed', result: unknown) =>
+      this.noteAgentEnd(name, ended, result, options, principal).catch(
+        (error: unknown) => this.warnSession('harness:agents', error),
+      )
     // A recoverable close: the run stops as on a crash, and the next host
     // runs it again.
     if (operation.abortController.signal.reason === SHUTDOWN_REASON) {
@@ -911,7 +920,7 @@ export abstract class SessionAgents<
         })
         const error = { message: failure }
         await end({ status: 'failed', error }, { outcome: 'failed', error })
-        await this.noteAgentEnd(name, 'failed', failure, options, principal)
+        await note('failed', failure)
         operation.fail('failed', new Error(failure))
       } else {
         operation.publish({
@@ -925,7 +934,7 @@ export abstract class SessionAgents<
           { status: 'completed', result: compactForModel(value) },
           { outcome: 'completed' },
         )
-        await this.noteAgentEnd(name, 'finished', value, options, principal)
+        await note('finished', value)
         operation.finish('completed', value)
       }
     } finally {
@@ -1074,6 +1083,6 @@ export abstract class SessionAgents<
         { type: 'harness.job', jobId, ended: true },
       ])
     }
-    if (!this.activeTurn && !this.reverted) await this.flushNotes()
+    if (this.canFlushNotes()) await this.flushNotes()
   }
 }

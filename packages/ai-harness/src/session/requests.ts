@@ -137,6 +137,15 @@ export abstract class SessionRequests<
             })
             return
           }
+          if (this.waitsForInterrupts()) {
+            this.reject(inputId, 'pending_interrupts')
+            this.refuse(operation, {
+              inputId,
+              status: 'rejected',
+              reason: 'pending_interrupts',
+            })
+            return
+          }
           const isWaiting =
             this.activeTurn !== undefined || this.queue.length > 0
           // A steer joins the running turn, so the receipt names that turn, as
@@ -274,6 +283,8 @@ export abstract class SessionRequests<
         principal,
       )
       if (admission !== 'new') return this.duplicateReceipt(inputId, admission)
+      if (this.waitsForInterrupts())
+        return this.reject(inputId, 'pending_interrupts')
       const operation = this.createTurnOperation()
       this.bindTurn(inputId, operation)
       const status =
@@ -389,10 +400,8 @@ export abstract class SessionRequests<
       )
       if (admission !== 'new') return this.duplicateReceipt(inputId, admission)
       const isRunning = this.activeTurn !== undefined
-      if (!isRunning && this.queue.length === 0 && this.interrupted) {
-        this.reject(inputId, 'pending_interrupts')
-        return { inputId, status: 'rejected', reason: 'pending_interrupts' }
-      }
+      if (this.waitsForInterrupts())
+        return this.reject(inputId, 'pending_interrupts')
       const operation = this.queueReset(inputId, text, principal, 'front')
       return this.keep({
         inputId,
@@ -581,7 +590,7 @@ export abstract class SessionRequests<
   async cancelInput(target: string): Promise<Receipt> {
     const inputId = createInputId()
     await this.accept(inputId, { op: 'cancelInput', inputId: target })
-    const taken = this.takeWaiting(target)
+    const taken = this.takeWaiting(target) ?? this.takeQueuedContinue(target)
     if (!taken) return this.reject(inputId, 'not_waiting')
     await this.applyControl(inputId, {
       type: 'harness.input.abort',
@@ -630,7 +639,7 @@ export abstract class SessionRequests<
     if (current?.delivery !== delivery) {
       const taken = this.takeWaiting(target)
       if (!taken) return this.reject(inputId, 'not_waiting')
-      if (delivery === 'steer') this.steerQueue.push(taken)
+      if (delivery === 'steer' && this.activeTurn) this.steerQueue.push(taken)
       else this.enqueueTurn(this.steerTurn(taken))
     }
     await this.applyControl(inputId, {
@@ -788,7 +797,10 @@ export abstract class SessionRequests<
       )
       // The events from before the close land first, so the next host has
       // the text of a cut answer.
-      if (options?.recoverable) await this.writer?.flush().catch(() => {})
+      if (options?.recoverable)
+        await this.writer
+          ?.flush()
+          .catch((error: unknown) => this.warnSession('harness:log', error))
       // A reload that mounts plugins now ends first, so its plugins are
       // disposed below.
       await this.reloads

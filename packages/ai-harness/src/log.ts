@@ -896,6 +896,7 @@ export class SharedLog<TState = unknown> {
       head: () => this.head(),
       read: (options) =>
         this.read(threadId, { ...options, isClosed: () => closed }),
+      wake: () => this.wake(),
       close: () => {
         if (closed) return
         closed = true
@@ -1442,6 +1443,10 @@ export function logMessageStore(options: {
   logId?: string
 }) {
   const { store, project } = options
+  // ponytail: each read and save folds the whole log of the thread, with no
+  // checkpoint: O(n) per save, so O(n²) over a long child transcript. Pass
+  // `metadata` to loadLogState and write checkpoints here when a child with
+  // many tool phases gets slow.
   const logOf = (threadId: string) => options.logId ?? threadId
   const load = (threadId: string) =>
     loadLogState({

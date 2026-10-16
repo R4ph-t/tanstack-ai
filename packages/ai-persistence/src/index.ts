@@ -14,6 +14,7 @@ export {
   defineCredentialStore,
   defineLogStore,
   defineWorkClaimStore,
+  defineLeaseStore,
   defineSessionIndexStore,
   LogConflictError,
   // Run lifecycle helpers owned by @tanstack/ai, transiting through ./types so

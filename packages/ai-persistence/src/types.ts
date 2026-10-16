@@ -647,7 +647,7 @@ export interface BlobStore {
 // for each subagent child.
 
 /** Lifecycle of one inbox entry. */
-export type InboxStatus = 'pending' | 'applied' | 'rejected' | 'expired'
+export type InboxStatus = 'pending' | 'applied' | 'rejected'
 
 /**
  * One input a client sent to a session (a prompt, a steer message, a
@@ -867,6 +867,11 @@ export interface LeaseStore {
   release: (lease: TurnLease) => Promise<void>
   /** True while another host still runs the attempt. */
   isAlive: (key: TurnLeaseKey) => Promise<boolean>
+}
+
+/** Type a {@link LeaseStore} implementation inline. */
+export function defineLeaseStore(store: LeaseStore): LeaseStore {
+  return store
 }
 
 /**

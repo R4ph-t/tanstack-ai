@@ -81,7 +81,17 @@ export class HarnessSession<
   /** Also waits for the last append of the log, so a reopen reads it. */
   override async close(options?: { recoverable?: boolean }): Promise<void> {
     await super.close(options)
-    await this.writer?.flush().catch(() => {})
+    // A recovery in flight queues turns after the stop: wait for it, then
+    // drop what it queued.
+    await this.recovery
+    for (const turn of this.queue.splice(0)) {
+      turn.operation.fail('cancelled', new Error('Session closed.'))
+    }
+    await this.writer
+      ?.flush()
+      .catch((error: unknown) =>
+        console.error('[@tanstack/ai-harness] The log flush failed.', error),
+      )
   }
 
   /** Read `harness.plugins()` and set up its session plugins. */
@@ -179,6 +189,7 @@ export class HarnessSession<
       // First the records that other hosts wrote since this session read.
       await writer.catchUp()
       if (this.logFailure) throw this.logFailure
+      // close() ran while catchUp waited: nothing resumes.
       if (this.closing) return
       await this.recoverFromLog(writer)
     })
@@ -464,16 +475,35 @@ export class HarnessSession<
    * again.
    */
   protected async recoverFromLog(writer: LogWriter): Promise<void> {
-    const runs = this.persistence.stores.runs
-    const maxAttempts = this.harness.durability?.maxAttempts ?? 10
     // True for an input that this session stored or took. Else the session
     // takes it now, so `recover()` does not take it again.
+    const taken: Array<string> = []
     const isTaken = (input: InputState) => {
       if (this.admitted.has(input.inputId)) return true
       this.admitted.set(input.inputId, inputKey(input.input, input.principal))
+      taken.push(input.inputId)
       return false
     }
+    try {
+      await this.recoverInputs(writer, isTaken)
+    } catch (error) {
+      // Not recovered, so the next `recover()` takes them again.
+      for (const inputId of taken) {
+        if (!this.turnOperations.has(inputId)) this.admitted.delete(inputId)
+      }
+      throw error
+    }
+    // After the turns are decided: a note must not end the transcript that
+    // a cut turn continues.
     await this.recoverBackground(writer)
+  }
+
+  private async recoverInputs(
+    writer: LogWriter,
+    isTaken: (input: InputState) => boolean,
+  ): Promise<void> {
+    const runs = this.persistence.stores.runs
+    const maxAttempts = this.harness.durability?.maxAttempts ?? 10
     const logged = [...writer.state.inputs.values()]
     for (const input of logged) {
       const isControl =
@@ -498,6 +528,17 @@ export class HarnessSession<
             'end',
           )
         }
+        continue
+      }
+      // A command that the host stopped during: no host runs it again.
+      if (input.input.op === 'command' && input.status === 'applied') {
+        if (isTaken(input)) continue
+        await this.settle({
+          inputId: input.inputId,
+          ...(input.operationId ? { operationId: input.operationId } : {}),
+          outcome: 'failed',
+          error: { message: 'The host stopped during this command.' },
+        })
         continue
       }
       const isChat = CHAT_OPS.has(input.input.op)

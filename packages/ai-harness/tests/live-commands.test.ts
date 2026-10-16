@@ -72,6 +72,13 @@ describe('ctx.commands', () => {
     ).toMatchObject({ owner: 'test/live', description: 'Says hi' })
     expect(await session.command('hello')).toBe('hi')
 
+    const settled: Array<unknown> = []
+    session.onEvent(EventType.CUSTOM, ({ event }) => {
+      if (event.name === 'harness.input.settled') settled.push(event.value)
+    })
+    expect(await session.command('hello')).toBe('hi')
+    expect(settled).toMatchObject([{ outcome: 'completed' }])
+
     live.live().delete('hello')
     expect(names()).not.toContain('hello')
     await expect(session.command('hello')).rejects.toThrow(

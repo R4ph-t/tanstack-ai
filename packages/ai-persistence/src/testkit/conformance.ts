@@ -10,9 +10,8 @@
  * Covers the five chat state stores (`messages`, `activities`, `runs`,
  * `interrupts`, `metadata`), the three generation stores (`generationRuns`,
  * `artifacts`, `blobs`), and the opt-in session stores (`credentials`, `inbox`,
- * `workClaims`, `log`, `sessions`). The session store cases run only when the
- * store is present, so they need no `skip` entry. `leases` has no cases: its
- * rules depend on the system that issues the leases. Locks are not part of
+ * `workClaims`, `log`, `leases`, `sessions`). The session store cases run only
+ * when the store is present, so they need no `skip` entry. Locks are not part of
  * this suite — they are a separate coordination concern (`LockStore` +
  * `withLocks`), not a store.
  *
@@ -1979,6 +1978,46 @@ export function runPersistenceConformance(
         expect(await store.read(threadId)).toEqual([
           { seq: 1, record: { type: 'shared', list: [1] } },
         ])
+      })
+    })
+
+    describe('leases', () => {
+      const keyOf = (attempt: number) => ({
+        threadId: `leases-${crypto.randomUUID()}`,
+        inputId: 'in-1',
+        operationId: 'op-1',
+        attempt,
+      })
+
+      it('is alive from acquire to release, by the owner only', async (ctx) => {
+        const store = persistence.stores.leases
+        if (!store) return ctx.skip('leases store not provided')
+        const key = keyOf(1)
+        const later = Date.now() + 60 * 60_000
+        expect(await store.isAlive(key)).toBe(false)
+        await store.acquire({ ...key, ownerId: 'a', expiresAt: later })
+        expect(await store.isAlive(key)).toBe(true)
+        // Another host cannot release it.
+        await store.release({ ...key, ownerId: 'b', expiresAt: later })
+        expect(await store.isAlive(key)).toBe(true)
+        await store.release({ ...key, ownerId: 'a', expiresAt: later })
+        expect(await store.isAlive(key)).toBe(false)
+      })
+
+      it('is not alive after expiresAt', async (ctx) => {
+        const store = persistence.stores.leases
+        if (!store) return ctx.skip('leases store not provided')
+        const key = keyOf(1)
+        await store.acquire({ ...key, ownerId: 'a', expiresAt: Date.now() - 1 })
+        expect(await store.isAlive(key)).toBe(false)
+        // A renewal by the owner brings it back.
+        await store.renew({
+          ...key,
+          ownerId: 'a',
+          expiresAt: Date.now() + 60_000,
+        })
+        expect(await store.isAlive(key)).toBe(true)
+        await store.release({ ...key, ownerId: 'a', expiresAt: 0 })
       })
     })
 

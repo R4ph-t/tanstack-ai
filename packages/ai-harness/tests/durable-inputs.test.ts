@@ -1095,6 +1095,48 @@ describe('waiting inputs', () => {
     await host.close()
   })
 
+  it('runs a waiting input as its own turn with setDelivery steer when no turn runs', async () => {
+    const persistence = durablePersistence()
+    const { host, session, calls } = await openDurable({
+      persistence,
+      replies: [() => text('done')],
+    })
+    // A turn that holds the queue: the follow-up waits behind it.
+    await session.reset()
+    await session.followUp('later', { inputId: 'later' })
+    await session.setDelivery({ inputId: 'later', delivery: 'steer' })
+
+    expect(await session.settled('later')).toMatchObject({
+      outcome: 'completed',
+    })
+    expect(messageTexts(calls[0])).toContain('later')
+    await host.close()
+  })
+
+  it('cancels a queued continue', async () => {
+    const { host, session, release, persistence } = await openHolding([
+      () => text('done'),
+    ])
+    const first = session.prompt('first', { inputId: 'first' })
+    await vi.waitFor(() => expect(session.snapshot().status).toBe('running'))
+    const queued = session.continue({ inputId: 'c-1' })
+    await vi.waitFor(async () =>
+      expect(await recordTypesOf(persistence, 'c-1')).toContain(
+        'harness.input',
+      ),
+    )
+
+    expect(await session.cancelInput('c-1')).toMatchObject({
+      status: 'accepted',
+    })
+    expect(await session.settled('c-1')).toMatchObject({ outcome: 'aborted' })
+    await expect(queued).rejects.toThrow()
+
+    release.open()
+    await first
+    await host.close()
+  })
+
   it('runs a steer as its own turn with setDelivery queue', async () => {
     const { host, session, calls, release } = await openHolding([
       () => text('done'),

@@ -129,6 +129,30 @@ describe.each([
     await second.host.close()
   })
 
+  it('refuses a new message while the thread waits for interrupts', async () => {
+    const deploy = toolDefinition({
+      name: 'deploy',
+      description: 'Deploy. Needs approval.',
+      needsApproval: true,
+      inputSchema: z.object({ env: z.string() }),
+    }).server(async () => ({ ok: true }))
+    const { adapter } = mockAdapter([() => toolCall('deploy', { env: 'prod' })])
+    const host = createHarnessHost({ persistence: persistenceFor(durable) })
+    const session = await host.open(
+      defineHarness({ name: 'test/waits', adapter, tools: [deploy] }),
+      { threadId: 't1' },
+    )
+    const turn = await session.prompt('Deploy.')
+    expect(turn.interrupts).toHaveLength(1)
+
+    expect(await session.followUp('And then?')).toMatchObject({
+      status: 'rejected',
+      reason: 'pending_interrupts',
+    })
+    expect(session.snapshot().status).toBe('requires_action')
+    await host.close()
+  })
+
   it('does not bring the interrupt back when the turn fails after the resume ran', async () => {
     const execute = vi.fn(async () => ({ ok: true }))
     const deploy = toolDefinition({

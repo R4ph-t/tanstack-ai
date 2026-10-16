@@ -676,6 +676,7 @@ export abstract class SessionBase<THarness extends AnyHarness = AnyHarness> {
   /** Give the thread's claim back. A failed write is a warning. */
   protected async releaseClaim(): Promise<void> {
     try {
+      await this.claimWrite
       await this.persistence.stores.workClaims?.release({
         threadId: this.threadId,
         ownerId: this.hostId,
@@ -722,7 +723,9 @@ export abstract class SessionBase<THarness extends AnyHarness = AnyHarness> {
       this.queue.length === 0 &&
       this.steerQueue.length === 0 &&
       ![...this.operations.values()].some(
-        (operation) => operation.kind === 'agent' && !operation.isSettled(),
+        (operation) =>
+          (operation.kind === 'agent' || operation.kind === 'command') &&
+          !operation.isSettled(),
       )
     )
   }
@@ -827,8 +830,16 @@ export abstract class SessionBase<THarness extends AnyHarness = AnyHarness> {
     this.pendingNotes.push({ id, role: 'assistant', content: note })
     // A durable host logs the note first, so a crash does not lose it.
     await this.writer?.append([{ type: 'harness.note', noteId: id, note }])
-    // While a revert stands, a note waits: the next turn or unrevert adds it.
-    if (!this.activeTurn && !this.reverted) await this.flushNotes()
+    if (this.canFlushNotes()) await this.flushNotes()
+  }
+
+  /**
+   * While a turn runs, waits, or a revert stands, a note waits: the next
+   * turn or unrevert adds it. So a note never ends a transcript that a
+   * queued turn continues.
+   */
+  protected canFlushNotes(): boolean {
+    return !this.activeTurn && !this.reverted && this.queue.length === 0
   }
 
   /** Write queued notes to the transcript while no turn is writing it. */

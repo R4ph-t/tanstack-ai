@@ -253,6 +253,8 @@ export interface ForkSessionOptions {
   at?: string | null
   /** Who opens the new thread, as in `open`. */
   principal?: Principal
+  /** The log of the source thread, as in `open`. Default: `threadId`. */
+  logId?: string
 }
 
 export interface ResumePendingOptions {
@@ -558,7 +560,17 @@ export function createHarnessHost<TLogState = undefined>(
   /** One per running `host.events()` read. */
   const listeners = new Set<(event: HostEvent) => void>()
   const emit = (event: HostEvent) => {
-    for (const listener of listeners) listener(event)
+    for (const listener of [...listeners]) {
+      // One reader that throws must not stop the others.
+      try {
+        listener(event)
+      } catch (error) {
+        console.error(
+          '[@tanstack/ai-harness] A host events reader threw.',
+          error,
+        )
+      }
+    }
   }
   /** The latest status of each open session, by session key. */
   const statuses = new Map<string, HostStatusEvent>()
@@ -694,38 +706,47 @@ export function createHarnessHost<TLogState = undefined>(
       }
       return session as Promise<HarnessSession<typeof harness>>
     },
-    async fork(harness, { threadId, newThreadId, at, principal }) {
+    async fork(harness, { threadId, newThreadId, at, principal, logId }) {
       if (newThreadId === threadId) {
         throw new Error('A fork needs a new thread: newThreadId is threadId.')
       }
-      const source = await host.open(harness, { threadId })
-      const transcript = await source.transcript()
-      const end =
-        at === undefined
-          ? transcript.length
-          : at === null
-            ? 0
-            : transcript.findIndex((message) => message.id === at) + 1
-      if (typeof at === 'string' && end === 0) {
-        throw new Error(
-          `Thread ${JSON.stringify(threadId)} has no message ${JSON.stringify(at)}.`,
-        )
-      }
-      const isUsed = logStore
-        ? (await logStore.read(newThreadId, { limit: 1 })).length > 0
-        : ((await persistence.stores.messages?.loadThread(newThreadId))
-            ?.length ?? 0) > 0
-      if (isUsed) {
-        throw new Error(
-          `Thread ${JSON.stringify(newThreadId)} is not empty. Fork into a new thread.`,
-        )
-      }
-      const fork = await host.open(harness, {
-        threadId: newThreadId,
-        ...(principal ? { principal } : {}),
+      // A source that only this fork opens closes again at the end.
+      const wasOpen = sessions.has(`${harness.name}\u0000${threadId}`)
+      const source = await host.open(harness, {
+        threadId,
+        ...(logId ? { logId } : {}),
       })
-      await fork.adoptFork(source, transcript.slice(0, end))
-      return fork
+      try {
+        const transcript = await source.transcript()
+        const end =
+          at === undefined
+            ? transcript.length
+            : at === null
+              ? 0
+              : transcript.findIndex((message) => message.id === at) + 1
+        if (typeof at === 'string' && end === 0) {
+          throw new Error(
+            `Thread ${JSON.stringify(threadId)} has no message ${JSON.stringify(at)}.`,
+          )
+        }
+        const isUsed = logStore
+          ? (await logStore.read(newThreadId, { limit: 1 })).length > 0
+          : ((await persistence.stores.messages?.loadThread(newThreadId))
+              ?.length ?? 0) > 0
+        if (isUsed) {
+          throw new Error(
+            `Thread ${JSON.stringify(newThreadId)} is not empty. Fork into a new thread.`,
+          )
+        }
+        const fork = await host.open(harness, {
+          threadId: newThreadId,
+          ...(principal ? { principal } : {}),
+        })
+        await fork.adoptFork(source, transcript.slice(0, end))
+        return fork
+      } finally {
+        if (!wasOpen) await source.close()
+      }
     },
     async resumePending({ harnesses, close = 'whenIdle', limit = 100 }) {
       const claims = persistence.stores.workClaims
@@ -747,6 +768,7 @@ export function createHarnessHost<TLogState = undefined>(
       }
       expired = expired.slice(0, limit)
       const opened: Array<{ threadId: string; harness: string }> = []
+      const failures: Array<unknown> = []
       for (const { threadId, harness: name } of expired) {
         const harness = byName.get(name)
         if (!harness) continue
@@ -763,7 +785,17 @@ export function createHarnessHost<TLogState = undefined>(
         // that the app has open stays open.
         const isOwn = close === 'whenIdle' && !sessions.has(key)
         if (isOwn) sweptOnly.add(key)
-        const session = await host.open(harness, { threadId })
+        let session: HarnessSession
+        try {
+          session = await host.open(harness, { threadId })
+        } catch (error) {
+          // One thread that cannot open must not stop the sweep. The claim
+          // goes back, so the next sweep tries again.
+          sweptOnly.delete(key)
+          await claims.release({ threadId, ownerId: hostId }).catch(() => {})
+          failures.push(error)
+          continue
+        }
         if (isOwn) {
           const stop = session.onIdle(() => {
             stop()
@@ -782,6 +814,12 @@ export function createHarnessHost<TLogState = undefined>(
           })
         }
         opened.push({ threadId, harness: name })
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures,
+          `resumePending opened  threads;  failed to open.`,
+        )
       }
       return opened
     },
@@ -888,8 +926,15 @@ export function createHarnessHost<TLogState = undefined>(
           ...(source?.title ? { title: `${source.title} (fork)` } : {}),
           ...(source?.principal ? { principal: source.principal } : {}),
         }
-        await index.update(entry.threadId, () => entry)
-        return entry
+        // The open of the fork wrote an entry already: keep what it holds.
+        return (
+          (await index.update(entry.threadId, (current) => ({
+            ...entry,
+            ...current,
+            ...(entry.title ? { title: entry.title } : {}),
+            updatedAt: now,
+          }))) ?? entry
+        )
       },
     },
     async *events({ signal } = {}) {

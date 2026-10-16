@@ -107,6 +107,22 @@ describe.each([
     }
   })
 
+  it('closes a source that only the fork opened, and keeps one the app has open', async () => {
+    const persistence = durable ? durablePersistence() : memoryPersistence()
+    const { harness, host } = setup(persistence)
+    const source = await host.open(harness, { threadId: SOURCE })
+    await source.prompt('one')
+    await host.fork(harness, { threadId: SOURCE, newThreadId: FORK })
+    // The app opened the source: the fork left it open.
+    expect(await host.open(harness, { threadId: SOURCE })).toBe(source)
+    await source.close()
+    await host.fork(harness, { threadId: SOURCE, newThreadId: 'other' })
+    // The fork opened the source itself, so it closed it again.
+    const reopened = await host.open(harness, { threadId: SOURCE })
+    expect(reopened).not.toBe(source)
+    await host.close()
+  })
+
   it('copies the whole transcript by default, no messages for a null at, and refuses an unknown message or a used thread', async () => {
     const persistence = durable ? durablePersistence() : memoryPersistence()
     const { harness, host } = setup(persistence)

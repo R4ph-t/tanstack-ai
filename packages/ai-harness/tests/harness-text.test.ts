@@ -67,6 +67,35 @@ describe('harnessText', () => {
     await host.close()
   })
 
+  it('reads the last event of a remote stream with no blank line after it, and keeps its finish reason', async () => {
+    const finished = {
+      type: EventType.RUN_FINISHED,
+      runId: 'inner',
+      threadId: 'inner',
+      outcome: { type: 'interrupt', interrupts: [] },
+    }
+    const adapter = harnessText({
+      url: 'http://remote.test',
+      fetch: async () =>
+        new Response(`data: ${JSON.stringify(finished)}\n`, { status: 200 }),
+    })
+
+    const chunks: Array<StreamChunk> = []
+    for await (const chunk of adapter.chatStream({
+      model: adapter.model,
+      messages: [{ role: 'user', content: 'hello' }],
+    } as never)) {
+      chunks.push(chunk)
+    }
+
+    const last = chunks.at(-1)
+    expect(last?.type).toBe(EventType.RUN_FINISHED)
+    expect(
+      last?.type === EventType.RUN_FINISHED &&
+        last.metadata?.tanstack?.finishReason,
+    ).toBe('tool_calls')
+  })
+
   it('reads CRLF events from a remote harness, and fails a stream with no end', async () => {
     const delta = {
       type: EventType.TEXT_MESSAGE_CONTENT,
