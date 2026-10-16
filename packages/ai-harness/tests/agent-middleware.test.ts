@@ -95,7 +95,7 @@ describe('plugin agentMiddleware', () => {
       }),
     )
 
-    const turn = await session.prompt('research')
+    const turn = await session.send('research')
 
     expect(turn.text).toBe('lead done')
     expect(runs).toEqual(['researcher', 'fetcher'])
@@ -131,7 +131,7 @@ describe('plugin agentMiddleware', () => {
       }),
     )
 
-    await session.prompt('help')
+    await session.send('help')
 
     expect(runs).toEqual(['helper'])
     await host.close()
@@ -166,7 +166,7 @@ describe('plugin agentMiddleware', () => {
       }),
     )
 
-    await session.prompt('research')
+    await session.send('research')
 
     expect(calls).toEqual([
       { agent: 'lead', totalTokens: 1 },

@@ -263,7 +263,7 @@ describe('questions', () => {
       }),
       { threadId: 't' },
     )
-    const turn = session.prompt('Go.')
+    const turn = session.send('Go.')
     await vi.waitFor(() =>
       expect(session.snapshot().pendingQuestions).toHaveLength(1),
     )
@@ -594,7 +594,7 @@ describe('the plugin session API and inspect', () => {
     )
     expect(api.threadId).toBe('t')
     expect(api.principal).toEqual({ id: 'u1' })
-    await session.prompt('hello')
+    await session.send('hello')
     expect(
       (await api.transcript()).map((m: { content: string }) => m.content),
     ).toEqual(['hello', 'first'])

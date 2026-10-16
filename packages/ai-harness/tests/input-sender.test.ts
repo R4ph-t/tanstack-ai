@@ -77,9 +77,9 @@ describe('the sender of each input', () => {
       session,
     )
 
-    await session.prompt('Who am I?', { inputId: 'in-bob', principal: bob })
+    await session.send('Who am I?', { inputId: 'in-bob', principal: bob })
     // Without a principal, the input is the opener's.
-    await session.prompt('And now?', { inputId: 'in-default' })
+    await session.send('And now?', { inputId: 'in-default' })
 
     expect(seen.map((entry) => entry.principal)).toEqual(['bob', 'alice'])
     const inputs = (await persistence.stores.log.read(THREAD))
@@ -113,10 +113,10 @@ describe('the sender of each input', () => {
       { threadId: THREAD, principal: alice },
     )
 
-    expect((await session.prompt('Hi.', { principal: bob })).text).toBe(
+    expect((await session.send('Hi.', { principal: bob })).text).toBe(
       'answered with bob-key',
     )
-    expect((await session.prompt('Hi.')).text).toBe('answered with alice-key')
+    expect((await session.send('Hi.')).text).toBe('answered with alice-key')
     expect(keys).toEqual(['bob-key', 'alice-key'])
     await host.close()
   })
@@ -146,9 +146,13 @@ describe('the sender of each input', () => {
       { threadId: THREAD, principal: alice },
     )
 
-    const turn = session.prompt('Start.')
+    const turn = session.send('Start.')
     await turn.receipt
-    await session.steer('Mine.', { inputId: 'in-bob', principal: bob })
+    await session.send('Mine.', {
+      inputId: 'in-bob',
+      principal: bob,
+      mode: 'steer',
+    }).receipt
     release.open()
 
     expect(await turn).toEqual({ text: 'first', media: [] })
@@ -191,10 +195,11 @@ describe('the sender of each input', () => {
       { threadId: THREAD, principal: alice },
     )
 
-    const turn = session.prompt('Start.')
+    const turn = session.send('Start.')
     await started.opened
-    await session.steer('Also this.', { inputId: 'in-alice' })
-    const bobs = session.prompt('Mine.', {
+    await session.send('Also this.', { inputId: 'in-alice', mode: 'steer' })
+      .receipt
+    const bobs = session.send('Mine.', {
       busy: 'steer',
       inputId: 'in-bob',
       principal: bob,
@@ -237,10 +242,11 @@ describe('the sender of each input', () => {
       { threadId: THREAD, principal: alice },
     )
 
-    const turn = session.prompt('Start.')
+    const turn = session.send('Start.')
     await started.opened
-    await session.steer('Also this.', { inputId: 'in-alice' })
-    const bobs = session.prompt('Mine.', {
+    await session.send('Also this.', { inputId: 'in-alice', mode: 'steer' })
+      .receipt
+    const bobs = session.send('Mine.', {
       busy: 'steer',
       inputId: 'in-bob',
       principal: bob,
@@ -294,7 +300,7 @@ describe('the sender of each input', () => {
       { threadId: THREAD, principal: alice },
     )
 
-    const turn = session.prompt('Start.')
+    const turn = session.send('Start.')
     await started.opened
     // Bob runs a command while alice's turn runs.
     await session.command('again', undefined, { principal: bob })
@@ -347,7 +353,7 @@ describe('the sender of each input', () => {
       { threadId: THREAD, principal: alice },
     )
 
-    await session.prompt('Start the writer.', { principal: bob })
+    await session.send('Start the writer.', { principal: bob })
     await vi.waitFor(() => expect(seen).toHaveLength(1))
     expect(seen.map((entry) => entry.principal)).toEqual(['bob'])
     await host.close()
@@ -410,7 +416,7 @@ describe('the sender of each input', () => {
       { threadId: THREAD, principal: alice },
     )
 
-    await session.prompt('Start the writer.', { principal: bob })
+    await session.send('Start the writer.', { principal: bob })
     release.open()
 
     expect(await started).toBe('drafted')
@@ -580,7 +586,7 @@ describe('the turn where the model is picked', () => {
       { threadId: THREAD, principal: alice },
     )
 
-    const turn = session.prompt('Pick for me.', {
+    const turn = session.send('Pick for me.', {
       inputId: 'in-1',
       principal: bob,
       context: { plan: 'pro' },
@@ -624,7 +630,7 @@ describe('the turn where the model is picked', () => {
       { threadId: THREAD, principal: alice },
     )
 
-    await session.prompt('Route me.', {
+    await session.send('Route me.', {
       principal: bob,
       context: { plan: 'pro' },
     })
@@ -680,8 +686,8 @@ describe('the tenant of a principal', () => {
       { threadId: THREAD, principal: { id: 'u1', tenantId: 'org-a' } },
     )
 
-    await session.prompt('Read it.')
-    await session.prompt('Read it again.', {
+    await session.send('Read it.')
+    await session.send('Read it again.', {
       principal: { id: 'u1', tenantId: 'org-b' },
     })
 

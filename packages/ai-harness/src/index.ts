@@ -127,6 +127,7 @@ export { isTransientModelError, retryTransientErrors } from './turn'
 export { HARNESS_EVENTS, InputRejectedError } from './types'
 export type {
   AgentRun,
+  AgentSendOptions,
   BusyPolicy,
   ChatTurnResult,
   Cursor,
@@ -142,6 +143,7 @@ export type {
   OperationStatus,
   Principal,
   Receipt,
+  SendOptions,
   SessionEvent,
   StreamChunkOf,
   StreamChunkType,

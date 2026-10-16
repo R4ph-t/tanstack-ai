@@ -297,7 +297,7 @@ export function harnessText(
         const tools = chatOptions.tools?.length
           ? { overrides: { tools: chatOptions.tools } }
           : {}
-        const operation = session.prompt(
+        const operation = session.send(
           lastUserInput(chatOptions.messages),
           tools,
         )

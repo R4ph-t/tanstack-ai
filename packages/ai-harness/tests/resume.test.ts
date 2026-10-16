@@ -95,7 +95,7 @@ describe('checkpoints and leases', () => {
       { threadId: 't1' },
     )
 
-    const turn = session.prompt('go')
+    const turn = session.send('go')
     await started.opened
     const running = await persistence.stores.runs.get(turn.id)
     expect(running?.leaseOwner).toMatch(/^host-/)

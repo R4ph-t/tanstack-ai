@@ -51,7 +51,7 @@ describe('work claims while a session runs', () => {
       threadId: THREAD,
     })
 
-    const turn = session.prompt('Go.')
+    const turn = session.send('Go.')
     await turn.receipt
     expect(await otherHostCanClaim(claims)).toBe(false)
 
@@ -82,7 +82,7 @@ describe('work claims while a session runs', () => {
       { threadId: THREAD },
     )
 
-    const turn = session.prompt('Deploy.')
+    const turn = session.send('Deploy.')
     await turn.receipt
     expect(await otherHostCanClaim(claims)).toBe(false)
 
@@ -146,7 +146,7 @@ describe('work claims while a session runs', () => {
       threadId: THREAD,
     })
 
-    const turn = session.prompt('Go.')
+    const turn = session.send('Go.')
     await turn.receipt
     await new Promise((resolve) => setTimeout(resolve, 200))
     expect(await otherHostCanClaim(claims)).toBe(false)
@@ -179,7 +179,7 @@ describe('work claims while a session runs', () => {
       }
     })()
 
-    const turn = session.prompt('Go.')
+    const turn = session.send('Go.')
     const { inputId } = await turn.receipt
     expect((await turn).text).toBe('Done.')
     expect(await session.settled(inputId)).toMatchObject({
@@ -517,7 +517,7 @@ describe('host.resumePending', () => {
     const harness = defineHarness({ name: NAME, adapter })
     const live = createHarnessHost({ persistence })
     const session = await live.open(harness, { threadId: THREAD })
-    const turn = session.prompt('Go.')
+    const turn = session.send('Go.')
     await turn.receipt
 
     const sweeper = createHarnessHost({ persistence })
@@ -637,7 +637,7 @@ describe('host.resumePending', () => {
       queueMicrotask(() => {
         arriving = host
           .open(harness, { threadId: THREAD })
-          .then(async (session) => (await session.prompt('Again.')).text)
+          .then(async (session) => (await session.send('Again.')).text)
       })
       return release(claim)
     })

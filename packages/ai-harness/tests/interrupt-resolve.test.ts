@@ -56,7 +56,7 @@ describe.each([
       defineHarness({ name: 'test/bad-resume', adapter, tools: [openScreen] }),
       { threadId: 't1' },
     )
-    const turn = await session.prompt('Open settings.')
+    const turn = await session.send('Open settings.')
     const interruptId = turn.interrupts?.[0]?.id
     if (!interruptId) throw new Error('The turn did not stop for the tool.')
 
@@ -111,7 +111,7 @@ describe.each([
     const first = open([() => toolCall('probe', {})])
     const turn = await (
       await first.session
-    ).prompt('Probe.', { context: { screen: 'settings' } })
+    ).send('Probe.', { context: { screen: 'settings' } })
     const interruptId = turn.interrupts?.[0]?.id
     if (!interruptId) throw new Error('The turn did not stop for the approval.')
     await first.host.close()
@@ -142,10 +142,12 @@ describe.each([
       defineHarness({ name: 'test/waits', adapter, tools: [deploy] }),
       { threadId: 't1' },
     )
-    const turn = await session.prompt('Deploy.')
+    const turn = await session.send('Deploy.')
     expect(turn.interrupts).toHaveLength(1)
 
-    expect(await session.followUp('And then?')).toMatchObject({
+    expect(
+      await session.send('And then?', { mode: 'followUp' }).receipt,
+    ).toMatchObject({
       status: 'rejected',
       reason: 'pending_interrupts',
     })
@@ -170,7 +172,7 @@ describe.each([
       defineHarness({ name: 'test/late-failure', adapter, tools: [deploy] }),
       { threadId: 't1' },
     )
-    const turn = await session.prompt('Deploy.')
+    const turn = await session.send('Deploy.')
     const interruptId = turn.interrupts?.[0]?.id
     if (!interruptId) throw new Error('The turn did not stop for approval.')
 
@@ -213,7 +215,7 @@ describe.each([
     const persistence = persistenceFor(durable)
     const first = createHarnessHost({ persistence })
     const session = await first.open(harness, { threadId: 't1' })
-    const turn = await session.prompt('Deploy.')
+    const turn = await session.send('Deploy.')
     const interruptId = turn.interrupts?.[0]?.id
     if (!interruptId) throw new Error('The turn did not stop for approval.')
     await session.resolve(
@@ -277,7 +279,7 @@ describe.each([
       { threadId: 't1' },
     )
 
-    const turn = session.prompt('Deploy.')
+    const turn = session.send('Deploy.')
     let interruptId = ''
     for await (const { operationId, event } of session.events()) {
       if (operationId !== turn.id) continue
@@ -360,9 +362,9 @@ describe('a resolve and a waiting steer', () => {
       { threadId: 't1' },
     )
 
-    const turn = session.prompt('Deploy.')
+    const turn = session.send('Deploy.')
     await vi.waitFor(() => expect(calls).toHaveLength(1))
-    const steer = session.prompt('And tell me.', {
+    const steer = session.send('And tell me.', {
       busy: 'steer',
       inputId: 'steer',
     })
@@ -400,9 +402,9 @@ describe("prompt({ busy: 'steer' })", () => {
       { threadId: 't1' },
     )
 
-    const turn = session.prompt('Start.')
+    const turn = session.send('Start.')
     await vi.waitFor(() => expect(calls).toHaveLength(1))
-    const joined = session.prompt('Steer by prompt.', {
+    const joined = session.send('Steer by prompt.', {
       busy: 'steer',
       inputId: 'by-prompt',
     })

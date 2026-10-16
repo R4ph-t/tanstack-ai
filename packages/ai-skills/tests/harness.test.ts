@@ -264,7 +264,7 @@ describe('skills()', () => {
     expect(names()).not.toContain('alpha')
 
     await addSkill(later, 'alpha')
-    await session.prompt('hi')
+    await session.send('hi')
     expect(names()).toContain('alpha')
   })
 
@@ -294,7 +294,7 @@ describe('skills()', () => {
     })
     await list()
 
-    await session.prompt('hi')
+    await session.send('hi')
     expect(promptOf(requests[0])).toContain('alpha')
     expect(promptOf(requests[0])).not.toContain('zeta')
 
@@ -311,7 +311,7 @@ describe('skills()', () => {
       { answers: [loadSkill('alpha')] },
     )
 
-    await session.prompt('use alpha')
+    await session.send('use alpha')
     expect(JSON.parse(toolResultOf(requests[1]))).toEqual({
       skill: 'alpha',
       content: '# Alpha\n\nDo the alpha thing.',
@@ -335,7 +335,7 @@ describe('skills()', () => {
       { answers: [removeThenLoad] },
     )
 
-    await session.prompt('use alpha')
+    await session.send('use alpha')
     expect(JSON.parse(toolResultOf(requests[1]))).toEqual({
       error: `No skill named "alpha" in ${dir}.`,
     })
@@ -368,7 +368,7 @@ describe('skills()', () => {
       },
     )
 
-    await session.prompt('use alpha')
+    await session.send('use alpha')
     await vi.waitFor(() => expect(requests).toHaveLength(2))
     const sent = JSON.stringify(requests[1]?.messages)
     expect(sent).toContain('Do alpha.')

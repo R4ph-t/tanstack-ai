@@ -368,7 +368,7 @@ export function createAcpAgent(options: AcpAgentOptions): AgentApp {
     client: AgentContext,
     sessionId: string,
     session: HarnessSession,
-    input: Parameters<HarnessSession['prompt']>[0],
+    input: Parameters<HarnessSession['send']>[0],
   ) => {
     let operation: Operation<unknown> | undefined
     let stopReason: 'end_turn' | 'cancelled' | 'error' = 'end_turn'
@@ -380,7 +380,7 @@ export function createAcpAgent(options: AcpAgentOptions): AgentApp {
       })
     try {
       await running()
-      if (await closeInterrupts(session)) operation = session.prompt(input)
+      if (await closeInterrupts(session)) operation = session.send(input)
       else stopReason = 'cancelled'
       const args = new Map<string, string>()
       while (operation) {

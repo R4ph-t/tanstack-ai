@@ -15,8 +15,8 @@ import type {
 export type UserInput = string | Array<ContentPart>
 
 /**
- * Settings for one chat turn: `session.prompt(message, { overrides })` or
- * `session.followUp(message, { overrides })`. They apply to every model call
+ * Settings for one chat turn: `session.send(message, { overrides })` or
+ * `session.send(message, { mode: 'followUp', overrides })`. They apply to every model call
  * of the turn, retries included. The rest of the session keeps its defaults.
  *
  * They live only in memory, on the queued turn, so they are not part of the
@@ -26,7 +26,7 @@ export type UserInput = string | Array<ContentPart>
  *
  * @example
  * ```ts
- * session.prompt('Plan the migration.', {
+ * session.send('Plan the migration.', {
  *   overrides: { reasoning: { level: 'high', summary: true }, tools: [planTool] },
  * })
  * ```
@@ -46,12 +46,37 @@ export interface TurnOverrides {
 }
 
 /**
- * What a `prompt` does when a chat turn is already running:
+ * What a `send` (mode `'prompt'`) does when a chat turn is already running:
  * - `queue` (default): runs as a new turn after the current one settles.
  * - `steer`: joins the running turn at its next model call.
  * - `reject`: refuses the prompt.
  */
 export type BusyPolicy = 'queue' | 'steer' | 'reject'
+
+/** Options of `session.send` for a message to the session. See `send`. */
+export type SendOptions = {
+  to?: undefined
+  inputId?: string
+  principal?: Principal
+  context?: unknown
+  overrides?: TurnOverrides
+  ephemeral?: ReadonlyArray<ModelMessage>
+  /** @internal The AG-UI `runId` of a `POST run` request. The turn runs as it. */
+  runId?: string
+} & (
+  | { mode?: 'prompt'; busy?: BusyPolicy }
+  | { mode: 'steer' | 'followUp'; busy?: never }
+)
+
+/** Options of `session.send` for a message to an agent run. See `send`. */
+export interface AgentSendOptions {
+  /** The operation id of the agent run. Any run of its chain works. */
+  to: string
+  /** Default `'steer'`. See `AgentRun.send`. */
+  mode?: 'steer' | 'followUp'
+  inputId?: string
+  principal?: Principal
+}
 
 /** Kinds of work a session runs. */
 export type OperationKind = 'chat' | 'agent' | 'command' | 'compact'
@@ -123,7 +148,7 @@ export type StreamChunkOf<TType extends StreamChunkType> =
  * const stop = session.onEvent('TEXT_MESSAGE_CONTENT', ({ event }) => {
  *   process.stdout.write(event.delta)
  * })
- * await session.prompt('Write a haiku.')
+ * await session.send('Write a haiku.')
  * stop()
  * ```
  */

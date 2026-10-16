@@ -14,7 +14,7 @@ import {
   repairTranscript,
   truncationMiddleware,
 } from '../resume'
-import { HARNESS_EVENTS } from '../types'
+import { HARNESS_EVENTS, InputRejectedError } from '../types'
 import {
   agentKey,
   chainFields,
@@ -47,10 +47,12 @@ import type { AnyHarness } from '../define'
 import type { AgentGroup, MountedPlugins } from '../plugins'
 import type {
   AgentRun,
+  AgentSendOptions,
   ChatTurnResult,
   InputSettlement,
   SettlementOutcome,
   MediaRecord,
+  Operation,
   Principal,
   Receipt,
   UserInput,
@@ -87,12 +89,77 @@ export abstract class SessionAgents<
     }
   }
 
+  protected override sendToRun(
+    message: UserInput,
+    options: AgentSendOptions,
+  ): Operation<unknown> {
+    const { to } = options
+    const chain = this.chainOf.get(to) ?? this.loggedChain(to)
+    // The operation ends with the run that gets the message. Its cancel
+    // cancels that run.
+    let target = to
+    const follower = new OperationImpl<unknown>(
+      'agent',
+      this.feed,
+      () => this.cancel(target),
+      chain?.agent,
+    )
+    void this.sendToAgent({ ...options, operationId: to, message }).then(
+      (receipt) => {
+        follower.resolveReceipt(receipt)
+        const run =
+          receipt.status === 'rejected'
+            ? undefined
+            : receipt.operationId
+              ? this.agentRun(receipt.operationId)
+              : undefined
+        if (!run) {
+          follower.fail(
+            'failed',
+            new InputRejectedError(
+              receipt.status === 'rejected'
+                ? receipt
+                : {
+                    inputId: receipt.inputId,
+                    status: 'rejected',
+                    reason: 'not_running',
+                  },
+            ),
+          )
+          return
+        }
+        target = run.id
+        run.then(
+          (result) =>
+            follower.finish(
+              run.status() === 'interrupted' ? 'interrupted' : 'completed',
+              result,
+            ),
+          (error: unknown) =>
+            follower.fail(
+              run.status() === 'cancelled' ? 'cancelled' : 'failed',
+              error,
+            ),
+        )
+      },
+      (error: unknown) => {
+        follower.resolveReceipt({
+          inputId: options.inputId ?? '',
+          status: 'rejected',
+          reason: error instanceof Error ? error.message : String(error),
+        })
+        follower.fail('failed', error)
+      },
+    )
+    return follower
+  }
+
   /**
    * Add a message to the agent run `operationId`, as `AgentRun.send` does.
    * `principal` is who sent it. A follow-up runs for its sender. An unknown
    * run gets `not_running`.
    */
-  async sendToAgent(options: {
+  protected async sendToAgent(options: {
     operationId: string
     message: UserInput
     mode?: 'steer' | 'followUp'
@@ -1006,10 +1073,15 @@ export abstract class SessionAgents<
       await this.addNote(note)
     }
     if (options.wake) {
-      this.queueFollowUp(`Background agent ${name} ${ended}: ${note}`, {
-        ...(principal ? { principal } : {}),
-        wake: true,
-      }).catch((error: unknown) => this.warnSession('harness:agents', error))
+      this.startTurn(
+        {
+          op: 'followUp',
+          message: `Background agent ${name} ${ended}: ${note}`,
+        },
+        { ...(principal ? { principal } : {}), wake: true },
+      ).receipt.catch((error: unknown) =>
+        this.warnSession('harness:agents', error),
+      )
     }
   }
 
