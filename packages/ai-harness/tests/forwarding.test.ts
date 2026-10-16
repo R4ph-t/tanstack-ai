@@ -280,6 +280,7 @@ describe('an input that reaches a host that does not own the thread', () => {
       () => toolCall('wait', {}),
       () => text('One.'),
       () => text('Two.'),
+      () => text('Three.'),
     ])
     const harness = defineHarness({ name: NAME, adapter, tools: [wait] })
     const lease = { renewMs: 50, ttlMs: 300 }
@@ -298,16 +299,20 @@ describe('an input that reaches a host that does not own the thread', () => {
 
     // Another host opens the thread after the claim expired.
     const otherHost = createHarnessHost({ persistence, lease })
-    await otherHost.open(harness, { threadId: THREAD })
+    const other = await otherHost.open(harness, { threadId: THREAD })
     await otherHost.recover()
-    await new Promise((resolve) => setTimeout(resolve, 200))
+    // An input on that host waits in the inbox for the owner, and its inbox
+    // watch (every second) leaves it there.
+    const queued = await other.send('Also?', { mode: 'followUp' }).receipt
+    expect(queued.status).toBe('queued')
+    await new Promise((resolve) => setTimeout(resolve, 1_500))
     expect(calls).toHaveLength(1)
 
     isStalled = false
     claimWrites.open()
     toolDone.open()
     expect((await turn).text).toBe('One.')
-    await vi.waitFor(() => expect(calls).toHaveLength(3), { timeout: 3_000 })
+    await vi.waitFor(() => expect(calls).toHaveLength(4), { timeout: 5_000 })
     expect(await owner.transcript()).toMatchObject([
       { role: 'user', content: 'Go.' },
       { role: 'assistant' },
@@ -315,6 +320,8 @@ describe('an input that reaches a host that does not own the thread', () => {
       { role: 'assistant', content: 'One.' },
       { role: 'user', content: 'And then?' },
       { role: 'assistant', content: 'Two.' },
+      { role: 'user', content: 'Also?' },
+      { role: 'assistant', content: 'Three.' },
     ])
     await otherHost.close()
     await ownerHost.close()

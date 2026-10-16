@@ -707,7 +707,6 @@ export abstract class SessionBase<THarness extends AnyHarness = AnyHarness> {
           until: Date.now() + ttlMs,
         })
         this.claimLost = !isHeld
-        this.ownerElsewhere = !isHeld
       } catch (error) {
         // The work goes on without a claim.
         this.warnClaim(error)
@@ -814,7 +813,6 @@ export abstract class SessionBase<THarness extends AnyHarness = AnyHarness> {
         ownerId: this.hostId,
         until: Date.now() + (this.lease?.ttlMs ?? LEASE.ttlMs),
       })
-      this.ownerElsewhere = !isHeld
       if (!isHeld) return
       // This host takes the thread from an owner that stopped. Its inputs
       // run first, as on an open.
