@@ -101,7 +101,7 @@ export const macros = definePlugin({
             defineCommand({
               description: `Send: ${words.join(' ')}`,
               run: () => {
-                void ctx.session.prompt(words.join(' '))
+                void ctx.session.send(words.join(' '))
               },
             }),
           )

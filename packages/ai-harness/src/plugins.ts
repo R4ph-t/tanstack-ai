@@ -465,7 +465,7 @@ const NO_SESSION: PluginSessionApi = {
   threadId: '',
   principal: undefined,
   snapshot: unavailable('ctx.session'),
-  prompt: unavailable('ctx.session'),
+  send: unavailable('ctx.session'),
   note: unavailable('ctx.session'),
   transcript: unavailable('ctx.session'),
   replaceTranscript: unavailable('ctx.session'),

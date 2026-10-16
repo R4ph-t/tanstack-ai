@@ -645,7 +645,7 @@ export abstract class SessionRequests<
       },
       snapshot: () => this.snapshot(),
       // A plugin turn always waits its turn. It cannot see a busy rejection.
-      prompt: (text) =>
+      send: (text) =>
         this.startTurn(
           { op: 'prompt', message: text, busy: 'queue' },
           { principal: sender() },

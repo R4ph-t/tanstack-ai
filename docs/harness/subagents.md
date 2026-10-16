@@ -189,15 +189,11 @@ for (const info of session.agentRuns()) {
 }
 
 if (session.agentRun(run.id)) {
-  await session.sendToAgent({
-    operationId: run.id,
-    message: 'Make it shorter.',
-    mode: 'followUp',
-  })
+  await session.send('Make it shorter.', { to: run.id, mode: 'followUp' })
 }
 ```
 
-- `session.sendToAgent({ operationId, message, mode })`: does the same as `run.send`. An unknown id gets a receipt with `status: 'rejected'` and `reason: 'not_running'`.
+- `session.send(message, { to: operationId, mode })`: does the same as `run.send`, and returns an operation that ends with the run that gets the message. `await operation.receipt` is the receipt. An unknown id gets a receipt with `status: 'rejected'` and `reason: 'not_running'`, and the operation rejects with `InputRejectedError`.
 - `session.agentRun(id)`: the run, or `undefined`.
 - `session.agentRuns()`: every agent run of the session, oldest first.
 
@@ -245,7 +241,7 @@ This applies only to a durable host. When the host stops during a run, the messa
 
 ### Known limits
 
-- A run that another host runs is in `agentRuns()`, but it takes no message. `sendToAgent` gets `not_running`.
+- A run that another host runs is in `agentRuns()`, but it takes no message. `send` with `to` gets `not_running`.
 - A follow-up waits for its run. If that run had already ended when the host stopped, the follow-up settles `aborted`.
 
 ## Let the model run agents in the background
@@ -329,7 +325,7 @@ const studio = defineHarness({
 
 const host = createHarnessHost({ persistence: memoryPersistence() })
 const session = await host.open(studio, { threadId: 'user-1-thread' })
-await session.prompt('Write a short intro, then have the writer edit it.')
+await session.send('Write a short intro, then have the writer edit it.')
 
 for (const message of await session.transcript()) {
   if (message.role !== 'tool' || typeof message.content !== 'string') continue
@@ -354,7 +350,7 @@ You get an empty list when the id is unknown, or when the child belongs to anoth
 
 ## Route a turn to an agent
 
-Your harness has a writer and a pricer, but the main model answers every turn. Add `routing.router` to send a turn to the agent that can answer it. The router runs at the start of each new turn: a `prompt`, a `followUp`, or the wake turn of a background agent.
+Your harness has a writer and a pricer, but the main model answers every turn. Add `routing.router` to send a turn to the agent that can answer it. The router runs at the start of each new turn: a new message, a follow-up, or the wake turn of a background agent.
 
 ```ts
 import { chat, decide, defineAgent, subagentRoute } from '@tanstack/ai'

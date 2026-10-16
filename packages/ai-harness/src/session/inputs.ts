@@ -136,7 +136,7 @@ export abstract class SessionInputs<
    *
    * @example
    * ```ts
-   * const turn = session.prompt('Summarize the report.', { inputId: 'req-42' })
+   * const turn = session.send('Summarize the report.', { inputId: 'req-42' })
    * const { outcome } = await session.settled('req-42')
    * ```
    */

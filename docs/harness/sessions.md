@@ -39,7 +39,7 @@ const session = await host.open(assistant, {
   threadId: 'chat-1',
   principal: { id: 'ada' },
 })
-await session.prompt('Plan a trip to Lisbon.')
+await session.send('Plan a trip to Lisbon.')
 console.log((await host.sessions.get('chat-1'))?.principal) // { id: 'ada' }
 ```
 
@@ -116,7 +116,7 @@ const forked = await host.sessions.fork({
   at: { before: first.id },
 })
 const fork = await host.open(assistant, { threadId: forked.threadId })
-await fork.prompt('Plan a trip to Porto.')
+await fork.send('Plan a trip to Porto.')
 ```
 
 - `at: { through: id }` copies the messages up to and including `id`.

@@ -136,7 +136,7 @@ export function skills(options: SkillsPluginOptions) {
           // ran the command.
           run: (input: unknown, command) => {
             called.add(name)
-            void command.session.prompt(skillPrompt(name, input))
+            void command.session.send(skillPrompt(name, input))
           },
         })
 

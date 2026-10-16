@@ -283,7 +283,7 @@ describe('the sender of each input', () => {
             description: 'Ask again',
             run: (_input, { session }) => {
               commandSaw.push(session.principal?.id)
-              again = session.prompt('Again.')
+              again = session.send('Again.')
               return 'ok'
             },
           }),
