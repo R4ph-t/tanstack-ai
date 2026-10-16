@@ -914,11 +914,23 @@ export abstract class SessionBase<THarness extends AnyHarness = AnyHarness> {
           value: input.value,
           inputId,
         })
+      case 'tool':
+        return stored(
+          // Wire args are unknown here. The tool's input schema checks them.
+          session.tool(input.name, input.args as never, {
+            inputId,
+            ...(principal ? { principal } : {}),
+            ...(input.meta ? { meta: input.meta } : {}),
+          }),
+        )
       case 'revert':
       case 'unrevert':
       case 'agent':
       case 'background':
         // These run only on the owner. Another host never stores them.
+        return undefined
+      case 'append':
+        // It goes to the log at once, not to the inbox.
         return undefined
     }
   }

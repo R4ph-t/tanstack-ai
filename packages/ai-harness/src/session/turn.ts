@@ -41,6 +41,7 @@ import {
   keepTurnTools,
 } from './helpers'
 import { SessionAgents } from './agents'
+import { ToolTurnAdapter } from '../tool-turn'
 import type {
   AnyChatMiddleware,
   AnyTextAdapter,
@@ -450,8 +451,9 @@ export abstract class SessionTurn<
         stored.model === undefined
           ? undefined
           : this.harness.models?.[stored.model]
-      const model =
-        overrides?.adapter ?? named ?? picked ?? this.harness.adapter
+      const model = turn.tool
+        ? new ToolTurnAdapter(turn.tool, `tool-${turn.inputId ?? operation.id}`)
+        : (overrides?.adapter ?? named ?? picked ?? this.harness.adapter)
       if (!model) throw new Error(NO_MODEL)
       const adapter: AnyTextAdapter = await this.keys.adapter(model)
       const resolvePrompt = (prompt: string | (() => string)) =>
@@ -520,7 +522,12 @@ export abstract class SessionTurn<
       // A new turn asks the router once. A resolve does not: it continues the
       // turn it answers, the main model or the saved plan of the root agents.
       let pick: SubagentRouterPick | undefined
-      if (routing && rootAgents.length > 0 && turn.resume === undefined) {
+      if (
+        routing &&
+        rootAgents.length > 0 &&
+        turn.resume === undefined &&
+        !turn.tool
+      ) {
         const history = await this.messages.loadThread(this.threadId)
         pick = await routing.router({
           messages: resetContext([...history, ...(message ? [message] : [])]),
@@ -630,6 +637,9 @@ export abstract class SessionTurn<
             adapter,
             messages: routedFrom ?? turnMessages,
             systemPrompts: [
+              // Per-run preamble (e.g. pod memory) comes first, ahead of the
+              // harness's own system prompts.
+              ...(turn.systemPreamble ?? []),
               ...(this.harness.systemPrompts ?? []),
               ...[...(session?.prompts ?? []), ...(runPlugins?.prompts ?? [])]
                 .map(resolvePrompt)
@@ -660,7 +670,7 @@ export abstract class SessionTurn<
               ...(runPlugins?.middleware ?? []),
               ...(keepTools ? [keepTools] : []),
               ...(durableTools ? [durableTools] : []),
-              this.detachTools(),
+              this.detachTools(operation.id),
               ...(rootBag ? [] : [this.syncFold()]),
               // Again: a middleware that returns `messages` (as `syncFold`
               // does) resets what the model gets to the whole transcript.

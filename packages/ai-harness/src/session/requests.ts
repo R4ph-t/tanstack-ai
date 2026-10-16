@@ -19,7 +19,7 @@ import type {
 } from '@tanstack/ai'
 import type { SessionIndexEntry } from '@tanstack/ai-persistence'
 import type { PluginSessionApi, Question } from '../commands'
-import type { AnyHarness } from '../define'
+import type { AnyHarness, HarnessToolInput, HarnessToolsOf } from '../define'
 import type {
   AgentSendOptions,
   ChatTurnResult,
@@ -86,6 +86,11 @@ export abstract class SessionRequests<
    * other ephemeral messages gets the first input's operation and its own
    * are dropped. A turn that recovery runs again has none. A steer that joins
    * the running turn ignores them.
+   *
+   * `systemPreamble` are system prompts that this turn gets ahead of the
+   * harness prompts, for example memory that the host adds. They are kept
+   * like `overrides`: in memory only, and only from server code. A client
+   * input cannot set them.
    */
   send(message: UserInput, options: AgentSendOptions): Operation<unknown>
   send(message: UserInput, options?: SendOptions): Operation<ChatTurnResult>
@@ -131,6 +136,7 @@ export abstract class SessionRequests<
     const { message } = input
     const inputId = options?.inputId ?? createInputId()
     const overrides = options?.overrides
+    const systemPreamble = options?.systemPreamble
     const ephemeral = options?.ephemeral
     const principal = options?.principal ?? this.principal
     const context = options?.context
@@ -224,6 +230,7 @@ export abstract class SessionRequests<
             message,
             inputId,
             overrides,
+            systemPreamble,
             ephemeral,
             ...sent,
           })
@@ -237,6 +244,85 @@ export abstract class SessionRequests<
             status: 'rejected',
             reason:
               failure instanceof Error ? failure.message : String(failure),
+          })
+          operation.fail('failed', failure)
+        },
+      ),
+    )
+    return operation
+  }
+
+  /**
+   * Run one tool with no model, for example from a schedule or a webhook.
+   * It runs as a chat turn whose only model call asks for the tool, so the
+   * call goes through middleware, the input check, and `permissions()`, and
+   * the call and its result join the transcript. A tool that asks for
+   * approval stops the turn with an interrupt. `meta` is echoed as a
+   * `tanstack.injection` custom event. The turn waits behind a running turn.
+   * While interrupts wait, it is refused with `'pending_interrupts'`.
+   *
+   * `args` is typed from the input schema of a harness tool. A plugin tool
+   * takes any `args`, and its input schema checks them.
+   */
+  tool<TName extends HarnessToolsOf<THarness>['name'] | (string & {})>(
+    name: TName,
+    args?: HarnessToolInput<THarness, TName>,
+    options?: {
+      meta?: Record<string, unknown>
+      inputId?: string
+      principal?: Principal
+    },
+  ): Operation<ChatTurnResult> {
+    const inputId = options?.inputId ?? createInputId()
+    const principal = options?.principal ?? this.principal
+    const meta = options?.meta
+    const input: HarnessInput = {
+      op: 'tool',
+      name,
+      ...(args !== undefined ? { args } : {}),
+      ...(meta ? { meta } : {}),
+    }
+    const known = this.knownTurn(inputId, input, principal)
+    if (known) return known
+    const operation = this.createTurnOperation()
+    this.bindTurn(inputId, operation)
+    void this.admitting(() =>
+      this.accept(inputId, input, principal).then(
+        (admission) => {
+          if (admission !== 'new') {
+            this.answerDuplicate(operation, inputId, admission)
+            return
+          }
+          // As a prompt: the open interrupts are answered first.
+          if (this.waitsForInterrupts()) {
+            this.reject(inputId, 'pending_interrupts')
+            this.refuse(operation, {
+              inputId,
+              status: 'rejected',
+              reason: 'pending_interrupts',
+            })
+            return
+          }
+          const isWaiting =
+            this.activeTurn !== undefined || this.queue.length > 0
+          this.answerTurn(operation, {
+            inputId,
+            status: isWaiting ? 'queued' : 'accepted',
+            operationId: operation.id,
+          })
+          this.enqueueTurn({
+            operation,
+            inputId,
+            principal,
+            tool: { name, args, ...(meta ? { meta } : {}) },
+          })
+        },
+        (error: unknown) => {
+          const failure = this.logFailure ?? error
+          this.answerTurn(operation, {
+            inputId,
+            status: 'rejected',
+            reason: errorText(failure),
           })
           operation.fail('failed', failure)
         },
