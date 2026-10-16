@@ -18,6 +18,7 @@ import {
   wakeMessages,
 } from './helpers'
 import type { AnyTextAdapter } from '@tanstack/ai'
+import type { ChatTurnResult, Operation } from '../src'
 
 const THREAD = 't1'
 const NAME = 'test/forwarding'
@@ -403,15 +404,17 @@ describe('an input that reaches a host that does not own the thread', () => {
       { threadId: THREAD },
     )
     let last = ''
+    let operation: Operation<ChatTurnResult> | undefined
     for (let index = 0; index < 510; index++) {
-      last = (
-        await other.send(`Message ${index}.`, { mode: 'followUp' }).receipt
-      ).inputId
+      operation = other.send(`Message ${index}.`, { mode: 'followUp' })
+      last = (await operation.receipt).inputId
     }
     const { forwarded } = other as unknown as { forwarded: Set<string> }
     expect(forwarded.size).toBe(500)
     expect(forwarded.has(last)).toBe(true)
+    // The owner runs the input. The follower here ends with the session.
     await other.close()
+    await expect(operation).rejects.toThrow('Session closed.')
   })
 
   it('refuses a revert on a host that does not own the thread, and the owner turn goes on', async () => {

@@ -86,6 +86,23 @@ describe('ctx.commands', () => {
     )
   })
 
+  it('runs a command with a JSON Schema input on the raw input', async () => {
+    const live = capture('test/live')
+    const { session } = await open(live.plugin)
+    live.live().set(
+      'raw',
+      defineCommand({
+        description: 'Echoes its input.',
+        input: { type: 'object', properties: { n: { type: 'number' } } },
+        run: (input) => input,
+      }),
+    )
+    // A JSON Schema is not checked, as a JSON Schema tool input is not.
+    expect(await session.command('raw', { n: 'not a number' })).toEqual({
+      n: 'not a number',
+    })
+  })
+
   it('keeps the commands of other plugins', async () => {
     const other = capture('test/other', 'model')
     const live = capture('test/live')

@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { EventType, chat } from '@tanstack/ai'
 import { memoryPersistence } from '@tanstack/ai-persistence'
-import { createHarnessHost, defineHarness, harnessText } from '../src'
+import {
+  createHarnessHost,
+  defineHarness,
+  definePlugin,
+  harnessText,
+} from '../src'
 import { messageTexts, mockAdapter, text, untilAborted } from './helpers'
 import type { StreamChunk } from '@tanstack/ai'
 
@@ -44,6 +49,65 @@ describe('harnessText', () => {
       'inner answer',
       'and then?',
     ])
+    await host.close()
+  })
+
+  it('opens one session per call without a thread id, as the principal, and closes it', async () => {
+    const inner = mockAdapter([() => text('one'), () => text('two')])
+    const seen: Array<{ threadId: string; principal: unknown }> = []
+    const watch = definePlugin({
+      name: 'test/watch',
+      setup: (ctx) => {
+        seen.push({
+          threadId: ctx.session.threadId,
+          principal: ctx.session.principal,
+        })
+        return {}
+      },
+    })
+    const studio = defineHarness({
+      name: 'test/inner',
+      adapter: inner.adapter,
+      plugins: () => [watch],
+    })
+    const host = createHarnessHost({ persistence: memoryPersistence() })
+    const adapter = harnessText(studio, { host, principal: { id: 'u-1' } })
+
+    for (const content of ['hello', 'again']) {
+      for await (const _chunk of chat({
+        adapter,
+        messages: [{ role: 'user', content }],
+      })) {
+        // drain
+      }
+    }
+    expect(seen).toHaveLength(2)
+    expect(seen[0]?.threadId).not.toBe(seen[1]?.threadId)
+    expect(seen.map((entry) => entry.principal)).toEqual([
+      { id: 'u-1' },
+      { id: 'u-1' },
+    ])
+    for (const entry of seen) {
+      expect(host.isOpen(studio, { threadId: entry.threadId })).toBe(false)
+    }
+    await host.close()
+  })
+
+  it('leaves a thread open that the caller opened', async () => {
+    const inner = mockAdapter([() => text('kept')])
+    const studio = defineHarness({ name: 'test/inner', adapter: inner.adapter })
+    const host = createHarnessHost({ persistence: memoryPersistence() })
+    const threadId = 'outer-kept:test/inner'
+    await host.open(studio, { threadId })
+
+    for await (const _chunk of chat({
+      adapter: harnessText(studio, { host }),
+      messages: [{ role: 'user', content: 'hello' }],
+      threadId: 'outer-kept',
+    })) {
+      // drain
+    }
+    expect(host.isOpen(studio, { threadId })).toBe(true)
     await host.close()
   })
 

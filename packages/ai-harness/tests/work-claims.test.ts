@@ -672,6 +672,50 @@ describe('host.resumePending', () => {
     await host.close()
   })
 
+  it('goes on after a thread that fails to open, and names the threads it opened', async () => {
+    const persistence = durablePersistence()
+    // The failing thread has the older claim, so it comes first.
+    await persistence.stores.workClaims.claim({
+      threadId: 't-bad',
+      harness: NAME,
+      ownerId: 'host-gone',
+      until: Date.now() - 3_000,
+    })
+    await seedStoppedTurn(persistence)
+    const { adapter, calls } = mockAdapter([() => text('Recovered.')])
+    const broken = definePlugin({
+      name: 'test/broken',
+      setup: (ctx) => {
+        if (ctx.session.threadId === 't-bad') throw new Error('bad thread')
+        return {}
+      },
+    })
+    const host = createHarnessHost({ persistence })
+
+    const failure = await host
+      .resumePending({
+        harnesses: [
+          defineHarness({ name: NAME, adapter, plugins: () => [broken] }),
+        ],
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+    expect(failure).toBeInstanceOf(AggregateError)
+    expect((failure as AggregateError).errors).toHaveLength(1)
+    expect(failure).toMatchObject({
+      opened: [{ threadId: THREAD, harness: NAME }],
+    })
+    await vi.waitFor(async () =>
+      expect(await settledRecord(persistence, 'in-1')).toMatchObject({
+        outcome: 'completed',
+      }),
+    )
+    expect(calls).toHaveLength(1)
+    await host.close()
+  })
+
   it('opens at most limit threads per call, and the next call opens the rest', async () => {
     const persistence = durablePersistence()
     const claims = persistence.stores.workClaims

@@ -1,7 +1,7 @@
 import { RUN_CANCEL_REASON } from '@tanstack/ai'
 import { changedEntry } from '../session-entry'
 import { OperationImpl } from '../operation'
-import { HARNESS_EVENTS } from '../types'
+import { HARNESS_EVENTS, InputRejectedError } from '../types'
 import {
   signInConnector,
   createInputId,
@@ -688,10 +688,12 @@ export abstract class SessionRequests<
       note: async (text, options) => {
         await this.addNote(text)
         if (options?.wake) {
-          await this.startTurn(
+          const receipt = await this.startTurn(
             { op: 'followUp', message: text },
             { principal: sender(), wake: true },
           ).receipt
+          if (receipt.status === 'rejected')
+            throw new InputRejectedError(receipt)
         }
       },
       transcript: () => this.transcript(),

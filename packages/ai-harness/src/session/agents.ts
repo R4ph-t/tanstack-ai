@@ -94,6 +94,7 @@ export abstract class SessionAgents<
     options: AgentSendOptions,
   ): Operation<unknown> {
     const { to } = options
+    const inputId = options.inputId ?? createInputId()
     const chain = this.chainOf.get(to) ?? this.loggedChain(to)
     // The operation ends with the run that gets the message. Its cancel
     // cancels that run.
@@ -104,7 +105,12 @@ export abstract class SessionAgents<
       () => this.cancel(target),
       chain?.agent,
     )
-    void this.sendToAgent({ ...options, operationId: to, message }).then(
+    void this.sendToAgent({
+      ...options,
+      inputId,
+      operationId: to,
+      message,
+    }).then(
       (receipt) => {
         follower.resolveReceipt(receipt)
         const run =
@@ -120,7 +126,7 @@ export abstract class SessionAgents<
               receipt.status === 'rejected'
                 ? receipt
                 : {
-                    inputId: receipt.inputId,
+                    inputId,
                     status: 'rejected',
                     reason: 'not_running',
                   },
@@ -1085,8 +1091,13 @@ export abstract class SessionAgents<
           message: `Background agent ${name} ${ended}: ${note}`,
         },
         { ...(principal ? { principal } : {}), wake: true },
-      ).receipt.catch((error: unknown) =>
-        this.warnSession('harness:agents', error),
+      ).receipt.then(
+        // A refused wake (the thread waits for an interrupt) is reported.
+        (receipt) => {
+          if (receipt.status === 'rejected')
+            this.warnSession('harness:agents', new InputRejectedError(receipt))
+        },
+        (error: unknown) => this.warnSession('harness:agents', error),
       )
     }
   }

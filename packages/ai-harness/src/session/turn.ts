@@ -164,11 +164,14 @@ export abstract class SessionTurn<
           result: compactForModel(result),
         }),
       )
+      // The command ran: a failed settle append is reported, not a failure.
       await this.settle({
         inputId,
         operationId: operation.id,
         outcome: 'completed',
-      })
+      }).catch((failure: unknown) =>
+        this.warnSession('harness:commands', failure),
+      )
       operation.finish('completed', result)
     } catch (error) {
       const message = this.scrub(errorText(error))

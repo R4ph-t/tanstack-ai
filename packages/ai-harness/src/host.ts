@@ -287,6 +287,8 @@ export interface HarnessHost<TLogState = unknown> {
     harness: THarness,
     options: OpenSessionOptions,
   ) => Promise<HarnessSession<THarness>>
+  /** Is a session of `harness` open on `threadId` on this host? */
+  isOpen: (harness: AnyHarness, options: { threadId: string }) => boolean
   /**
    * Start a new thread as a copy of another one, and return its open
    * session. It copies the transcript up to and including the message `at`,
@@ -748,12 +750,15 @@ export function createHarnessHost<TLogState = undefined>(
       }
       return session as Promise<HarnessSession<typeof harness>>
     },
+    isOpen(harness, { threadId }) {
+      return sessions.has(`${harness.name}\u0000${threadId}`)
+    },
     async fork(harness, { threadId, newThreadId, at, principal, logId }) {
       if (newThreadId === threadId) {
         throw new Error('A fork needs a new thread: newThreadId is threadId.')
       }
       // A source that only this fork opens closes again at the end.
-      const wasOpen = sessions.has(`${harness.name}\u0000${threadId}`)
+      const wasOpen = host.isOpen(harness, { threadId })
       const source = await host.open(harness, {
         threadId,
         ...(logId ? { logId } : {}),
@@ -787,7 +792,16 @@ export function createHarnessHost<TLogState = undefined>(
         await fork.adoptFork(source, transcript.slice(0, end))
         return fork
       } finally {
-        if (!wasOpen) await source.close()
+        // A failed close must not hide the fork's own error.
+        if (!wasOpen)
+          await source
+            .close()
+            .catch((error: unknown) =>
+              console.error(
+                '[@tanstack/ai-harness] The source session did not close.',
+                error,
+              ),
+            )
       }
     },
     async resumePending({ harnesses, close = 'whenIdle', limit = 100 }) {
@@ -858,9 +872,13 @@ export function createHarnessHost<TLogState = undefined>(
         opened.push({ threadId, harness: name })
       }
       if (failures.length > 0) {
-        throw new AggregateError(
-          failures,
-          `resumePending opened ${opened.length} threads; ${failures.length} failed to open.`,
+        // `opened` says which threads did start.
+        throw Object.assign(
+          new AggregateError(
+            failures,
+            `resumePending opened ${opened.length} threads; ${failures.length} failed to open.`,
+          ),
+          { opened },
         )
       }
       return opened
