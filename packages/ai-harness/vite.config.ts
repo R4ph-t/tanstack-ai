@@ -35,6 +35,7 @@ export default mergeConfig(
       './src/build.ts',
       './src/worker.ts',
       './src/first-party/index.ts',
+      './src/first-party/coding/index.ts',
     ],
     srcDir: './src',
     cjs: false,
