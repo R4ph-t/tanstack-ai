@@ -2560,6 +2560,12 @@ importers:
 
   packages/ai-generative-ui:
     devDependencies:
+      '@tanstack/ai':
+        specifier: workspace:*
+        version: link:../ai
+      '@tanstack/ai-persistence':
+        specifier: workspace:*
+        version: link:../ai-persistence
       '@types/react':
         specifier: ^19.2.7
         version: 19.3.0
