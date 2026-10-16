@@ -745,8 +745,21 @@ export abstract class SessionBase<THarness extends AnyHarness = AnyHarness> {
     const claims = this.persistence.stores.workClaims
     if (!this.writer || !claims) return false
     const held = await claims.get(this.threadId)
+    const now = Date.now()
+    if (held !== null && held.ownerId !== this.hostId && held.until > now) {
+      this.ownerElsewhere = true
+      return true
+    }
+    // A claim can lapse while its host still runs a turn: claim writes can
+    // stall (a store that retries) while the run lease renews. A live run
+    // lease of another host means that host still drives the thread.
+    const run = await this.persistence.stores.runs?.findActiveRun(this.threadId)
     this.ownerElsewhere =
-      held !== null && held.ownerId !== this.hostId && held.until > Date.now()
+      run !== null &&
+      run !== undefined &&
+      run.leaseOwner !== undefined &&
+      run.leaseOwner !== this.hostId &&
+      (run.leaseExpiresAt ?? 0) > now
     return this.ownerElsewhere
   }
 
@@ -793,6 +806,8 @@ export abstract class SessionBase<THarness extends AnyHarness = AnyHarness> {
     try {
       const pending = await inbox.listPending(this.threadId)
       if (pending.length === 0) return
+      // Its claim lapsed, but the owner still runs a turn: leave its inputs.
+      if (await this.isOwnedElsewhere()) return
       const isHeld = await claims.claim({
         threadId: this.threadId,
         harness: this.harness.name,

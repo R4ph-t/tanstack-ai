@@ -6,6 +6,13 @@ import {
   definePlugin,
 } from '@tanstack/ai-harness'
 import { memoryLogStore, memoryPersistence } from '@tanstack/ai-persistence'
+import type { RunStore } from '@tanstack/ai'
+import type {
+  InboxStore,
+  LogStore,
+  MetadataStore,
+  WorkClaimStore,
+} from '@tanstack/ai-persistence'
 
 /**
  * Two hosts share one set of durable stores, as two instances of a
@@ -18,6 +25,9 @@ import { memoryLogStore, memoryPersistence } from '@tanstack/ai-persistence'
  * - `?plugin=1` (with `?inbox=1`): the second host opens the thread while
  *   the turn runs, and a plugin writes its state as it mounts, as the MCP
  *   plugin does. That state stays off the log of the owner.
+ * - `?stall=1`: the owner's claim writes stall until its claim expires,
+ *   while its run lease still renews. The second host opens the thread and
+ *   recovers it, and must not run the owner's queued follow-up.
  *
  * In both, the owner's turn ends normally. A custom `fetch` answers with
  * canned Anthropic streams and holds the first answer until the follow-up
@@ -77,6 +87,7 @@ export const Route = createFileRoute('/api/harness-forwarding')({
         const params = new URL(request.url).searchParams
         const withInbox = params.get('inbox') === '1'
         const withPlugin = params.get('plugin') === '1'
+        const withStall = params.get('stall') === '1'
         let release!: () => void
         const released = new Promise<void>((resolve) => {
           release = resolve
@@ -92,6 +103,22 @@ export const Route = createFileRoute('/api/harness-forwarding')({
         }
 
         const { runs, metadata, workClaims, inbox } = memoryPersistence().stores
+        if (withStall) {
+          return Response.json(
+            await claimStall({
+              stores: {
+                log: memoryLogStore(),
+                runs,
+                metadata,
+                workClaims,
+                inbox,
+              },
+              fetch: scriptedFetch,
+              calls: () => calls,
+              release,
+            }),
+          )
+        }
         const persistence = {
           stores: {
             log: memoryLogStore(),
@@ -161,3 +188,80 @@ export const Route = createFileRoute('/api/harness-forwarding')({
     },
   },
 })
+
+/** The `?stall=1` case. Returns how many model calls ran during the stall. */
+async function claimStall({
+  stores,
+  fetch: scriptedFetch,
+  calls,
+  release,
+}: {
+  stores: {
+    log: LogStore
+    runs: RunStore
+    metadata: MetadataStore
+    workClaims: WorkClaimStore
+    inbox: InboxStore
+  }
+  fetch: typeof fetch
+  calls: () => number
+  release: () => void
+}) {
+  const persistence = { stores }
+  const { workClaims } = stores
+  let isStalled = false
+  let resume!: () => void
+  const resumed = new Promise<void>((resolve) => {
+    resume = resolve
+  })
+  const stalledClaims = Object.assign(Object.create(workClaims), {
+    claim: async (...args: Parameters<typeof workClaims.claim>) => {
+      if (isStalled) await resumed
+      return workClaims.claim(...args)
+    },
+  })
+  const harness = defineHarness({
+    name: 'e2e/harness-forwarding',
+    adapter: createAnthropicChat(MODEL, DUMMY_KEY, { fetch: scriptedFetch }),
+  })
+  const lease = { renewMs: 50, ttlMs: 300 }
+  const ownerHost = createHarnessHost({
+    persistence: { stores: { ...stores, workClaims: stalledClaims } },
+    lease,
+  })
+  const otherHost = createHarnessHost({ persistence, lease })
+  const sleep = (ms: number) =>
+    new Promise((resolve) => setTimeout(resolve, ms))
+  try {
+    const threadId = 'e2e-harness-forwarding-stall'
+    const owner = await ownerHost.open(harness, { threadId })
+    const turn = owner.send('[harness-forwarding] go')
+    await turn.receipt
+    const receipt = await owner.send('[harness-forwarding] and then', {
+      mode: 'followUp',
+    }).receipt
+    isStalled = true
+    await sleep(600)
+    await otherHost.open(harness, { threadId })
+    await otherHost.recover()
+    await sleep(200)
+    const callsDuringStall = calls()
+    isStalled = false
+    resume()
+    release()
+    const first = await turn
+    const followUp = (await owner.settled(receipt.inputId)).outcome
+    return {
+      callsDuringStall,
+      first: first.text,
+      followUp,
+      calls: calls(),
+      transcript: textsOf(await owner.transcript()),
+    }
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) }
+  } finally {
+    await otherHost.close()
+    await ownerHost.close()
+  }
+}
