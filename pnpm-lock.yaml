@@ -2587,6 +2587,9 @@ importers:
 
   packages/ai-generative-ui:
     devDependencies:
+      '@modelcontextprotocol/ext-apps':
+        specifier: ^1.7.4
+        version: 1.7.4(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.6.5))(react-dom@19.2.3(react@19.2.3))(react@19.2.3)(zod@4.6.5)
       '@tanstack/ai':
         specifier: workspace:*
         version: link:../ai
