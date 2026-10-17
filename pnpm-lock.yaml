@@ -191,6 +191,9 @@ importers:
       '@tanstack/ai-generative-ui':
         specifier: workspace:*
         version: link:../../packages/ai-generative-ui
+      '@tanstack/ai-mcp':
+        specifier: workspace:*
+        version: link:../../packages/ai-mcp
       '@tanstack/ai-openai':
         specifier: workspace:*
         version: link:../../packages/ai-openai
