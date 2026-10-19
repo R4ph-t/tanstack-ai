@@ -94,7 +94,10 @@ describe('anthropic computer toolset', () => {
     const [payload] = mocks.betaMessagesCreate.mock.calls[0]!
     // The prompt cache marker can also sit on the entry.
     expect(payload.tools).toMatchObject([
-      { type: 'computer_toolset_20260801', configs: { zoom: { enabled: false } } },
+      {
+        type: 'computer_toolset_20260801',
+        configs: { zoom: { enabled: false } },
+      },
     ])
     expect(payload.tools[0]).not.toHaveProperty('name')
     expect(payload.tools[0]).not.toHaveProperty('__kind')

@@ -1268,7 +1268,11 @@ export class AnthropicTextAdapter<
           if (block.type === 'thinking') {
             this.appendThinkingBlocks(contentBlocks, [block.thinking])
           } else if (block.type === 'tool-call') {
-            this.appendToolCallBlocks(contentBlocks, block.toolCall, toolsetCalls)
+            this.appendToolCallBlocks(
+              contentBlocks,
+              block.toolCall,
+              toolsetCalls,
+            )
           } else {
             contentBlocks.push({ type: 'text', text: block.text })
           }

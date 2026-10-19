@@ -155,7 +155,8 @@ export function applyAnthropicPromptCache(
     request.tools?.findIndex(
       // The computer toolset entry has no name.
       (tool) =>
-        'name' in tool && tool.name === ANTHROPIC_DEFERRED_TOOL_PLACEHOLDER_NAME,
+        'name' in tool &&
+        tool.name === ANTHROPIC_DEFERRED_TOOL_PLACEHOLDER_NAME,
     ) ?? -1
   const tools = request.tools?.map((tool, index, all) =>
     index === (placeholder > 0 ? placeholder - 1 : all.length - 1)
