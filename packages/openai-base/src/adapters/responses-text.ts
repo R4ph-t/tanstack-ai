@@ -3164,10 +3164,14 @@ export abstract class OpenAIBaseResponsesTextAdapter<
     return result
   }
 
-  /** The first image of a tool result, as a computer screenshot. */
+  /**
+   * The first image of a tool result, as a computer screenshot. It goes out
+   * with `detail: 'original'`, as in OpenAI's computer use guide, so the
+   * model sees the screen at full size. The SDK type has no `detail` yet.
+   */
   private screenshotOf(
     content: ModelMessage['content'],
-  ): ResponseComputerToolCallOutputScreenshot {
+  ): ResponseComputerToolCallOutputScreenshot & { detail?: 'original' } {
     const image = Array.isArray(content)
       ? content.find((part) => part.type === 'image')
       : undefined
@@ -3177,6 +3181,7 @@ export abstract class OpenAIBaseResponsesTextAdapter<
       type: 'computer_screenshot',
       ...(input.image_url ? { image_url: input.image_url } : {}),
       ...(input.file_id ? { file_id: input.file_id } : {}),
+      detail: 'original',
     }
   }
 

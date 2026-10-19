@@ -126,6 +126,7 @@ describe('computer use loop', () => {
           output: {
             type: 'computer_screenshot',
             image_url: 'data:image/png;base64,iVBORw0KGgo=',
+            detail: 'original',
           },
           acknowledged_safety_checks: [safetyCheck],
         },
@@ -172,6 +173,7 @@ describe('computer use loop', () => {
           output: {
             type: 'computer_screenshot',
             image_url: 'data:image/png;base64,iVBORw0KGgo=',
+            detail: 'original',
           },
         },
       ]),
