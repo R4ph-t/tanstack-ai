@@ -54,6 +54,7 @@ import { Route as ApiActivityTestRouteImport } from './routes/api.activity-test'
 import { Route as ApiAdapterInputModalitiesRouteImport } from './routes/api.adapter-input-modalities'
 import { Route as ApiAnthropicAuthWireRouteImport } from './routes/api.anthropic-auth-wire'
 import { Route as ApiAnthropicBugTestRouteImport } from './routes/api.anthropic-bug-test'
+import { Route as ApiAnthropicComputerUseWireRouteImport } from './routes/api.anthropic-computer-use-wire'
 import { Route as ApiAnthropicHaiku55WireRouteImport } from './routes/api.anthropic-haiku-5-5-wire'
 import { Route as ApiAnthropicMaxTokensUsageRouteImport } from './routes/api.anthropic-max-tokens-usage'
 import { Route as ApiAnthropicMultiTurnStructuredWireRouteImport } from './routes/api.anthropic-multi-turn-structured-wire'
@@ -413,6 +414,12 @@ const ApiAnthropicBugTestRoute = ApiAnthropicBugTestRouteImport.update({
   path: '/api/anthropic-bug-test',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiAnthropicComputerUseWireRoute =
+  ApiAnthropicComputerUseWireRouteImport.update({
+    id: '/api/anthropic-computer-use-wire',
+    path: '/api/anthropic-computer-use-wire',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiAnthropicHaiku55WireRoute = ApiAnthropicHaiku55WireRouteImport.update({
   id: '/api/anthropic-haiku-5-5-wire',
   path: '/api/anthropic-haiku-5-5-wire',
@@ -1143,6 +1150,7 @@ export interface FileRoutesByFullPath {
   '/api/adapter-input-modalities': typeof ApiAdapterInputModalitiesRoute
   '/api/anthropic-auth-wire': typeof ApiAnthropicAuthWireRoute
   '/api/anthropic-bug-test': typeof ApiAnthropicBugTestRoute
+  '/api/anthropic-computer-use-wire': typeof ApiAnthropicComputerUseWireRoute
   '/api/anthropic-haiku-5-5-wire': typeof ApiAnthropicHaiku55WireRoute
   '/api/anthropic-max-tokens-usage': typeof ApiAnthropicMaxTokensUsageRoute
   '/api/anthropic-multi-turn-structured-wire': typeof ApiAnthropicMultiTurnStructuredWireRoute
@@ -1319,6 +1327,7 @@ export interface FileRoutesByTo {
   '/api/adapter-input-modalities': typeof ApiAdapterInputModalitiesRoute
   '/api/anthropic-auth-wire': typeof ApiAnthropicAuthWireRoute
   '/api/anthropic-bug-test': typeof ApiAnthropicBugTestRoute
+  '/api/anthropic-computer-use-wire': typeof ApiAnthropicComputerUseWireRoute
   '/api/anthropic-haiku-5-5-wire': typeof ApiAnthropicHaiku55WireRoute
   '/api/anthropic-max-tokens-usage': typeof ApiAnthropicMaxTokensUsageRoute
   '/api/anthropic-multi-turn-structured-wire': typeof ApiAnthropicMultiTurnStructuredWireRoute
@@ -1496,6 +1505,7 @@ export interface FileRoutesById {
   '/api/adapter-input-modalities': typeof ApiAdapterInputModalitiesRoute
   '/api/anthropic-auth-wire': typeof ApiAnthropicAuthWireRoute
   '/api/anthropic-bug-test': typeof ApiAnthropicBugTestRoute
+  '/api/anthropic-computer-use-wire': typeof ApiAnthropicComputerUseWireRoute
   '/api/anthropic-haiku-5-5-wire': typeof ApiAnthropicHaiku55WireRoute
   '/api/anthropic-max-tokens-usage': typeof ApiAnthropicMaxTokensUsageRoute
   '/api/anthropic-multi-turn-structured-wire': typeof ApiAnthropicMultiTurnStructuredWireRoute
@@ -1674,6 +1684,7 @@ export interface FileRouteTypes {
     | '/api/adapter-input-modalities'
     | '/api/anthropic-auth-wire'
     | '/api/anthropic-bug-test'
+    | '/api/anthropic-computer-use-wire'
     | '/api/anthropic-haiku-5-5-wire'
     | '/api/anthropic-max-tokens-usage'
     | '/api/anthropic-multi-turn-structured-wire'
@@ -1850,6 +1861,7 @@ export interface FileRouteTypes {
     | '/api/adapter-input-modalities'
     | '/api/anthropic-auth-wire'
     | '/api/anthropic-bug-test'
+    | '/api/anthropic-computer-use-wire'
     | '/api/anthropic-haiku-5-5-wire'
     | '/api/anthropic-max-tokens-usage'
     | '/api/anthropic-multi-turn-structured-wire'
@@ -2026,6 +2038,7 @@ export interface FileRouteTypes {
     | '/api/adapter-input-modalities'
     | '/api/anthropic-auth-wire'
     | '/api/anthropic-bug-test'
+    | '/api/anthropic-computer-use-wire'
     | '/api/anthropic-haiku-5-5-wire'
     | '/api/anthropic-max-tokens-usage'
     | '/api/anthropic-multi-turn-structured-wire'
@@ -2203,6 +2216,7 @@ export interface RootRouteChildren {
   ApiAdapterInputModalitiesRoute: typeof ApiAdapterInputModalitiesRoute
   ApiAnthropicAuthWireRoute: typeof ApiAnthropicAuthWireRoute
   ApiAnthropicBugTestRoute: typeof ApiAnthropicBugTestRoute
+  ApiAnthropicComputerUseWireRoute: typeof ApiAnthropicComputerUseWireRoute
   ApiAnthropicHaiku55WireRoute: typeof ApiAnthropicHaiku55WireRoute
   ApiAnthropicMaxTokensUsageRoute: typeof ApiAnthropicMaxTokensUsageRoute
   ApiAnthropicMultiTurnStructuredWireRoute: typeof ApiAnthropicMultiTurnStructuredWireRoute
@@ -2645,6 +2659,13 @@ declare module '@tanstack/react-router' {
       path: '/api/anthropic-bug-test'
       fullPath: '/api/anthropic-bug-test'
       preLoaderRoute: typeof ApiAnthropicBugTestRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/anthropic-computer-use-wire': {
+      id: '/api/anthropic-computer-use-wire'
+      path: '/api/anthropic-computer-use-wire'
+      fullPath: '/api/anthropic-computer-use-wire'
+      preLoaderRoute: typeof ApiAnthropicComputerUseWireRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/anthropic-haiku-5-5-wire': {
@@ -3656,6 +3677,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiAdapterInputModalitiesRoute: ApiAdapterInputModalitiesRoute,
   ApiAnthropicAuthWireRoute: ApiAnthropicAuthWireRoute,
   ApiAnthropicBugTestRoute: ApiAnthropicBugTestRoute,
+  ApiAnthropicComputerUseWireRoute: ApiAnthropicComputerUseWireRoute,
   ApiAnthropicHaiku55WireRoute: ApiAnthropicHaiku55WireRoute,
   ApiAnthropicMaxTokensUsageRoute: ApiAnthropicMaxTokensUsageRoute,
   ApiAnthropicMultiTurnStructuredWireRoute:
