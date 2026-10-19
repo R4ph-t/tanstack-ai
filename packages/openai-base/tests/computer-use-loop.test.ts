@@ -2,8 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { chat } from '@tanstack/ai'
 import { OpenAIBaseResponsesTextAdapter } from '../src/adapters/responses-text'
 import { computerUseTool } from '../src/tools/computer-use-tool'
+import { convertToolsToProviderFormat } from '../src/tools/tool-converter'
 import type OpenAI from 'openai'
-import type { StreamChunk } from '@tanstack/ai'
+import type { StreamChunk, Tool } from '@tanstack/ai'
 
 const safetyCheck = {
   id: 'sc_1',
@@ -51,26 +52,43 @@ const answer = {
   content: [{ type: 'output_text', text: 'Done.', annotations: [] }],
 }
 
-class TestAdapter extends OpenAIBaseResponsesTextAdapter<string> {}
+// The OpenAI adapter sends provider tools in their native shape.
+class TestAdapter extends OpenAIBaseResponsesTextAdapter<string> {
+  protected override convertTools(tools: Array<Tool>) {
+    return convertToolsToProviderFormat(tools)
+  }
+}
 
-async function runLoop(execute: (input: unknown) => Promise<unknown>) {
+const previewTool = computerUseTool({
+  type: 'computer_use_preview',
+  display_width: 1024,
+  display_height: 768,
+  environment: 'browser',
+})
+
+const screenshot = [
+  {
+    type: 'image',
+    source: { type: 'data', value: 'iVBORw0KGgo=', mimeType: 'image/png' },
+  },
+]
+
+async function runLoop(
+  execute: (input: unknown) => Promise<unknown>,
+  {
+    computer = previewTool,
+    call = clickCall,
+  }: { computer?: Tool; call?: Record<string, unknown> } = {},
+) {
   const create = vi
     .fn()
-    .mockResolvedValueOnce(completed([clickCall]))
+    .mockResolvedValueOnce(completed([call]))
     .mockResolvedValueOnce(completed([answer]))
   const client = {
     responses: { create: (params: unknown) => create(params) },
   } as unknown as OpenAI
   const adapter = new TestAdapter('computer-use-preview', 'openai', client)
-  const tool = {
-    ...computerUseTool({
-      type: 'computer_use_preview',
-      display_width: 1024,
-      display_height: 768,
-      environment: 'browser',
-    }),
-    execute: vi.fn(execute),
-  }
+  const tool = { ...computer, execute: vi.fn(execute) }
   const chunks: Array<StreamChunk> = []
   for await (const chunk of chat({
     adapter,
@@ -84,12 +102,7 @@ async function runLoop(execute: (input: unknown) => Promise<unknown>) {
 
 describe('computer use loop', () => {
   it('runs the computer call and sends the screenshot back', async () => {
-    const { create, execute } = await runLoop(async () => [
-      {
-        type: 'image',
-        source: { type: 'data', value: 'iVBORw0KGgo=', mimeType: 'image/png' },
-      },
-    ])
+    const { create, execute } = await runLoop(async () => screenshot)
 
     expect(execute).toHaveBeenCalledOnce()
     expect(execute.mock.calls[0]?.[0]).toEqual({
@@ -115,6 +128,51 @@ describe('computer use loop', () => {
             image_url: 'data:image/png;base64,iVBORw0KGgo=',
           },
           acknowledged_safety_checks: [safetyCheck],
+        },
+      ]),
+    )
+  })
+
+  it('runs the batched actions of the computer tool', async () => {
+    const actions = [
+      { type: 'click', button: 'left', x: 10, y: 20 },
+      { type: 'type', text: 'hello' },
+    ]
+    const { create, execute } = await runLoop(async () => screenshot, {
+      computer: computerUseTool({ type: 'computer' }),
+      call: {
+        type: 'computer_call',
+        id: 'cu_2',
+        call_id: 'call_batch',
+        status: 'completed',
+        actions,
+        pending_safety_checks: [],
+      },
+    })
+
+    expect(execute.mock.calls[0]?.[0]).toEqual({
+      actions,
+      pending_safety_checks: [],
+    })
+    const [first, second] = create.mock.calls.map(([params]) => params)
+    expect(first.tools).toEqual([{ type: 'computer' }])
+    expect(second.input).toEqual(
+      expect.arrayContaining([
+        {
+          type: 'computer_call',
+          id: 'cu_2',
+          call_id: 'call_batch',
+          status: 'completed',
+          actions,
+          pending_safety_checks: [],
+        },
+        {
+          type: 'computer_call_output',
+          call_id: 'call_batch',
+          output: {
+            type: 'computer_screenshot',
+            image_url: 'data:image/png;base64,iVBORw0KGgo=',
+          },
         },
       ]),
     )

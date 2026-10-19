@@ -1391,6 +1391,14 @@ export abstract class OpenAIBaseResponsesTextAdapter<
       hasEmittedRunStarted: boolean
     },
   ): AsyncIterable<AdapterYieldChunk> {
+    // A `computer_call` is a call to the computer tool of this request.
+    const computerTool = options.tools?.some(
+      (tool) =>
+        tool.name === 'computer' &&
+        getOpenAIProviderToolKind(tool) === 'computer_use',
+    )
+      ? 'computer'
+      : 'computer_use_preview'
     const normalizeToolInput = createToolInputNormalizer(
       options.tools,
       (schema, required) =>
@@ -1619,7 +1627,7 @@ export abstract class OpenAIBaseResponsesTextAdapter<
       outputIndex: number,
       bareShell: boolean,
     ): Array<AdapterYieldChunk> => {
-      const call = readUserExecutedCall(item, { bareShell })
+      const call = readUserExecutedCall(item, { bareShell, computerTool })
       if (!call || toolCallMetadata.get(call.callId)?.ended) return []
       const tracked = toolCallMetadata.get(call.callId) ?? {
         callId: call.callId,

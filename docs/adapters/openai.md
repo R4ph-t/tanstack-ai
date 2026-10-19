@@ -993,10 +993,9 @@ const stream = chat({
 ### `computerUseTool`
 
 Lets the model observe a virtual desktop via screenshots and interact with
-it using keyboard and mouse events. Provide the display dimensions and the
-execution environment type.
+it using keyboard and mouse events.
 
-The model asks for one action at a time, for example a click. Your app runs the action, then returns a screenshot of the screen. Add an `execute` to the tool that does this:
+The model asks for actions, for example a click and then some typing. Your app runs the actions, then returns a screenshot of the screen. Add an `execute` to the tool that does this:
 
 ```typescript
 import { chat } from "@tanstack/ai";
@@ -1009,31 +1008,31 @@ interface SafetyCheck {
   message?: string;
 }
 
-// Your code: run one action on the desktop, then return a PNG of the screen as base64.
-declare function runAction(action: unknown): Promise<string>;
+// Your code: run one action on the desktop.
+declare function runAction(action: unknown): Promise<void>;
+// Your code: return a PNG of the screen as base64.
+declare function takeScreenshot(): Promise<string>;
 // Your code: show the checks to a person and return their answer.
 declare function askPerson(checks: Array<SafetyCheck>): Promise<boolean>;
 
 const stream = chat({
-  adapter: openaiText("computer-use-preview"),
-  messages: [{ role: "user", content: "Open Chrome and navigate to example.com" }],
+  adapter: openaiText("gpt-6.1-sol"),
+  messages: [{ role: "user", content: "Open example.com and sign up for the newsletter" }],
   tools: [
     {
-      ...computerUseTool({
-        type: "computer_use_preview",
-        display_width: 1024,
-        display_height: 768,
-        environment: "browser",
-      }),
+      ...computerUseTool({ type: "computer" }),
       execute: async (input: {
-        action: unknown;
+        actions: Array<unknown>;
         pending_safety_checks: Array<SafetyCheck>;
       }) => {
         const checks = input.pending_safety_checks;
         if (checks.length > 0 && !(await askPerson(checks))) {
           throw new Error("A person did not allow this action.");
         }
-        const screenshot = await runAction(input.action);
+        for (const action of input.actions) {
+          await runAction(action);
+        }
+        const screenshot = await takeScreenshot();
         return [
           {
             type: "image" as const,
@@ -1048,12 +1047,25 @@ const stream = chat({
 
 The input of each call has two fields:
 
-- `action`: the action to run, as OpenAI sends it. For example `{ type: "click", button: "left", x: 120, y: 340 }`.
-- `pending_safety_checks`: the safety checks of the action. If the list is not empty, ask a person before you run the action.
+- `actions`: the actions to run, in order, as OpenAI sends them. For example `[{ type: "click", button: "left", x: 120, y: 340 }, { type: "type", text: "ada@example.com" }]`.
+- `pending_safety_checks`: the safety checks of the actions. If the list is not empty, ask a person before you run the actions.
 
 The adapter sends the first image of the result back as the screenshot. When the call does not fail, the adapter also tells OpenAI that the safety checks are accepted. When the call fails, they stay unaccepted.
 
-**Supported models:** `computer-use-preview`. See [Provider Tools](../tools/provider-tools.md#which-models-support-which-tools).
+The `computer-use-preview` model takes the older tool type. Give it the display size and the environment. Each call then has one `action` field in place of `actions`:
+
+```typescript
+import { computerUseTool } from "@tanstack/ai-openai/tools";
+
+const previewTool = computerUseTool({
+  type: "computer_use_preview",
+  display_width: 1024,
+  display_height: 768,
+  environment: "browser",
+});
+```
+
+**Supported models:** `type: "computer"` works with the models that list computer use, for example `gpt-6.1-sol`. `type: "computer_use_preview"` works with `computer-use-preview`. See [Provider Tools](../tools/provider-tools.md#which-models-support-which-tools).
 
 ### `localShellTool`
 

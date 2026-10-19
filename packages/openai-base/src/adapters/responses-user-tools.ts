@@ -1,4 +1,5 @@
 import type {
+  ComputerActionList,
   ResponseComputerToolCall,
   ResponseComputerToolCallOutputScreenshot,
   ResponseInputItem,
@@ -7,14 +8,17 @@ import type {
 /**
  * OpenAI Responses tools the app must run.
  * A container `shell` runs on the provider. `apply_patch`, `local_shell`,
- * `computer_use_preview`, and `shell` with `environment.type: "local"` (or
- * no environment) do not.
+ * `computer`, `computer_use_preview`, and `shell` with
+ * `environment.type: "local"` (or no environment) do not.
  */
 export type OpenAIUserToolName =
   | 'shell'
   | 'apply_patch'
   | 'local_shell'
-  | 'computer_use_preview'
+  | OpenAIComputerToolName
+
+/** The names of the computer tool: its two tool types. */
+export type OpenAIComputerToolName = 'computer' | 'computer_use_preview'
 
 export interface OpenAIUserExecutedCall {
   name: OpenAIUserToolName
@@ -84,6 +88,7 @@ export function readUserToolName(metadata: unknown): OpenAIUserToolName | null {
     name === 'shell' ||
     name === 'apply_patch' ||
     name === 'local_shell' ||
+    name === 'computer' ||
     name === 'computer_use_preview'
   ) {
     return name
@@ -99,6 +104,14 @@ function isComputerAction(
   value: unknown,
 ): value is NonNullable<ResponseComputerToolCall['action']> {
   return isRecord(value) && typeof value.type === 'string'
+}
+
+/** The batched actions of a computer call. */
+function isComputerActionList(value: unknown): value is ComputerActionList {
+  return (
+    Array.isArray(value) &&
+    value.every((action) => isRecord(action) && typeof action.type === 'string')
+  )
 }
 
 /** The safety checks of a computer call, with only their known fields. */
@@ -159,10 +172,12 @@ function applyPatchOperation(
  * `bareShell` is true only once the full response is known. A shell call
  * with no environment waits for that pass, so a hosted call that later
  * carries `shell_call_output` is not asked of the app.
+ * `computerTool` is the name of the computer tool of the request. A
+ * `computer_call` is a call to it.
  */
 export function readUserExecutedCall(
   item: unknown,
-  options: { bareShell: boolean },
+  options: { bareShell: boolean; computerTool?: OpenAIComputerToolName },
 ): OpenAIUserExecutedCall | null {
   if (!isRecord(item) || typeof item.type !== 'string') return null
   const callId = typeof item.call_id === 'string' ? item.call_id : ''
@@ -180,13 +195,17 @@ export function readUserExecutedCall(
   }
 
   if (item.type === 'computer_call') {
-    if (!callId || !isComputerAction(item.action)) return null
+    const { action, actions } = item
+    const hasAction = isComputerAction(action)
+    const hasActions = isComputerActionList(actions)
+    if (!callId || (!hasAction && !hasActions)) return null
     return {
-      name: 'computer_use_preview',
+      name: options.computerTool ?? 'computer_use_preview',
       callId,
       ...(itemId ? { itemId } : {}),
       input: {
-        action: item.action,
+        ...(hasAction ? { action } : {}),
+        ...(hasActions ? { actions } : {}),
         pending_safety_checks: safetyChecks(item.pending_safety_checks),
       },
     }
@@ -291,14 +310,18 @@ export function userToolRequestItem(
     }
   }
 
-  if (name === 'computer_use_preview') {
-    if (!isComputerAction(args.action)) return null
+  if (name === 'computer' || name === 'computer_use_preview') {
+    const { action, actions } = args
+    const hasAction = isComputerAction(action)
+    const hasActions = isComputerActionList(actions)
+    if (!hasAction && !hasActions) return null
     return {
       type: 'computer_call',
       id: itemId ?? toolCall.id,
       call_id: toolCall.id,
       status: 'completed',
-      action: args.action,
+      ...(hasAction ? { action } : {}),
+      ...(hasActions ? { actions } : {}),
       pending_safety_checks: safetyChecks(args.pending_safety_checks),
     }
   }
@@ -365,8 +388,8 @@ function shellOutputList(content: unknown): Array<{
 
 /**
  * Replay the app's tool result as the matching Responses output item.
- * `computer` is what a `computer_use_preview` result needs: the screenshot,
- * and whether the call failed. The output of a call that did not fail
+ * `computer` is what a computer tool result needs: the screenshot, and
+ * whether the call failed. The output of a call that did not fail
  * acknowledges the safety checks of the call.
  */
 export function userToolResultItem(
@@ -380,7 +403,7 @@ export function userToolResultItem(
   const name = readUserToolName(toolCall.metadata)
   if (!name) return null
 
-  if (name === 'computer_use_preview') {
+  if (name === 'computer' || name === 'computer_use_preview') {
     const checks = computer?.failed
       ? []
       : safetyChecks(
