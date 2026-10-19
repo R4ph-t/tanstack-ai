@@ -2926,7 +2926,7 @@ export abstract class OpenAIBaseResponsesTextAdapter<
           : undefined
         const userOutput = owner
           ? userToolResultItem(owner, message.content, {
-              screenshot: this.screenshotOf(message.content),
+              screenshot: () => this.screenshotOf(message.content),
               failed: message.error !== undefined,
             })
           : null

@@ -389,14 +389,15 @@ function shellOutputList(content: unknown): Array<{
 /**
  * Replay the app's tool result as the matching Responses output item.
  * `computer` is what a computer tool result needs: the screenshot, and
- * whether the call failed. The output of a call that did not fail
- * acknowledges the safety checks of the call.
+ * whether the call failed. Only a computer result reads the screenshot.
+ * The output of a call that did not fail acknowledges the safety checks of
+ * the call.
  */
 export function userToolResultItem(
   toolCall: ToolCallLike,
   content: unknown,
   computer?: {
-    screenshot: ResponseComputerToolCallOutputScreenshot
+    screenshot: () => ResponseComputerToolCallOutputScreenshot
     failed: boolean
   },
 ): ResponseInputItem | null {
@@ -412,7 +413,7 @@ export function userToolResultItem(
     return {
       type: 'computer_call_output',
       call_id: toolCall.id,
-      output: computer?.screenshot ?? { type: 'computer_screenshot' },
+      output: computer?.screenshot() ?? { type: 'computer_screenshot' },
       ...(checks.length > 0 ? { acknowledged_safety_checks: checks } : {}),
     }
   }
