@@ -1,11 +1,20 @@
-import type { ResponseInputItem } from 'openai/resources/responses/responses'
+import type {
+  ResponseComputerToolCall,
+  ResponseComputerToolCallOutputScreenshot,
+  ResponseInputItem,
+} from 'openai/resources/responses/responses'
 
 /**
  * OpenAI Responses tools the app must run.
  * A container `shell` runs on the provider. `apply_patch`, `local_shell`,
- * and `shell` with `environment.type: "local"` (or no environment) do not.
+ * `computer_use_preview`, and `shell` with `environment.type: "local"` (or
+ * no environment) do not.
  */
-export type OpenAIUserToolName = 'shell' | 'apply_patch' | 'local_shell'
+export type OpenAIUserToolName =
+  | 'shell'
+  | 'apply_patch'
+  | 'local_shell'
+  | 'computer_use_preview'
 
 export interface OpenAIUserExecutedCall {
   name: OpenAIUserToolName
@@ -71,10 +80,45 @@ export function hostedShellCallIds(
 export function readUserToolName(metadata: unknown): OpenAIUserToolName | null {
   if (!isRecord(metadata)) return null
   const name = metadata.openaiUserTool
-  if (name === 'shell' || name === 'apply_patch' || name === 'local_shell') {
+  if (
+    name === 'shell' ||
+    name === 'apply_patch' ||
+    name === 'local_shell' ||
+    name === 'computer_use_preview'
+  ) {
     return name
   }
   return null
+}
+
+/**
+ * A computer action. It goes back to the API as the model sent it, so only
+ * its `type` is checked.
+ */
+function isComputerAction(
+  value: unknown,
+): value is NonNullable<ResponseComputerToolCall['action']> {
+  return isRecord(value) && typeof value.type === 'string'
+}
+
+/** The safety checks of a computer call, with only their known fields. */
+function safetyChecks(
+  value: unknown,
+): Array<ResponseComputerToolCall.PendingSafetyCheck> {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((check) =>
+    isRecord(check) && typeof check.id === 'string'
+      ? [
+          {
+            id: check.id,
+            ...(typeof check.code === 'string' ? { code: check.code } : {}),
+            ...(typeof check.message === 'string'
+              ? { message: check.message }
+              : {}),
+          },
+        ]
+      : [],
+  )
 }
 
 function readItemId(metadata: unknown): string | undefined {
@@ -132,6 +176,19 @@ export function readUserExecutedCall(
       callId,
       ...(itemId ? { itemId } : {}),
       input: { operation },
+    }
+  }
+
+  if (item.type === 'computer_call') {
+    if (!callId || !isComputerAction(item.action)) return null
+    return {
+      name: 'computer_use_preview',
+      callId,
+      ...(itemId ? { itemId } : {}),
+      input: {
+        action: item.action,
+        pending_safety_checks: safetyChecks(item.pending_safety_checks),
+      },
     }
   }
 
@@ -234,6 +291,18 @@ export function userToolRequestItem(
     }
   }
 
+  if (name === 'computer_use_preview') {
+    if (!isComputerAction(args.action)) return null
+    return {
+      type: 'computer_call',
+      id: itemId ?? toolCall.id,
+      call_id: toolCall.id,
+      status: 'completed',
+      action: args.action,
+      pending_safety_checks: safetyChecks(args.pending_safety_checks),
+    }
+  }
+
   const commands = stringList(args.commands)
   if (!commands) return null
   return {
@@ -294,13 +363,37 @@ function shellOutputList(content: unknown): Array<{
   return [shellEntry(JSON.stringify(parsed ?? ''))]
 }
 
-/** Replay the app's tool result as the matching Responses output item. */
+/**
+ * Replay the app's tool result as the matching Responses output item.
+ * `computer` is what a `computer_use_preview` result needs: the screenshot,
+ * and whether the call failed. The output of a call that did not fail
+ * acknowledges the safety checks of the call.
+ */
 export function userToolResultItem(
   toolCall: ToolCallLike,
   content: unknown,
+  computer?: {
+    screenshot: ResponseComputerToolCallOutputScreenshot
+    failed: boolean
+  },
 ): ResponseInputItem | null {
   const name = readUserToolName(toolCall.metadata)
   if (!name) return null
+
+  if (name === 'computer_use_preview') {
+    const checks = computer?.failed
+      ? []
+      : safetyChecks(
+          parseArguments(toolCall.function.arguments).pending_safety_checks,
+        )
+    return {
+      type: 'computer_call_output',
+      call_id: toolCall.id,
+      output: computer?.screenshot ?? { type: 'computer_screenshot' },
+      ...(checks.length > 0 ? { acknowledged_safety_checks: checks } : {}),
+    }
+  }
+
   const parsed = parseContent(content)
 
   if (name === 'apply_patch') {

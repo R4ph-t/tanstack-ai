@@ -51,6 +51,7 @@ import type {
 } from '@tanstack/ai/adapters'
 import type {
   Response,
+  ResponseComputerToolCallOutputScreenshot,
   ResponseCreateParams,
   ResponseFunctionCallOutputItem,
   ResponseFunctionWebSearch,
@@ -400,7 +401,10 @@ export interface OpenAIResponsesToolCallMetadata extends ProviderExecutedToolMet
    * `additional_tools` has one, and the API needs it on the replayed call.
    */
   namespace?: string
-  /** Set for shell, local_shell, and apply_patch calls the app must run. */
+  /**
+   * Set for shell, local_shell, apply_patch, and computer calls the app must
+   * run.
+   */
   openaiUserTool?: OpenAIUserToolName
   /** Shell `action.max_output_length`, echoed on `shell_call_output`. */
   maxOutputLength?: number | null
@@ -2913,7 +2917,10 @@ export abstract class OpenAIBaseResponsesTextAdapter<
           ? userToolCalls.get(message.toolCallId)
           : undefined
         const userOutput = owner
-          ? userToolResultItem(owner, message.content)
+          ? userToolResultItem(owner, message.content, {
+              screenshot: this.screenshotOf(message.content),
+              failed: message.error !== undefined,
+            })
           : null
         if (userOutput) {
           result.push(userOutput)
@@ -3147,6 +3154,22 @@ export abstract class OpenAIBaseResponsesTextAdapter<
 
     result.push(...(insertBefore?.get(messages.length) ?? []))
     return result
+  }
+
+  /** The first image of a tool result, as a computer screenshot. */
+  private screenshotOf(
+    content: ModelMessage['content'],
+  ): ResponseComputerToolCallOutputScreenshot {
+    const image = Array.isArray(content)
+      ? content.find((part) => part.type === 'image')
+      : undefined
+    const input = image ? this.convertContentPartToInput(image) : undefined
+    if (input?.type !== 'input_image') return { type: 'computer_screenshot' }
+    return {
+      type: 'computer_screenshot',
+      ...(input.image_url ? { image_url: input.image_url } : {}),
+      ...(input.file_id ? { file_id: input.file_id } : {}),
+    }
   }
 
   /**

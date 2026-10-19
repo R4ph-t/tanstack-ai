@@ -996,24 +996,62 @@ Lets the model observe a virtual desktop via screenshots and interact with
 it using keyboard and mouse events. Provide the display dimensions and the
 execution environment type.
 
+The model asks for one action at a time, for example a click. Your app runs the action, then returns a screenshot of the screen. Add an `execute` to the tool that does this:
+
 ```typescript
 import { chat } from "@tanstack/ai";
 import { openaiText } from "@tanstack/ai-openai";
 import { computerUseTool } from "@tanstack/ai-openai/tools";
 
+interface SafetyCheck {
+  id: string;
+  code?: string;
+  message?: string;
+}
+
+// Your code: run one action on the desktop, then return a PNG of the screen as base64.
+declare function runAction(action: unknown): Promise<string>;
+// Your code: show the checks to a person and return their answer.
+declare function askPerson(checks: Array<SafetyCheck>): Promise<boolean>;
+
 const stream = chat({
   adapter: openaiText("computer-use-preview"),
   messages: [{ role: "user", content: "Open Chrome and navigate to example.com" }],
   tools: [
-    computerUseTool({
-      type: "computer_use_preview",
-      display_width: 1024,
-      display_height: 768,
-      environment: "browser",
-    }),
+    {
+      ...computerUseTool({
+        type: "computer_use_preview",
+        display_width: 1024,
+        display_height: 768,
+        environment: "browser",
+      }),
+      execute: async (input: {
+        action: unknown;
+        pending_safety_checks: Array<SafetyCheck>;
+      }) => {
+        const checks = input.pending_safety_checks;
+        if (checks.length > 0 && !(await askPerson(checks))) {
+          throw new Error("A person did not allow this action.");
+        }
+        const screenshot = await runAction(input.action);
+        return [
+          {
+            type: "image" as const,
+            source: { type: "data" as const, value: screenshot, mimeType: "image/png" },
+          },
+        ];
+      },
+    },
   ],
 });
 ```
+
+The input of each call has two fields:
+
+- `action`: the action to run, as OpenAI sends it. For example `{ type: "click", button: "left", x: 120, y: 340 }`.
+- `pending_safety_checks`: the safety checks of the action. If the list is not empty, ask a person before you run the action.
+
+The adapter sends the first image of the result back as the screenshot. When the call does not fail, the adapter also tells OpenAI that the safety checks are accepted. When the call fails, they stay unaccepted.
 
 **Supported models:** `computer-use-preview`. See [Provider Tools](../tools/provider-tools.md#which-models-support-which-tools).
 
