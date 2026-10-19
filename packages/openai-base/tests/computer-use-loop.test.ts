@@ -53,6 +53,10 @@ const answer = {
 
 class TestAdapter extends OpenAIBaseResponsesTextAdapter<string> {}
 
+class FileAdapter extends TestAdapter {
+  override readonly supportsFileSources = true
+}
+
 async function runLoop(execute: (input: unknown) => Promise<unknown>) {
   const create = vi
     .fn()
@@ -117,6 +121,52 @@ describe('computer use loop', () => {
           acknowledged_safety_checks: [safetyCheck],
         },
       ]),
+    )
+  })
+
+  it('reads no screenshot from the result of another app tool', async () => {
+    const create = vi.fn().mockResolvedValueOnce(completed([answer]))
+    const client = {
+      responses: { create: (params: unknown) => create(params) },
+    } as unknown as OpenAI
+    // OpenAI takes file sources, but not a file from another provider, so a
+    // screenshot read of this result would throw.
+    const adapter = new FileAdapter('gpt-5.5', 'openai', client)
+    for await (const _ of chat({
+      adapter,
+      messages: [
+        {
+          role: 'assistant',
+          content: null,
+          toolCalls: [
+            {
+              id: 'call_sh',
+              type: 'function',
+              function: {
+                name: 'local_shell',
+                arguments: JSON.stringify({ command: ['ls'] }),
+              },
+              metadata: { openaiUserTool: 'local_shell', itemId: 'ls_1' },
+            },
+          ],
+        },
+        {
+          role: 'tool',
+          toolCallId: 'call_sh',
+          content: [
+            {
+              type: 'image',
+              source: { type: 'file', value: 'file_1', provider: 'gemini' },
+            },
+          ],
+        },
+      ],
+    })) {
+      // Drain the stream.
+    }
+
+    expect(create.mock.calls[0]?.[0].input).toContainEqual(
+      expect.objectContaining({ type: 'local_shell_call_output' }),
     )
   })
 
