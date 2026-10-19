@@ -16,6 +16,7 @@ import {
 import { BaseTextAdapter } from '@tanstack/ai/adapters'
 import { convertToolsToProviderFormat } from '../tools/tool-converter'
 import { getAnthropicProviderToolKind } from '../tools/anthropic-provider-tool'
+import { convertComputerUseToolToAdapterFormat } from '../tools/computer-use-tool'
 import {
   readCodeExecutionConfig,
   readCodeExecutionSkills,
@@ -216,6 +217,8 @@ function toAnthropicToolChoice(
  * - `interleaved-thinking-2025-05-14` when interleaved thinking is enabled,
  * - `code-execution-2025-08-25` when a `code_execution` tool is present,
  * - `skills-2025-10-02` when that tool carries skills,
+ * - `computer-use-2024-10-22` or `computer-use-2025-01-24` for the version
+ *   of a `computer` tool,
  * - `context-management-2025-06-27` when `context_management` is set,
  * - `files-api-2025-04-14` when a message references an uploaded file handle,
  * - `mid-conversation-tool-changes-2026-07-01` in mid-conversation tool mode.
@@ -290,6 +293,19 @@ export function computeAnthropicBetas(
       (readCodeExecutionSkills(tool)?.length ?? 0) > 0,
   )
   if (hasSkills) betas.add('skills-2025-10-02')
+
+  // Each computer use version needs its own beta header.
+  const computerTool = tools?.find(
+    (tool) => getAnthropicProviderToolKind(tool) === 'computer_use',
+  )
+  if (computerTool) {
+    betas.add(
+      convertComputerUseToolToAdapterFormat(computerTool).type ===
+        'computer_20241022'
+        ? 'computer-use-2024-10-22'
+        : 'computer-use-2025-01-24',
+    )
+  }
 
   return betas.size > 0 ? Array.from(betas) : undefined
 }
