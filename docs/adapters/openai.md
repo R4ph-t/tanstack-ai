@@ -1036,8 +1036,8 @@ const stream = chat({
         const screenshot = await runAction(input.action);
         return [
           {
-            type: "image" as const,
-            source: { type: "data" as const, value: screenshot, mimeType: "image/png" },
+            type: "image",
+            source: { type: "data", value: screenshot, mimeType: "image/png" },
           },
         ];
       },
