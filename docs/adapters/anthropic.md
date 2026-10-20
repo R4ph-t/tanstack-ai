@@ -655,8 +655,8 @@ const computer = {
       const value = await takeScreenshot();
       return [
         {
-          type: "image" as const,
-          source: { type: "data" as const, value, mimeType: "image/png" },
+          type: "image",
+          source: { type: "data", value, mimeType: "image/png" },
         },
       ];
     }
