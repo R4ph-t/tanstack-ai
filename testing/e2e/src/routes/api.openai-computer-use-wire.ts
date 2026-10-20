@@ -21,6 +21,26 @@ const computerCall = {
   pending_safety_checks: [safetyCheck],
 }
 
+// The computer tool of the newer models sends a batch of actions.
+const batchCall = {
+  type: 'computer_call',
+  id: 'cu_e2e_batch',
+  call_id: 'call_cu_e2e_batch',
+  status: 'completed',
+  actions: [
+    { type: 'click', button: 'left', x: 10, y: 20 },
+    { type: 'type', text: 'hello' },
+  ],
+  pending_safety_checks: [],
+}
+
+const screenshot = [
+  {
+    type: 'image' as const,
+    source: { type: 'data' as const, value: SCREENSHOT, mimeType: 'image/png' },
+  },
+]
+
 const answer = {
   type: 'message',
   id: 'msg_cu_e2e',
@@ -66,11 +86,16 @@ function responseStream(
  * custom `fetch` answers the first request with a `computer_call` and the
  * second with text, and records each request body. aimock cannot send a
  * `computer_call`, so this route serves the stream itself.
+ *
+ * `?tool=computer` uses the `computer` tool of `gpt-6.1-sol`, with a batch
+ * of actions. Anything else uses `computer_use_preview`.
  */
 export const Route = createFileRoute('/api/openai-computer-use-wire')({
   server: {
     handlers: {
-      POST: async () => {
+      POST: async ({ request }) => {
+        const batch =
+          new URL(request.url).searchParams.get('tool') === 'computer'
         const requestBodies: Array<unknown> = []
         const mockFetch: typeof fetch = async (input, init) => {
           const req =
@@ -78,7 +103,9 @@ export const Route = createFileRoute('/api/openai-computer-use-wire')({
           requestBodies.push(JSON.parse(await req.text()))
           const stream =
             requestBodies.length === 1
-              ? responseStream('resp_cu_e2e_1', [computerCall])
+              ? responseStream('resp_cu_e2e_1', [
+                  batch ? batchCall : computerCall,
+                ])
               : responseStream('resp_cu_e2e_2', [answer])
           return new Response(stream, {
             status: 200,
@@ -86,39 +113,45 @@ export const Route = createFileRoute('/api/openai-computer-use-wire')({
           })
         }
 
-        const adapter = createOpenaiChat('computer-use-preview', DUMMY_KEY, {
-          fetch: mockFetch,
-        })
-
         const toolInputs: Array<unknown> = []
+        const execute = async (input: unknown) => {
+          toolInputs.push(input)
+          return screenshot
+        }
+        const messages = [
+          { role: 'user' as const, content: 'Click the button.' },
+        ]
         try {
-          for await (const _ of chat({
-            ...createChatOptions({ adapter }),
-            messages: [{ role: 'user', content: 'Click the button.' }],
-            tools: [
-              {
-                ...computerUseTool({
-                  type: 'computer_use_preview',
-                  display_width: 1024,
-                  display_height: 768,
-                  environment: 'browser',
+          const stream = batch
+            ? chat({
+                ...createChatOptions({
+                  adapter: createOpenaiChat('gpt-6.1-sol', DUMMY_KEY, {
+                    fetch: mockFetch,
+                  }),
                 }),
-                execute: async (input: unknown) => {
-                  toolInputs.push(input)
-                  return [
-                    {
-                      type: 'image' as const,
-                      source: {
-                        type: 'data' as const,
-                        value: SCREENSHOT,
-                        mimeType: 'image/png',
-                      },
-                    },
-                  ]
-                },
-              },
-            ],
-          })) {
+                messages,
+                tools: [{ ...computerUseTool({ type: 'computer' }), execute }],
+              })
+            : chat({
+                ...createChatOptions({
+                  adapter: createOpenaiChat('computer-use-preview', DUMMY_KEY, {
+                    fetch: mockFetch,
+                  }),
+                }),
+                messages,
+                tools: [
+                  {
+                    ...computerUseTool({
+                      type: 'computer_use_preview',
+                      display_width: 1024,
+                      display_height: 768,
+                      environment: 'browser',
+                    }),
+                    execute,
+                  },
+                ],
+              })
+          for await (const _ of stream) {
             // Drain the stream.
           }
         } catch (error) {
