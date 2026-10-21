@@ -25,6 +25,8 @@ There are two levels of MCP Apps support:
 
 To link a tool to its widget from your own TanStack MCP server, see [Tell the host what a tool does](./server#tell-the-host-what-a-tool-does).
 
+> **Want the model to write the widget?** [Generative UI](../generative-ui/index) builds on MCP Apps. The model authors a UI during the chat, and the host stores, builds, and serves it as a `ui://` resource.
+
 ## Static Widgets
 
 When an MCP tool's result carries a `ui://` resource, TanStack AI emits a `UIResourcePart` on the assistant `UIMessage`. The part is added to the message's `parts` array **alongside** the normal `ToolResultPart` — it never enters model input.
