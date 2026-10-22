@@ -17,6 +17,8 @@
  *
  * - **fal** — 1k+ model-grained endpoints; image field maps have their own
  *   generator (`scripts/generate-fal-image-field-map.ts`).
+ * - **elevenlabs** — id arrays, not ModelMeta constants; see
+ *   `scripts/sync-elevenlabs-models.ts`.
  * - **bedrock** — ids are AWS-region-qualified; see
  *   `scripts/fetch-bedrock-models.ts`.
  * - **ollama**, **llmgateway**, **vercel-gateway**, **lovable** — different
@@ -30,19 +32,15 @@ import { readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  ELEVENLABS_ID_ARRAYS,
   alreadySynced,
   outputsText,
   pricingLines,
-  selectElevenLabsInserts,
   selectNativeInserts,
 } from './model-sync/catalog'
 import type { CatalogModel, SyncModel } from './model-sync/catalog'
 import { toModelConstName } from './model-sync/ids'
 import {
-  addToStringLiteralArray,
   applyChatModelCatalogInserts,
-  extractStringLiteralArrayValues,
   insertConstants,
 } from './model-sync/native-insert'
 import { createSyncClient, fetchSyncCatalogs } from './model-sync/modelschemas'
@@ -51,7 +49,7 @@ import {
   buildProviderSupportsBody,
 } from './model-sync/provider-supports'
 import type { ArrayRef } from './model-sync/native-insert'
-import type { ModelMetaProvider } from './model-sync/provider-supports'
+import type { SyncedProvider } from './model-sync/provider-supports'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -117,7 +115,7 @@ interface ProviderConfig {
   outputTokenField: 'max_output_tokens' | 'max_completion_tokens'
 }
 
-const PROVIDER_MAP: Record<ModelMetaProvider, ProviderConfig> = {
+const PROVIDER_MAP: Record<SyncedProvider, ProviderConfig> = {
   openai: {
     packageName: '@tanstack/ai-openai',
     metaFile: resolve(ROOT, 'packages/ai-openai/src/model-meta.ts'),
@@ -285,12 +283,6 @@ const PROVIDER_MAP: Record<ModelMetaProvider, ProviderConfig> = {
   },
 }
 
-/** ElevenLabs model-meta is id-literal arrays, not ModelMeta constants. */
-const ELEVENLABS = {
-  packageName: '@tanstack/ai-elevenlabs',
-  metaFile: resolve(ROOT, 'packages/ai-elevenlabs/src/model-meta.ts'),
-}
-
 type InputModality = 'text' | 'image' | 'audio' | 'video' | 'document'
 
 const MODALITY_MAP: Record<string, InputModality> = {
@@ -323,7 +315,7 @@ function anthropicOptionsType(model: SyncModel): string {
 
 function providerOptionsEntryFor(
   model: SyncModel,
-  provider: ModelMetaProvider,
+  provider: SyncedProvider,
   config: ProviderConfig,
 ): string {
   if (provider === 'anthropic') return anthropicOptionsType(model)
@@ -332,7 +324,7 @@ function providerOptionsEntryFor(
 
 function satisfiesClause(
   model: SyncModel,
-  provider: ModelMetaProvider,
+  provider: SyncedProvider,
   config: ProviderConfig,
 ): string {
   if (provider === 'anthropic') {
@@ -383,7 +375,7 @@ async function writeLastRunTimestamp(): Promise<void> {
 
 function generateModelConstant(
   model: SyncModel,
-  provider: ModelMetaProvider,
+  provider: SyncedProvider,
   config: ProviderConfig,
 ): string {
   const constName = toModelConstName(model.nativeId)
@@ -450,10 +442,10 @@ function detectChangedPackages(): Set<string> {
 }
 
 async function syncModelMeta(
-  provider: ModelMetaProvider,
+  provider: SyncedProvider,
   config: ProviderConfig,
   catalogs: {
-    native: Record<ModelMetaProvider, Array<CatalogModel>>
+    native: Record<SyncedProvider, Array<CatalogModel>>
     openrouter: Array<CatalogModel>
   },
   cutoffTimestamp: number,
@@ -515,33 +507,6 @@ async function syncModelMeta(
   return { added: inserts.length, heldBack: heldBack.length }
 }
 
-async function syncElevenLabs(
-  rows: Array<CatalogModel>,
-  cutoffTimestamp: number,
-): Promise<number> {
-  console.log(`\nProcessing provider: elevenlabs`)
-  let content = await readFile(ELEVENLABS.metaFile, 'utf-8')
-  const existingIds = new Set(
-    ELEVENLABS_ID_ARRAYS.flatMap((name) => [
-      ...extractStringLiteralArrayValues(content, name),
-    ]),
-  )
-  const byArray = selectElevenLabsInserts(rows, cutoffTimestamp, existingIds)
-  const added = Object.values(byArray).flat()
-  if (added.length === 0) {
-    console.log('  No new models to add.')
-    return 0
-  }
-  console.log(`  Adding ${added.length} new models:`)
-  for (const id of added) console.log(`    - ${id}`)
-  for (const name of ELEVENLABS_ID_ARRAYS) {
-    content = addToStringLiteralArray(content, name, byArray[name])
-  }
-  await writeFile(ELEVENLABS.metaFile, content, 'utf-8')
-  console.log(`  Wrote updated file: ${ELEVENLABS.metaFile}`)
-  return added.length
-}
-
 async function main() {
   const lastRun = await readLastRunTimestamp()
   const now = Math.floor(Date.now() / 1000)
@@ -565,7 +530,7 @@ async function main() {
   let totalAdded = 0
   let totalHeldBack = 0
   for (const [provider, config] of Object.entries(PROVIDER_MAP) as Array<
-    [ModelMetaProvider, ProviderConfig]
+    [SyncedProvider, ProviderConfig]
   >) {
     const { added, heldBack } = await syncModelMeta(
       provider,
@@ -577,12 +542,6 @@ async function main() {
     totalHeldBack += heldBack
     if (added > 0) changedPackages.add(config.packageName)
   }
-  const elevenLabsAdded = await syncElevenLabs(
-    catalogs.native.elevenlabs,
-    cutoffTimestamp,
-  )
-  totalAdded += elevenLabsAdded
-  if (elevenLabsAdded > 0) changedPackages.add(ELEVENLABS.packageName)
 
   console.log(`\nDone. Added ${totalAdded} new models total.`)
 

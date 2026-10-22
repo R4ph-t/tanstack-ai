@@ -7,7 +7,7 @@
  */
 
 import { toModelConstName, toNativeProviderId } from './ids'
-import type { ModelMetaProvider, SyncedProvider } from './provider-supports'
+import type { SyncedProvider } from './provider-supports'
 
 export const OPENROUTER_PREFIX: Partial<Record<SyncedProvider, string>> = {
   openai: 'openai/',
@@ -323,7 +323,7 @@ export function skipNativeModelReason(
 }
 
 export interface NativeInsertRules {
-  provider: ModelMetaProvider
+  provider: SyncedProvider
   skipPatterns: Array<string>
   acceptedActivities: Array<string | null>
   /**
@@ -395,57 +395,6 @@ export function selectNativeInserts(
     selection.inserts.push({ model, activity: row.activity })
   }
   return selection
-}
-
-export const ELEVENLABS_ID_ARRAYS = [
-  'ELEVENLABS_TTS_MODELS',
-  'ELEVENLABS_AUDIO_MODELS',
-  'ELEVENLABS_TRANSCRIPTION_MODELS',
-  'ELEVENLABS_VOICE_MODELS',
-] as const
-
-type ElevenLabsIdArray = (typeof ELEVENLABS_ID_ARRAYS)[number]
-
-/**
- * Which ElevenLabs id array a raw id belongs in. STS / voice-conversion ids
- * have no TanStack adapter, so they get `null`.
- */
-export function elevenLabsIdArray(rawId: string): ElevenLabsIdArray | null {
-  if (rawId.includes('_sts_')) return null
-  if (rawId.includes('_ttv_')) return 'ELEVENLABS_VOICE_MODELS'
-  if (rawId.startsWith('scribe')) return 'ELEVENLABS_TRANSCRIPTION_MODELS'
-  if (rawId.includes('text_to_sound') || rawId.startsWith('music_')) {
-    return 'ELEVENLABS_AUDIO_MODELS'
-  }
-  if (rawId.startsWith('eleven_')) return 'ELEVENLABS_TTS_MODELS'
-  return null
-}
-
-/** New ElevenLabs ids per array. An id is added at most once. */
-export function selectElevenLabsInserts(
-  rows: Array<CatalogModel>,
-  cutoffTimestamp: number,
-  existingIds: Set<string>,
-): Record<ElevenLabsIdArray, Array<string>> {
-  const byArray: Record<ElevenLabsIdArray, Array<string>> = {
-    ELEVENLABS_TTS_MODELS: [],
-    ELEVENLABS_AUDIO_MODELS: [],
-    ELEVENLABS_TRANSCRIPTION_MODELS: [],
-    ELEVENLABS_VOICE_MODELS: [],
-  }
-  const seen = new Set(existingIds)
-  for (const row of rows) {
-    if (
-      skipNativeModelReason(row, 'elevenlabs', [], cutoffTimestamp, ['audio'])
-    ) {
-      continue
-    }
-    const arrayName = elevenLabsIdArray(row.rawId)
-    if (!arrayName || seen.has(row.rawId)) continue
-    byArray[arrayName].push(row.rawId)
-    seen.add(row.rawId)
-  }
-  return byArray
 }
 
 export function alreadySynced(

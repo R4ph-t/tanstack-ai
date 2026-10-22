@@ -17,16 +17,12 @@ export const SYNCED_PROVIDERS = [
   'groq',
   'mistral',
   'byteplus',
-  'elevenlabs',
 ] as const
 
 export type SyncedProvider = (typeof SYNCED_PROVIDERS)[number]
 
-/** Providers synced as ModelMeta constants. ElevenLabs is id arrays only. */
-export type ModelMetaProvider = Exclude<SyncedProvider, 'elevenlabs'>
-
 export interface ProviderSupportsInput {
-  provider: ModelMetaProvider
+  provider: SyncedProvider
   inputModalities: Array<string>
   outputModalities?: Array<string>
   supportedParameters?: Array<string>

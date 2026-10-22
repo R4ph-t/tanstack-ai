@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   alreadySynced,
-  elevenLabsIdArray,
   findOpenRouterEnrichment,
   hasFullPricing,
   hasImageOutput,
@@ -9,7 +8,6 @@ import {
   outputsText,
   parseCatalogModels,
   pricingLines,
-  selectElevenLabsInserts,
   selectNativeInserts,
   skipNativeModelReason,
   toSyncModel,
@@ -267,18 +265,6 @@ describe('skipNativeModelReason', () => {
     ).toBe('non-chat family')
   })
 
-  it('keeps audio rows when audio is an accepted activity', () => {
-    expect(
-      skipNativeModelReason(
-        native({ activity: 'audio', rawId: 'eleven_v3' }),
-        'elevenlabs',
-        [],
-        cutoff,
-        ['audio'],
-      ),
-    ).toBeNull()
-  })
-
   it('keeps Groq rows with no activity', () => {
     expect(
       skipNativeModelReason(
@@ -300,44 +286,6 @@ describe('outputsText', () => {
       'groq',
     )
     expect(outputsText(model, null)).toBe(true)
-  })
-})
-
-describe('elevenLabsIdArray', () => {
-  it('routes TTS, skips STS, and classifies scribe / music', () => {
-    expect(elevenLabsIdArray('eleven_v3_conversational')).toBe(
-      'ELEVENLABS_TTS_MODELS',
-    )
-    expect(elevenLabsIdArray('eleven_multilingual_sts_v2')).toBeNull()
-    expect(elevenLabsIdArray('scribe_v2')).toBe(
-      'ELEVENLABS_TRANSCRIPTION_MODELS',
-    )
-    expect(elevenLabsIdArray('music_v2_5')).toBe('ELEVENLABS_AUDIO_MODELS')
-    expect(elevenLabsIdArray('eleven_ttv_v3')).toBe('ELEVENLABS_VOICE_MODELS')
-  })
-})
-
-describe('selectElevenLabsInserts', () => {
-  const audio = (rawId: string) =>
-    native({ provider: 'elevenlabs', rawId, activity: 'audio' })
-
-  it('skips ids already in the file and adds a repeated id once', () => {
-    const byArray = selectElevenLabsInserts(
-      [
-        audio('eleven_v3'),
-        audio('eleven_v4'),
-        audio('eleven_v4'),
-        audio('scribe_v3'),
-      ],
-      0,
-      new Set(['eleven_v3']),
-    )
-    expect(byArray).toEqual({
-      ELEVENLABS_TTS_MODELS: ['eleven_v4'],
-      ELEVENLABS_AUDIO_MODELS: [],
-      ELEVENLABS_TRANSCRIPTION_MODELS: ['scribe_v3'],
-      ELEVENLABS_VOICE_MODELS: [],
-    })
   })
 })
 

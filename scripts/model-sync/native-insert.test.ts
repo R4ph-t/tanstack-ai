@@ -1,10 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import {
-  addToStringLiteralArray,
-  applyChatModelCatalogInserts,
-  extractStringLiteralArrayValues,
-  insertConstants,
-} from './native-insert'
+import { applyChatModelCatalogInserts, insertConstants } from './native-insert'
 
 const STUB = `const FOO = {
   id: 'claude-foo',
@@ -230,31 +225,5 @@ export const CHAT_MODELS = [OLD.name] as const
       'const C = 3',
     ])
     expect(result).toBe(`const A = 1\n\nconst C = 3\n\nexport const B = 2\n`)
-  })
-})
-
-describe('string-literal arrays', () => {
-  const stub = `export const ELEVENLABS_TTS_MODELS = [
-  'eleven_v3',
-] as const
-`
-
-  it('inserts quoted ids after the opening bracket', () => {
-    const result = addToStringLiteralArray(stub, 'ELEVENLABS_TTS_MODELS', [
-      'eleven_v3_conversational',
-    ])
-    expect(result).toContain("  'eleven_v3_conversational',")
-    expect(
-      extractStringLiteralArrayValues(result, 'ELEVENLABS_TTS_MODELS'),
-    ).toEqual(new Set(['eleven_v3_conversational', 'eleven_v3']))
-  })
-
-  it('throws instead of reading a missing array as empty', () => {
-    expect(() =>
-      extractStringLiteralArrayValues(stub, 'ELEVENLABS_AUDIO_MODELS'),
-    ).toThrow("Could not find array 'ELEVENLABS_AUDIO_MODELS'")
-    expect(() =>
-      addToStringLiteralArray(stub, 'ELEVENLABS_AUDIO_MODELS', ['music_v2']),
-    ).toThrow("Could not find array 'ELEVENLABS_AUDIO_MODELS'")
   })
 })

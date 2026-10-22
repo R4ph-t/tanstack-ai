@@ -1,8 +1,13 @@
 /**
- * Thin wrapper around `@modelschemas/client` for the native model sync.
+ * Thin wrapper around `@modelschemas/client` for the model sync scripts.
  */
 
-import { createModelschemasClient, listModels } from '@modelschemas/client'
+import {
+  createModelschemasClient,
+  getSchema,
+  listModels,
+} from '@modelschemas/client'
+import type { GetSchemaData } from '@modelschemas/client'
 import { isRecord, parseCatalogModels } from './catalog'
 import type { CatalogModel } from './catalog'
 import { SYNCED_PROVIDERS } from './provider-supports'
@@ -32,17 +37,40 @@ function errorMessage(error: unknown): string {
   return JSON.stringify(error)
 }
 
-export async function fetchCatalog(
+/** The raw `listModels` payload for one provider. */
+export async function listRawModels(
   client: SyncClient,
   provider: string,
-): Promise<Array<CatalogModel>> {
+): Promise<unknown> {
   const result = await listModels({ client, query: { provider } })
   if (result.error !== undefined) {
     throw new Error(
       `modelschemas listModels provider=${provider}: ${errorMessage(result.error)}`,
     )
   }
-  return parseCatalogModels(result.data)
+  return result.data
+}
+
+export async function fetchCatalog(
+  client: SyncClient,
+  provider: string,
+): Promise<Array<CatalogModel>> {
+  return parseCatalogModels(await listRawModels(client, provider))
+}
+
+/** The raw input-schema payload for one endpoint, e.g. `v1/music`. */
+export async function getInputSchema(
+  client: SyncClient,
+  path: GetSchemaData['path'],
+): Promise<unknown> {
+  const result = await getSchema({ client, path, query: { kind: 'input' } })
+  if (result.error !== undefined) {
+    const { provider, activity, endpointId } = path
+    throw new Error(
+      `modelschemas getSchema ${provider}/${activity}/${endpointId}: ${errorMessage(result.error)}`,
+    )
+  }
+  return result.data
 }
 
 /**

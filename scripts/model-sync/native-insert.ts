@@ -24,39 +24,6 @@ export function insertConstants(
   return content.slice(0, at) + block + content.slice(at)
 }
 
-export function addToStringLiteralArray(
-  content: string,
-  arrayName: string,
-  values: Array<string>,
-): string {
-  if (values.length === 0) return content
-  return addToArray(
-    content,
-    arrayName,
-    values.map((value) => `'${value}'`),
-    '',
-  )
-}
-
-export function extractStringLiteralArrayValues(
-  content: string,
-  arrayName: string,
-): Set<string> {
-  const ids = new Set<string>()
-  const block = content.match(
-    new RegExp(`export const ${arrayName} = \\[([\\s\\S]*?)\\] as const`),
-  )
-  if (!block) {
-    // An empty set here would make every existing id look new.
-    throw new Error(`Could not find array '${arrayName}' in file`)
-  }
-  const quoted = block[1]!.matchAll(/'([^']+)'/g)
-  for (const match of quoted) {
-    ids.add(match[1]!)
-  }
-  return ids
-}
-
 /**
  * Insert entries immediately AFTER the opening bracket. Each inserted line
  * carries its own trailing comma so the existing body does not need a
