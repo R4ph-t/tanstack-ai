@@ -1,7 +1,9 @@
 ---
-'@tanstack/ai-byteplus': patch
-'@tanstack/ai-groq': patch
-'@tanstack/ai-mistral': patch
+'@tanstack/ai-elevenlabs': patch
+'@tanstack/ai-gemini': patch
+'@tanstack/ai-llmgateway': patch
+'@tanstack/ai-openrouter': patch
+'@tanstack/ai-vercel-gateway': patch
 ---
 
-Add new BytePlus, Groq, and Mistral models from the modelschemas catalog.
+Update model metadata from OpenRouter API
