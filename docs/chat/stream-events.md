@@ -14,9 +14,9 @@ keywords:
   - TEXT_MESSAGE_CONTENT
 ---
 
-A `chat()` stream yields text deltas, tool-call chunks, and a finish chunk. This page names each chunk.
+Sometimes the rendered messages are not enough. You want the token usage, the finish reason, or the raw tool-call events.
 
-Every chunk has a `type`. Branch on it.
+A `chat()` stream yields these as chunks. Every chunk has a `type`. Branch on it.
 
 ## Quick setup
 
@@ -84,7 +84,7 @@ A rate-limited `RUN_ERROR` also says how long to wait. See [Rate limits](#rate-l
 
 Later, as you need them:
 
-- `REASONING_*` and `REASONING_ENCRYPTED_VALUE`: thinking content. See [Thinking and Reasoning](./thinking-content).
+- `REASONING_*` and `REASONING_ENCRYPTED_VALUE`: thinking content. See [Show Thinking](./thinking-content).
 - `TEXT_MESSAGE_CHUNK`, `TOOL_CALL_CHUNK`, and `REASONING_MESSAGE_CHUNK`: other forms of START / CONTENT / END. See [Chunk events](#chunk-events).
 - `STEP_STARTED` and `STEP_FINISHED`: `stepName` only.
 - `CUSTOM`: `name` and `value`. See [Custom Events](../protocol/custom-events).
@@ -387,3 +387,18 @@ for (const message of messages) {
 ```
 
 If there is no `responseId`, the provider sent no generation id. The adapter never fills it with an HTTP request id.
+
+### A stream that ends too early
+
+A provider stream can stop before the model finishes. The adapter then ends the run with `RUN_ERROR` and the code `incomplete-stream`. The text that arrived stays available, and `onFinish` does not run.
+
+How each adapter knows that a stream is complete:
+
+- **OpenAI and OpenRouter Responses**: the stream must end with `response.completed`. This applies to chat and to structured output.
+- **Chat Completions adapters built on `@tanstack/openai-base`**: a started stream must have a non-null `finish_reason`, or a final chunk with only usage (`choices: []` with `usage`).
+
+When a Chat Completions stream is not complete, the adapter also closes the open lifecycles. The run calls `onError` and skips pending server tools.
+
+The usage-only rule keeps providers compatible. Usage on an earlier chunk, or usage next to a choice, does not count. The OpenAI SDK hides `[DONE]`, so this check cannot see that marker. A stream with only `[DONE]` after the content still needs a finish reason or a usage-only last chunk.
+
+For a connection that drops in the middle of a line, see [Transports: Errors](../transports/overview#errors).

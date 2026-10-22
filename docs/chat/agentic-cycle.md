@@ -12,9 +12,9 @@ keywords:
   - ai agents
 ---
 
-The agent loop calls the model again after each tool result. One call cannot finish a task that needs a tool first.
+Some questions need data before the model can answer, such as the weather in a city. One model call cannot get that data and answer too.
 
-`chat()` runs this loop for you. The model calls a tool, `chat()` runs it and gives the result back, and the model continues until it can answer.
+`chat()` runs an agent loop for this. The model calls a tool, `chat()` runs it and gives the result back, and the model continues until it can answer.
 
 ## Quick setup
 

@@ -127,4 +127,4 @@ When you use one of these features, add its field:
 - **Interrupt errors.** On `RUN_ERROR`, set `metadata.tanstack.interruptErrors`. Then `ChatClient` can match a failed interrupt submit.
 - **Tool output error.** On `TOOL_CALL_RESULT`, set `metadata.tanstack.state` to `"output-error"` when the tool result is an error payload.
 - **Message timestamps.** On wire messages, `metadata.tanstack.createdAt` is an ISO-8601 string.
-- **Signatures.** Stream thinking signatures on `REASONING_ENCRYPTED_VALUE`. In the next-turn body, set the spec `encryptedValue` on `role: "reasoning"` messages and on `toolCalls`. Other provider fields for a tool call go in `metadata.tanstack.toolCallMetadata`. See [Thinking & Reasoning](../chat/thinking-content).
+- **Signatures.** Stream thinking signatures on `REASONING_ENCRYPTED_VALUE`. In the next-turn body, set the spec `encryptedValue` on `role: "reasoning"` messages and on `toolCalls`. Other provider fields for a tool call go in `metadata.tanstack.toolCallMetadata`. See [Show Thinking](../chat/thinking-content).

@@ -13,7 +13,7 @@ keywords:
   - cancelQueued
 ---
 
-Queueing decides what happens when the user sends a message while a reply is still streaming: wait, ignore it, or stop the current run.
+Users send new messages while a reply still streams. You decide what happens to that message: it waits, it is dropped, or it stops the current reply.
 
 `useChat` has a message queue for this. By default, the new message waits and sends after the current run succeeds.
 

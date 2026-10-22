@@ -381,7 +381,7 @@ for await (const chunk of stream) {
 
 The reasoning events always close before any text or tool output starts. So you first see the full sequence: `REASONING_START`, `REASONING_MESSAGE_START`, `REASONING_MESSAGE_CONTENT` (one or more), `REASONING_MESSAGE_END`, `REASONING_END`.
 
-See [Thinking & Reasoning](../chat/thinking-content) for the event spec of all providers.
+See [Show Thinking](../chat/thinking-content) for the event spec of all providers.
 
 ### Mistral on Vertex
 

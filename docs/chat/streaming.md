@@ -13,8 +13,9 @@ keywords:
   - useChat
 ---
 
-`chat()` returns each token while the model writes the reply. `useChat` renders those tokens. Call `stop()` to cancel the run.
+Without streaming, the user sees nothing until the model finishes the full reply. That can take many seconds.
 
+With streaming, `chat()` sends each token while the model writes it. `useChat` shows the tokens, and `stop()` cancels the run.
 
 ## Quick setup
 
@@ -146,7 +147,7 @@ After `stop()`:
 
 - **The user sends while a reply streams.** By default, the message waits in `queue`. See [Message Queue](./queueing).
 - **You need the event types, the thread ids, or the tool parts.** See [Stream Events](./stream-events).
-- **The model thinks before it answers.** See [Thinking and Reasoning](./thinking-content).
+- **The model thinks before it answers.** See [Show Thinking](./thinking-content).
 - **A page refresh must not lose the stream.** See [Resumable Streams](../resumable-streams/overview).
 
 ## Advanced
@@ -196,14 +197,4 @@ The shared `ChatClient` processes the chunks that are ready in order. It does no
 ### A stream that ends too early
 
 - **The connection drops in the middle of a line.** The client throws `StreamTruncatedError` and moves to `error`. See [Transports: Errors](../transports/overview#errors).
-- **An OpenAI or OpenRouter Responses stream ends without `response.completed`.** The adapter emits `RUN_ERROR` with code `incomplete-stream`. This applies to chat and to structured output. The text that arrived stays available. The run does not call `onFinish`.
-- **A Chat Completions stream ends without a finish.** See below.
-
-Chat Completions adapters built on `@tanstack/openai-base` also make sure that the stream finished. A started stream needs one of these:
-
-- a non-null `finish_reason`
-- a final chunk with only usage (`choices: []` with `usage`)
-
-If neither arrives, the adapter closes the open lifecycles and emits `RUN_ERROR` with code `incomplete-stream`. The partial text stays available. The run calls `onError`, skips pending server tools, and does not call `onFinish`.
-
-The usage-only rule keeps providers compatible. Usage on an earlier chunk, or usage next to a choice, does not count. The OpenAI SDK hides `[DONE]`, so this check cannot see that marker. A stream with only `[DONE]` after the content still needs a finish reason or a usage-only last chunk.
+- **The provider stream stops before the model finishes.** The run ends with `RUN_ERROR` and the code `incomplete-stream`. The text that arrived stays in `messages`, and `onFinish` does not run. For the rules of each adapter, see [Stream Events](./stream-events#a-stream-that-ends-too-early).

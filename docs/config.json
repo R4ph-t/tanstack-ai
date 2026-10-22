@@ -186,6 +186,12 @@
           "updatedAt": "2026-10-22"
         },
         {
+          "label": "Agentic Cycle",
+          "to": "chat/agentic-cycle",
+          "addedAt": "2026-04-15",
+          "updatedAt": "2026-10-22"
+        },
+        {
           "label": "Subagents",
           "to": "chat/subagents",
           "addedAt": "2026-09-21",
@@ -198,21 +204,15 @@
           "updatedAt": "2026-10-22"
         },
         {
-          "label": "Agentic Cycle",
-          "to": "chat/agentic-cycle",
-          "addedAt": "2026-04-15",
-          "updatedAt": "2026-10-22"
-        },
-        {
-          "label": "Thinking & Reasoning",
-          "to": "chat/thinking-content",
-          "addedAt": "2026-04-15",
-          "updatedAt": "2026-10-22"
-        },
-        {
           "label": "Reasoning",
           "to": "chat/reasoning",
           "addedAt": "2026-10-09",
+          "updatedAt": "2026-10-22"
+        },
+        {
+          "label": "Show Thinking",
+          "to": "chat/thinking-content",
+          "addedAt": "2026-04-15",
           "updatedAt": "2026-10-22"
         },
         {

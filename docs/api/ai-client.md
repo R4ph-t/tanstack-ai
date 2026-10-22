@@ -487,7 +487,7 @@ interface UIMessage<TTools = any> {
 | Part | `type` | What it holds |
 | --- | --- | --- |
 | `TextPart` | `"text"` | `content`: the text. |
-| `ThinkingPart` | `"thinking"` | `content`: the model reasoning. See [Thinking Content](../chat/thinking-content). |
+| `ThinkingPart` | `"thinking"` | `content`: the model reasoning. See [Show Thinking](../chat/thinking-content). |
 | `ToolCallPart` | `"tool-call"` | `id`, `name`, `arguments` (JSON string, can be partial while it streams), `input`, `output`, `state`, and `approval` for tools with `needsApproval: true`. |
 | `ToolResultPart` | `"tool-result"` | `toolCallId`, `content`, `state`, `error`, `outcome`, `metadata`. |
 | `ImagePart`, `AudioPart`, `VideoPart`, `DocumentPart` | media types | Media content. See [Multimodal Content](../advanced/multimodal-content). |

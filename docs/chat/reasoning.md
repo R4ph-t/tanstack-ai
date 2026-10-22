@@ -1,7 +1,7 @@
 ---
 title: Reasoning
 id: reasoning
-order: 6
+order: 5
 description: "Make a reasoning model think harder, or not at all, with one reasoning option on chat(). It works the same on every provider and is typed per model."
 keywords:
   - tanstack ai
@@ -12,9 +12,9 @@ keywords:
   - thinking budget
 ---
 
-Pass `reasoning` to `chat()`. The adapter maps that level onto the provider setting, such as OpenAI `reasoning.effort` or Anthropic `thinking`.
+A reasoning model can think before it answers. More thinking gives better answers to hard questions, but it costs more tokens and takes more time. Each provider has a different setting for it.
 
-Set `reasoning` on `chat()`. The adapter sends the right field for the model.
+Set `reasoning` on `chat()` to pick a level. The adapter sends the right provider field, such as OpenAI `reasoning.effort` or Anthropic `thinking`.
 
 ## Quick setup
 
@@ -77,7 +77,7 @@ export function Chat() {
 
 Send a hard question. A "Thinking" box fills first, then the answer streams below it.
 
-Some models think without sending any text back. For those models, the thinking part stays empty. See [Thinking & Reasoning](./thinking-content) for the order of the parts and for signed thinking.
+Some models think without sending any text back. For those models, the thinking part stays empty. See [Show Thinking](./thinking-content) for the order of the parts and for signed thinking.
 
 ## How it works
 

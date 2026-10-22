@@ -1,7 +1,7 @@
 ---
-title: Thinking & Reasoning
+title: Show Thinking
 id: thinking-content
-order: 5
+order: 6
 description: "Show the thinking of a reasoning model in your chat UI. The thinking streams as ThinkingPart entries in message.parts, in the order the model used."
 keywords:
   - tanstack ai
@@ -14,9 +14,9 @@ keywords:
   - ThinkingPart
 ---
 
-A thinking part holds the text a reasoning model writes before the answer. Render it in order with the tool calls.
+A reasoning model can think for many seconds before it answers. If the UI shows nothing in that time, the user cannot tell that the app still works. Show the thinking while it streams.
 
-TanStack AI streams the thinking as `ThinkingPart` entries in `message.parts`, next to the text and the tool calls.
+TanStack AI streams the thinking as `ThinkingPart` entries in `message.parts`, in order with the text and the tool calls.
 
 ## Quick setup
 
