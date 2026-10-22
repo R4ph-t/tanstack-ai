@@ -1,7 +1,7 @@
 ---
 title: OpenRouter Adapter
 id: openrouter-adapter
-description: "Access 300+ LLMs from OpenAI, Anthropic, Google, Meta, Mistral, and more through a single API with OpenRouter in TanStack AI."
+description: "Use 300+ models from OpenAI, Anthropic, Google, Meta, Mistral, and more in TanStack AI with one OpenRouter API key."
 keywords:
   - tanstack ai
   - openrouter
@@ -10,269 +10,155 @@ keywords:
   - llm gateway
   - 300 models
   - adapter
+  - evaluate
+  - jev
 ---
 
-OpenRouter is TanStack AI's first official AI partner and the recommended starting point for most projects. It provides access to 300+ models from OpenAI, Anthropic, Google, Meta, Mistral, and many more — all through a single API key and unified interface.
+`openRouterText` calls 300+ models from OpenAI, Anthropic, Google, Meta, Mistral, and others with one API key.
 
-## Installation
+## 1. Install
 
-```bash
-npm install @tanstack/ai-openrouter
-```
+<!-- ::start:tabs variant="package-manager" mode="install" -->
 
-## Basic Usage
+react: @tanstack/ai-openrouter
+vue: @tanstack/ai-openrouter
+solid: @tanstack/ai-openrouter
+svelte: @tanstack/ai-openrouter
+preact: @tanstack/ai-openrouter
+angular: @tanstack/ai-openrouter
+vanilla: @tanstack/ai-openrouter
+octane: @tanstack/ai-openrouter
 
-```typescript
-import { chat } from "@tanstack/ai";
-import { openRouterText } from "@tanstack/ai-openrouter";
- 
-const stream = chat({
-  adapter: openRouterText("openai/gpt-5"),
-  messages: [{ role: "user", content: "Hello!" }], 
-});
-```
+<!-- ::end:tabs -->
 
-## Configuration
+## 2. Set the API key
 
-```typescript
-import { createOpenRouterText } from "@tanstack/ai-openrouter";
-
-const adapter = createOpenRouterText(
-  "openai/gpt-5",
-  process.env.OPENROUTER_API_KEY!,
-  {
-    serverURL: "https://openrouter.ai/api/v1", // Optional
-    httpReferer: "https://your-app.com", // Optional, for rankings
-    appTitle: "Your App Name", // Optional, for rankings
-  },
-);
-```
-
-## Available Models
-
-OpenRouter provides access to 300+ models from various providers. Models use the format `provider/model-name`:
-
-```text
-model: "openai/gpt-5.1"
-model: "anthropic/claude-sonnet-4.5"
-model: "google/gemini-3.1-pro-preview"
-model: "meta-llama/llama-4-maverick"
-model: "deepseek/deepseek-v3.2"
-```
-
-See the full list at [openrouter.ai/models](https://openrouter.ai/models).
-
-## Example: Chat Completion
-
-```typescript
-import { chat, toServerSentEventsResponse } from "@tanstack/ai";
-import { openRouterText } from "@tanstack/ai-openrouter";
- 
-export async function POST(request: Request) {
-  const { messages } = await request.json();
-
-  const stream = chat({
-    adapter: openRouterText("openai/gpt-5"),
-    messages, 
-  });
-
-  return toServerSentEventsResponse(stream);
-}
-```
-
-## Example: With Tools
-
-```typescript
-import { chat, toServerSentEventsResponse, toolDefinition } from "@tanstack/ai";
-import { openRouterText } from "@tanstack/ai-openrouter";
-import { z } from "zod";
-
-const getWeatherDef = toolDefinition({
-  name: "get_weather",
-  description: "Get the current weather",
-  inputSchema: z.object({
-    location: z.string(),
-  }),
-});
-
-const getWeather = getWeatherDef.server(async ({ location }) => {
-  return { temperature: 72, conditions: "sunny" };
-});
-
-export async function POST(request: Request) {
-  const { messages } = await request.json();
-
-  const stream = chat({
-    adapter: openRouterText("openai/gpt-5"),
-    messages,
-    tools: [getWeather],
-  });
-
-  return toServerSentEventsResponse(stream);
-}
-```
- 
- 
-
-## Environment Variables
-
-Set your API key in environment variables:
+Put the key in the environment of your server:
 
 ```bash
 OPENROUTER_API_KEY=sk-or-...
 ```
 
-## Model Routing
-
-OpenRouter can automatically route requests to the best available provider:
+`openRouterText` and the other short factories read `OPENROUTER_API_KEY`. To pass the key in code, use the `create*` factory of the same adapter:
 
 ```typescript
-import { chat, toServerSentEventsResponse } from "@tanstack/ai";
+import { createOpenRouterText } from "@tanstack/ai-openrouter";
+
+const adapter = createOpenRouterText("openai/gpt-6.1-sol", process.env.OPENROUTER_API_KEY!);
+```
+
+## 3. Stream a chat from the server
+
+```typescript
+import {
+  chat,
+  chatParamsFromRequest,
+  toServerSentEventsResponse,
+} from "@tanstack/ai";
 import { openRouterText } from "@tanstack/ai-openrouter";
 
 export async function POST(request: Request) {
-  const { messages } = await request.json();
+  const { messages, threadId, runId } = await chatParamsFromRequest(request);
 
   const stream = chat({
-    adapter: openRouterText("openrouter/auto"),
+    adapter: openRouterText("openai/gpt-6.1-sol"),
     messages,
-    modelOptions: {
-      models: [
-        "openai/gpt-5.5",
-        "anthropic/claude-sonnet-4.5",
-        "google/gemini-3.1-pro-preview",
-      ],
-    },
+    threadId,
+    runId,
   });
 
   return toServerSentEventsResponse(stream);
 }
 ```
 
-## Model Options
+To use a different model, change the id. Ids have the shape `provider/model-name`, for example `anthropic/claude-sonnet-5.5` or `google/gemini-3.1-pro-preview`.
 
-OpenRouter supports various provider-specific options. Sampling parameters live here too — `temperature`, `topP`, and `maxCompletionTokens` (OpenRouter's token-limit key for the chat adapter) — rather than as root-level props on `chat()`:
+## 4. Render the chat
 
-```typescript
-import { chat, toServerSentEventsResponse } from "@tanstack/ai";
-import { openRouterText } from "@tanstack/ai-openrouter";
+The client is the same for every provider. Point `useChat` at your route:
 
-export async function POST(request: Request) {
-  const { messages } = await request.json();
+```tsx
+import { useState } from "react";
+import { useChat, fetchServerSentEvents } from "@tanstack/ai-react";
 
-  const stream = chat({
-    adapter: openRouterText("anthropic/claude-sonnet-4.5"),
-    messages,
-    modelOptions: {
-      temperature: 0.7,
-      topP: 0.9,
-      maxCompletionTokens: 1024,
-    },
+export function Chat() {
+  const [input, setInput] = useState("");
+  const { messages, sendMessage } = useChat({
+    connection: fetchServerSentEvents("/api/chat"),
+    threadId: "support-chat",
   });
 
-  return toServerSentEventsResponse(stream);
+  return (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        sendMessage(input);
+        setInput("");
+      }}
+    >
+      {messages.map((message) => (
+        <p key={message.id}>
+          {message.parts
+            .map((part) => (part.type === "text" ? part.content : ""))
+            .join("")}
+        </p>
+      ))}
+      <input value={input} onChange={(event) => setInput(event.target.value)} />
+    </form>
+  );
 }
 ```
 
-> If you previously passed `temperature` / `topP` / `maxTokens` at the root of `chat()`, see [Moving Sampling Options into modelOptions](../migration/sampling-options-to-model-options).
+For Vue, Solid, Svelte, Angular, and the other frameworks, see [Quick Start](../getting-started/quick-start#3-render-the-chat).
 
-## Chat Completions vs Responses (beta)
+You now have a streaming chat on OpenRouter. [Tools](../tools/tools) and [Structured Outputs](../structured-outputs/overview) work the same as with every adapter.
 
-OpenRouter exposes two OpenAI-compatible wire formats, and the adapter
-package ships one of each:
+## Model routing
 
-| Adapter                    | Endpoint                  | Status   | When to use                                                                  |
-| -------------------------- | ------------------------- | -------- | ---------------------------------------------------------------------------- |
-| `openRouterText`           | `/v1/chat/completions`    | Stable   | Default for almost everything. Broadest model + tool support.                |
-| `openRouterResponsesText`  | `/v1/responses`           | Beta     | OpenAI Responses-shaped request/response; richer multi-turn state on OpenAI-style models. |
-
-Both adapters route to any underlying model OpenRouter supports
-(`anthropic/...`, `google/...`, `meta-llama/...`, etc.) — the wire format
-describes how your client talks to OpenRouter, not which provider answers.
-`/v1/responses` is OpenAI's newer API surface; OpenRouter implements it so
-clients that prefer that wire format can use it across the same 300+
-model catalogue.
+A model can be down, or slow on one provider. Give OpenRouter a fallback list in `models`. When the primary model is not available, OpenRouter tries the models in order:
 
 ```typescript
 import { chat } from "@tanstack/ai";
-import { openRouterResponsesText } from "@tanstack/ai-openrouter";
+import { openRouterText } from "@tanstack/ai-openrouter";
 
 const stream = chat({
-  adapter: openRouterResponsesText("anthropic/claude-sonnet-4.5"),
+  adapter: openRouterText("openrouter/auto"),
   messages: [{ role: "user", content: "Hello!" }],
+  threadId: "thread-1",
+  modelOptions: {
+    models: [
+      "openai/gpt-6.1-sol",
+      "anthropic/claude-sonnet-5.5",
+      "google/gemini-3.1-pro-preview",
+    ],
+  },
 });
 ```
 
-Caveats while the Responses adapter is in beta:
+To pick which upstream providers serve a model, set `modelOptions.provider`:
 
-- Function tools are supported; OpenRouter's branded server-tools (web
-  search, file search, …) are not yet wired through this path — use
-  `openRouterText` if you need those.
-- If in doubt, prefer `openRouterText`. The Chat Completions endpoint has
-  broader provider coverage and feature parity today.
-
-## Cost Tracking
-
-OpenRouter reports the actual cost of each request inline on the streamed
-response. When present, the adapter forwards it on the terminal `RUN_FINISHED`
-event under `usage.cost`, with OpenRouter's per-request breakdown under
-`usage.costDetails`. This is the cost OpenRouter itself reports for the
-request — it is **not** computed locally from token counts, so it already
-accounts for routing, fallback providers, BYOK, and cached-token pricing. See
-OpenRouter's [Usage Accounting](https://openrouter.ai/docs/use-cases/usage-accounting)
-docs for the meaning and units of these fields.
-
-```typescript ignore
-import { chat, type RunFinishedEvent, type StreamChunk } from "@tanstack/ai";
+```typescript
+import { chat } from "@tanstack/ai";
 import { openRouterText } from "@tanstack/ai-openrouter";
 
-function isRunFinished(chunk: StreamChunk): chunk is RunFinishedEvent {
-  return "finishReason" in chunk;
-}
-
-for await (const chunk of chat({
-  adapter: openRouterText("openai/gpt-5"),
+const stream = chat({
+  adapter: openRouterText("meta-llama/llama-4-maverick"),
   messages: [{ role: "user", content: "Hello!" }],
-})) {
-  if (isRunFinished(chunk)) {
-    console.log("cost:", chunk.usage?.cost);
-    console.log("breakdown:", chunk.usage?.costDetails);
-  }
-}
+  threadId: "thread-1",
+  modelOptions: {
+    provider: {
+      order: ["groq", "together"], // provider slugs, in priority order
+      allowFallbacks: false, // fail instead of routing elsewhere
+    },
+  },
+});
 ```
 
-The same `usage` (including `cost` / `costDetails`) is passed to middleware via
-the `onUsage` and `onFinish` hooks. When OpenRouter does not report a cost, the
-fields are simply absent and the stream completes normally. Both
-`openRouterText` and `openRouterResponsesText` populate cost when OpenRouter
-returns it.
+For all the `provider` fields, model variants such as `:free`, and plugins, see [OpenRouter: Advanced](./openrouter-advanced#provider-preferences).
 
-## Next Steps
+## Provider tools
 
-- [Getting Started](../getting-started/quick-start) - Learn the basics
-- [Tools Guide](../tools/tools) - Learn about tools
-
-## Provider Tools
-
-> **Migrated from `createWebSearchTool`?** This factory was renamed to
-> `webSearchTool` and moved to the `/tools` subpath in this release.
-> See [Migration Guide §6](../migration/migration.md#6-provider-tools-moved-to-tools-subpath)
-> for the exact before/after.
-
-OpenRouter's gateway exposes web search via a plugin that works across
-any proxied chat model. Import it from `@tanstack/ai-openrouter/tools`.
-
-> For the full concept, a comparison matrix, and type-gating details, see
-> [Provider Tools](../tools/provider-tools.md).
-
-### `webSearchTool`
-
-Adds web search capability to any OpenRouter-proxied chat model. The factory
-accepts OpenRouter's `WebSearchConfig` directly — pick the `engine`
-(`auto`, `native`, `exa`, `firecrawl`, or `parallel`), cap results with
-`maxResults` / `maxTotalResults`, restrict which sites can appear in results
-with `allowedDomains` / `excludedDomains`, and optionally pass
-`searchContextSize` or `userLocation` for finer control.
+OpenRouter runs web search and web fetch for any chat model. Import the tools from `@tanstack/ai-openrouter/tools`:
 
 ```typescript
 import { chat } from "@tanstack/ai";
@@ -280,8 +166,9 @@ import { openRouterText } from "@tanstack/ai-openrouter";
 import { webSearchTool } from "@tanstack/ai-openrouter/tools";
 
 const stream = chat({
-  adapter: openRouterText("openai/gpt-5"),
+  adapter: openRouterText("openai/gpt-6.1-sol"),
   messages: [{ role: "user", content: "What's new in AI this week?" }],
+  threadId: "thread-1",
   tools: [
     webSearchTool({
       engine: "exa",
@@ -292,43 +179,219 @@ const stream = chat({
 });
 ```
 
-**Supported models:** all OpenRouter chat models. See [Provider Tools](../tools/provider-tools.md#which-models-support-which-tools).
+- `webSearchTool`: search the web.
+- `webFetchTool`: read the full page at a URL that the model picks.
 
-### `webFetchTool`
+Both work on all OpenRouter chat models. For every option of each tool, see [OpenRouter: Advanced](./openrouter-advanced#provider-tools). For how provider tools compare across adapters, see [Provider Tools](../tools/provider-tools.md#which-models-support-which-tools).
 
-Lets any OpenRouter-proxied chat model fetch the full contents of a URL the
-model chooses, instead of running a search. The factory accepts OpenRouter's
-`WebFetchServerToolConfig` directly — pick the fetch `engine` (`auto` — the
-default, `native`, `openrouter`, `exa`, or `firecrawl`), cap how much page
-content the model receives with `maxContentTokens`, cap how many fetches the
-model can make per request with `maxUses`, and restrict which URLs the model
-can fetch with `allowedDomains` / `blockedDomains`.
+## Tools and structured output together
 
-> The `native` engine routes to the underlying provider's own fetch (for
-> example, Anthropic's `web_fetch` on Claude models). Native fetch
-> capabilities vary, so `allowedDomains` and `blockedDomains` may be
-> ignored. Use `openrouter`, `exa`, or `firecrawl` if you need consistent
-> behaviour across models.
+You can pass `tools` and `outputSchema` on one `chat()` call. On some models, OpenRouter returns the typed object in the same streaming request. Then no second call is necessary.
+
+This happens only when every model that can get the request is in `OPENROUTER_COMBINED_TOOLS_AND_SCHEMA_MODELS`. To check a model before you send:
+
+```typescript
+import { OPENROUTER_COMBINED_TOOLS_AND_SCHEMA_MODELS } from "@tanstack/ai-openrouter/model-meta";
+
+console.log(OPENROUTER_COMBINED_TOOLS_AND_SCHEMA_MODELS.has("openai/gpt-6.1-sol")); // true
+```
+
+For the full server and client code and the rules of the set, see [OpenRouter: Advanced](./openrouter-advanced#tools-and-structured-output-in-one-call).
+
+## Images
+
+```typescript
+import { generateImage } from "@tanstack/ai";
+import { openRouterImage } from "@tanstack/ai-openrouter";
+
+const result = await generateImage({
+  adapter: openRouterImage("google/gemini-nano-banana-2.1"),
+  prompt: "A watercolor lighthouse at dusk",
+  threadId: "thread-1",
+  size: "1344x768", // sent as image_config.aspect_ratio ("16:9")
+  modelOptions: {
+    image_size: "2K", // resolution (Gemini models)
+  },
+});
+
+console.log(result.images);
+```
+
+- You get one image for each request. `numberOfImages` more than 1 throws an error.
+- `size` takes one of ten `WIDTHxHEIGHT` values. Other values throw an error that lists the valid sizes.
+- The prompt can mix text and image parts, for image-to-image work. `modelOptions.strength` sets how much the input image controls the result, on models that support it.
+
+For a React and TanStack Start walkthrough with `useGenerateImage`, see [Generate Image](../tutorials/generate-image). See also [Image Generation](../media/image-generation).
+
+## Video
+
+`openRouterVideo` makes videos with Seedance, Veo 3.1, Wan, Kling, and more, through the async video API of OpenRouter (`POST /api/v1/videos`). Video generation is experimental. For the full server and client code, see [OpenRouter: Advanced](./openrouter-advanced#video-generation).
+
+## Reranking
+
+`openRouterRerank` puts documents in order of how well they match a query:
+
+```typescript
+import { rerank } from "@tanstack/ai";
+import { openRouterRerank } from "@tanstack/ai-openrouter";
+
+const { rerankedDocuments } = await rerank({
+  adapter: openRouterRerank("cohere/rerank-4-pro"),
+  query: "talk about rain",
+  documents: ["sunny day at the beach", "rainy afternoon in the city"],
+  topN: 2,
+});
+
+console.log(rerankedDocuments[0]); // "rainy afternoon in the city"
+```
+
+Any rerank model on OpenRouter works. Known ids: `cohere/rerank-v3.5`, `cohere/rerank-4-fast`, `cohere/rerank-4-pro`, `nvidia/llama-nemotron-rerank-vl-1b-v2`. See the [Reranking guide](../rerank/rerank).
+
+## Evaluate
+
+Sometimes you need an answer that your code can branch on, not chat text. Use `openRouterDecider` with `decide()` to ask typed questions about one shared `state`. The adapter calls TypeSafe Jev through `POST /api/alpha/decisions`:
+
+```typescript
+import { decide, choice, score, boolean } from "@tanstack/ai";
+import { openRouterDecider } from "@tanstack/ai-openrouter";
+
+const ticket = {
+  subject: "Charged twice for the same invoice",
+  body: "Please refund the extra payment.",
+};
+
+const result = await decide({
+  adapter: openRouterDecider("~typesafe/jev-latest"),
+  state: ticket,
+  questions: {
+    queue: choice({
+      instructions: "Which team should handle this ticket?",
+      options: {
+        billing: "Payments, invoices, refunds",
+        tech: "Bugs, outages, integrations",
+        sales: "Pricing, upgrades, new accounts",
+      },
+    }),
+    urgency: score({
+      instructions: "How urgent is this ticket?",
+      levels: ["low", "medium", "high"],
+    }),
+    refund: boolean({
+      instructions: "Is the customer asking for a refund?",
+    }),
+  },
+});
+
+console.log(result.queue.value);
+console.log(result.queue.probability);
+console.log(result.queue.confidence);
+console.log(result.meta.usage);
+```
+
+- `result.meta.usage.cost`: the cost of the request, to bill per request.
+- `result.meta.id`: the id to look the request up later with `GET /api/v1/generation?id=`.
+- `result.meta.provider`: the upstream provider that served the request.
+
+Known ids: `~typesafe/jev-latest`, `typesafe/jev-1.13`, `typesafe/jev-1.13.0`. See the [Evaluate guide](../evaluate/evaluate).
+
+## Summarization
+
+```typescript
+import { summarize } from "@tanstack/ai";
+import { openRouterSummarize } from "@tanstack/ai-openrouter";
+
+const result = await summarize({
+  adapter: openRouterSummarize("google/gemini-3.8-flash"),
+  text: "Your long text to summarize...",
+  threadId: "thread-1",
+  maxLength: 100,
+  style: "concise", // "concise" | "bullet-points" | "paragraph"
+});
+
+console.log(result.summary);
+```
+
+## Cost tracking
+
+OpenRouter reports the real cost of each request. The adapter puts it on the last `RUN_FINISHED` event as `usage.cost`, with the breakdown in `usage.costDetails`. This cost includes routing, fallback providers, BYOK, and cached-token prices. See [Cost tracking](./openrouter-advanced#cost-tracking) for a sample.
+
+## Sign in with OpenRouter (BYOK)
+
+Your users can sign in with their own OpenRouter account. Then the requests use their key and their credit. The helpers are in `@tanstack/ai-openrouter/pkce`. For the browser and the CLI flows, see [OpenRouter: Advanced](./openrouter-advanced#sign-in-with-openrouter-byok).
+
+## Models and options
+
+### Model options
+
+Provider options go in `modelOptions`. This includes sampling options such as `temperature` and `maxCompletionTokens` (the token limit of the chat adapter). The type only allows the options that the selected model supports. For example, Claude Sonnet 5.5 does not take `topP`, so `topP` is a type error for that model:
 
 ```typescript
 import { chat } from "@tanstack/ai";
 import { openRouterText } from "@tanstack/ai-openrouter";
-import { webFetchTool } from "@tanstack/ai-openrouter/tools";
 
 const stream = chat({
-  adapter: openRouterText("openai/gpt-5"),
-  messages: [
-    { role: "user", content: "Summarize https://example.com/article" },
-  ],
-  tools: [
-    webFetchTool({
-      engine: "openrouter",
-      maxContentTokens: 4000,
-      allowedDomains: ["example.com"],
-    }),
-  ],
+  adapter: openRouterText("anthropic/claude-sonnet-5.5"),
+  messages: [{ role: "user", content: "Hello!" }],
+  threadId: "thread-1",
+  modelOptions: {
+    temperature: 0.7,
+    maxCompletionTokens: 1024,
+  },
 });
 ```
 
-**Supported models:** all OpenRouter chat models. See [Provider Tools](../tools/provider-tools.md#which-models-support-which-tools).
+The option names are the camelCase names of the OpenRouter SDK. Sampling options do not go at the root of `chat()`. See [Moving Sampling Options into modelOptions](../migration/sampling-options-to-model-options).
 
+### Reasoning
+
+Set `reasoning` on `chat()`. OpenRouter gets it as `reasoning.effort`:
+
+```typescript
+import { chat } from "@tanstack/ai";
+import { openRouterText } from "@tanstack/ai-openrouter";
+
+const stream = chat({
+  adapter: openRouterText("anthropic/claude-opus-5.5"),
+  messages: [{ role: "user", content: "Hello!" }],
+  threadId: "thread-1",
+  reasoning: "high",
+});
+```
+
+- `off` sends `effort: "none"`.
+- `openRouterText` takes no `budgetTokens`. `openRouterResponsesText` sends `budgetTokens` as `reasoning.maxTokens`, and adds `summary: "auto"` so that the thinking text streams.
+- The types know the levels of each model. Your editor shows them when you type `reasoning`.
+
+See [Reasoning](../chat/reasoning).
+
+### Models
+
+Model ids have the shape `provider/model-name`:
+
+```text
+openai/gpt-6.1-sol
+anthropic/claude-sonnet-5.5
+google/gemini-3.1-pro-preview
+meta-llama/llama-4-maverick
+deepseek/deepseek-v4-pro
+```
+
+See the full list at [openrouter.ai/models](https://openrouter.ai/models). The package exports the known ids:
+
+- `@tanstack/ai-openrouter/model-meta`: `OPENROUTER_CHAT_MODELS`, `OPENROUTER_IMAGE_MODELS`, `OPENROUTER_VIDEO_MODELS`.
+- `@tanstack/ai-openrouter`: `OPENROUTER_RERANK_MODELS`, `OPENROUTER_EVALUATE_MODELS`.
+
+`adapter.inputModalities` lists the input kinds of the selected model. It is `undefined` for a model that this package does not know. See [Check what a model accepts](../advanced/extend-adapter#check-what-a-model-accepts).
+
+## Advanced
+
+These topics are on [OpenRouter: Advanced](./openrouter-advanced):
+
+- Configuration: base URL, app attribution headers, and `wrapFetch`.
+- Retries for rate limits, and for an error in the stream.
+- The Responses adapter (`openRouterResponsesText`, beta).
+- Provider preferences, model variants, plugins, and session metadata.
+- Prompt caching and JSON mode.
+- Tools and structured output in one call, with the full code.
+- `webFetchTool`, cost tracking, video generation, and Sign in with OpenRouter.
+- The API reference.

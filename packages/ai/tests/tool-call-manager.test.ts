@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
+import type { StandardSchemaV1 } from '@standard-schema/spec'
 import {
   ToolCallManager,
   executeToolCalls,
@@ -9,9 +10,9 @@ import type {
   RunFinishedEvent,
   Tool,
   ToolCall,
-  ToolCallStartEvent,
   ToolCallArgsEvent,
   ToolCallEndEvent,
+  ToolCallStartEvent,
   ToolOutputState,
 } from '../src/types'
 
@@ -19,7 +20,6 @@ import type {
 function toolCallStart(fields: {
   toolCallId: string
   toolCallName: string
-  toolName?: string
   index?: number
   metadata?: Record<string, unknown>
   model?: string
@@ -27,10 +27,9 @@ function toolCallStart(fields: {
   return {
     type: EventType.TOOL_CALL_START,
     timestamp: Date.now(),
-    ...fields,
-    // `toolName` is the deprecated alias of `toolCallName`; mirror it
-    // so tests don't have to write both.
-    toolName: fields.toolName ?? fields.toolCallName,
+    toolCallId: fields.toolCallId,
+    toolCallName: fields.toolCallName,
+    ...(fields.metadata !== undefined ? { metadata: fields.metadata } : {}),
   }
 }
 
@@ -44,7 +43,8 @@ function toolCallArgs(fields: {
   return {
     type: EventType.TOOL_CALL_ARGS,
     timestamp: Date.now(),
-    ...fields,
+    toolCallId: fields.toolCallId,
+    delta: fields.delta,
   }
 }
 
@@ -52,7 +52,6 @@ function toolCallArgs(fields: {
 function toolCallEnd(fields: {
   toolCallId: string
   toolCallName?: string
-  toolName?: string
   input?: unknown
   result?: string
   state?: ToolOutputState
@@ -61,9 +60,7 @@ function toolCallEnd(fields: {
   return {
     type: EventType.TOOL_CALL_END,
     timestamp: Date.now(),
-    ...fields,
-    // `toolName` is required on the merged event type; mirror the alias.
-    toolName: fields.toolName ?? fields.toolCallName ?? '',
+    toolCallId: fields.toolCallId,
   }
 }
 
@@ -71,7 +68,7 @@ describe('ToolCallManager', () => {
   const mockFinishedEvent = {
     type: 'RUN_FINISHED',
     runId: 'test-run-id',
-    model: 'gpt-4',
+    model: 'gpt-5.5',
     timestamp: Date.now(),
     finishReason: 'tool_calls',
   } as unknown as RunFinishedEvent
@@ -191,8 +188,10 @@ describe('ToolCallManager', () => {
     // Should emit one TOOL_CALL_END event
     expect(emittedChunks).toHaveLength(1)
     expect(emittedChunks[0]?.type).toBe('TOOL_CALL_END')
-    expect(emittedChunks[0]?.toolCallId).toBe('call_123')
-    expect(emittedChunks[0]?.result).toContain('temp')
+    if (emittedChunks[0]?.type === 'TOOL_CALL_END') {
+      expect(emittedChunks[0].toolCallId).toBe('call_123')
+      expect(emittedChunks[0].result).toContain('temp')
+    }
 
     // Should return one tool result message
     expect(finalResult).toHaveLength(1)
@@ -398,8 +397,14 @@ describe('ToolCallManager', () => {
 
     // Should emit two TOOL_CALL_END events
     expect(chunks).toHaveLength(2)
-    expect(chunks[0]?.toolCallId).toBe('call_weather')
-    expect(chunks[1]?.toolCallId).toBe('call_calc')
+    expect(chunks[0]?.type).toBe('TOOL_CALL_END')
+    expect(chunks[1]?.type).toBe('TOOL_CALL_END')
+    if (chunks[0]?.type === 'TOOL_CALL_END') {
+      expect(chunks[0].toolCallId).toBe('call_weather')
+    }
+    if (chunks[1]?.type === 'TOOL_CALL_END') {
+      expect(chunks[1].toolCallId).toBe('call_calc')
+    }
 
     // Should return two tool result messages
     expect(toolResults).toHaveLength(2)
@@ -467,17 +472,69 @@ describe('ToolCallManager', () => {
         }),
       )
 
+      manager.addToolCallArgsEvent(
+        toolCallArgs({
+          toolCallId: 'call_123',
+          delta: '{"location":"New York"}',
+        }),
+      )
+
       manager.completeToolCall(
         toolCallEnd({
           toolCallId: 'call_123',
           toolCallName: 'get_weather',
-          input: { location: 'New York' },
         }),
       )
 
       const toolCalls = manager.getToolCalls()
       expect(toolCalls).toHaveLength(1)
       expect(toolCalls[0]?.function.arguments).toBe('{"location":"New York"}')
+    })
+
+    it('should ignore a repeat TOOL_CALL_START for an already-tracked toolCallId (same explicit index)', () => {
+      const manager = new ToolCallManager([mockWeatherTool])
+
+      // AG-UI's TOOL_CALL_START carries no `index`, but first-party adapter
+      // yields still attach one (see AdapterYieldChunk). Build the event
+      // directly so the explicit index survives, matching this issue's repro.
+      const startWithIndex = (index: number) =>
+        ({
+          ...toolCallStart({
+            toolCallId: 'call_123',
+            toolCallName: 'get_weather',
+          }),
+          index,
+        }) as ToolCallStartEvent
+
+      manager.addToolCallStartEvent(startWithIndex(0))
+      manager.addToolCallArgsEvent(
+        toolCallArgs({ toolCallId: 'call_123', delta: '{"location":"Paris"}' }),
+      )
+      // A malformed/custom-server stream re-sends START for the same id/index.
+      manager.addToolCallStartEvent(startWithIndex(0))
+
+      const toolCalls = manager.getToolCalls()
+      expect(toolCalls).toHaveLength(1)
+      // Accumulated arguments must survive the repeat START, not reset to ''.
+      expect(toolCalls[0]?.function.arguments).toBe('{"location":"Paris"}')
+    })
+
+    it('should ignore a repeat TOOL_CALL_START for an already-tracked toolCallId (no index)', () => {
+      const manager = new ToolCallManager([mockWeatherTool])
+
+      manager.addToolCallStartEvent(
+        toolCallStart({ toolCallId: 'call_123', toolCallName: 'get_weather' }),
+      )
+      // Repeat START with no index — must not insert a second row, which
+      // would otherwise make getToolCalls() return the id twice and run
+      // the tool twice.
+      manager.addToolCallStartEvent(
+        toolCallStart({ toolCallId: 'call_123', toolCallName: 'get_weather' }),
+      )
+
+      const toolCalls = manager.getToolCalls()
+      expect(toolCalls).toHaveLength(1)
+      expect(toolCalls.filter((tc) => tc.id === 'call_123')).toHaveLength(1)
     })
   })
 })
@@ -542,12 +599,15 @@ describe('executeToolCalls', () => {
       const result = await drainExecuteToolCalls(
         toolCalls,
         [clientToolWithApproval],
+        'thread-1',
         new Map(),
         new Map(),
       )
 
       expect(result.needsApproval).toHaveLength(1)
       expect(result.needsApproval[0]?.toolCallId).toBe('call_1')
+      expect(result.needsApproval[0]?.toolName).toBe('delete_local_data')
+      expect(result.needsApproval[0]?.input).toEqual({ key: 'myKey' })
       expect(result.needsApproval[0]?.approvalId).toBe('approval_call_1')
       expect(result.results).toHaveLength(0)
       expect(result.needsClientExecution).toHaveLength(0)
@@ -562,6 +622,7 @@ describe('executeToolCalls', () => {
       const result = await drainExecuteToolCalls(
         toolCalls,
         [clientToolWithApproval],
+        'thread-1',
         approvals,
         new Map(), // No client results yet
       )
@@ -584,6 +645,7 @@ describe('executeToolCalls', () => {
       const result = await drainExecuteToolCalls(
         toolCalls,
         [clientToolWithApproval],
+        'thread-1',
         approvals,
         clientResults,
       )
@@ -604,6 +666,7 @@ describe('executeToolCalls', () => {
       const result = await drainExecuteToolCalls(
         toolCalls,
         [clientToolWithApproval],
+        'thread-1',
         approvals,
         new Map(),
       )
@@ -613,8 +676,32 @@ describe('executeToolCalls', () => {
         error: 'User declined tool execution',
       })
       expect(result.results[0]?.state).toBe('output-error')
+      expect(result.results[0]?.outcome).toBe('denied')
       expect(result.needsClientExecution).toHaveLength(0)
       expect(result.needsApproval).toHaveLength(0)
+    })
+
+    it('marks cancelled tool calls separately from execution errors', async () => {
+      const result = await drainExecuteToolCalls(
+        [makeToolCall('call_1', 'get_local_data', '{"key":"myKey"}')],
+        [clientToolWithoutApproval],
+        'thread-1',
+        new Map(),
+        new Map(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { cancelledToolCallIds: new Set(['call_1']) },
+      )
+
+      expect(result.results).toHaveLength(1)
+      expect(result.results[0]?.result).toEqual({
+        error: 'Tool execution cancelled',
+      })
+      expect(result.results[0]?.state).toBe('output-error')
+      expect(result.results[0]?.outcome).toBe('cancelled')
+      expect(result.needsClientExecution).toHaveLength(0)
     })
 
     it('should treat approval response object as a real result if leaked into clientResults (bug scenario)', async () => {
@@ -642,6 +729,7 @@ describe('executeToolCalls', () => {
       const result = await drainExecuteToolCalls(
         toolCalls,
         [clientToolWithApproval],
+        'thread-1',
         approvals,
         clientResults,
       )
@@ -667,6 +755,7 @@ describe('executeToolCalls', () => {
       const result = await drainExecuteToolCalls(
         toolCalls,
         [clientToolWithoutApproval],
+        'thread-1',
         new Map(),
         new Map(),
       )
@@ -685,6 +774,7 @@ describe('executeToolCalls', () => {
       const result = await drainExecuteToolCalls(
         toolCalls,
         [clientToolWithoutApproval],
+        'thread-1',
         new Map(),
         clientResults,
       )
@@ -707,6 +797,7 @@ describe('executeToolCalls', () => {
       const result = await drainExecuteToolCalls(
         toolCalls,
         [tool],
+        'thread-1',
         new Map(),
         clientResults,
       )
@@ -716,6 +807,34 @@ describe('executeToolCalls', () => {
       expect(result.results[0]?.result).toMatchObject({
         error: expect.stringContaining('Validation failed'),
       })
+    })
+
+    it('supports async output schemas for client tool results', async () => {
+      const outputSchema: StandardSchemaV1<unknown, { count: number }> = {
+        '~standard': {
+          version: 1,
+          vendor: 'test',
+          validate: async () => ({ value: { count: 2 } }),
+        },
+      }
+      const tool: Tool = {
+        name: 'get_count',
+        description: 'Get a count',
+        inputSchema: z.object({}),
+        outputSchema,
+      }
+      const toolCalls = [makeToolCall('call_1', 'get_count')]
+      const clientResults = new Map([['call_1', { count: '2' }]])
+
+      const result = await drainExecuteToolCalls(
+        toolCalls,
+        [tool],
+        'thread-1',
+        new Map(),
+        clientResults,
+      )
+
+      expect(result.results[0]?.result).toEqual({ count: 2 })
     })
 
     it('validates null client tool results against outputSchema', async () => {
@@ -731,6 +850,7 @@ describe('executeToolCalls', () => {
       const result = await drainExecuteToolCalls(
         toolCalls,
         [tool],
+        'thread-1',
         new Map(),
         clientResults,
       )
@@ -755,6 +875,7 @@ describe('executeToolCalls', () => {
       const result = await drainExecuteToolCalls(
         toolCalls,
         [tool],
+        'thread-1',
         new Map(),
         clientResults,
       )
@@ -779,12 +900,44 @@ describe('executeToolCalls', () => {
       const result = await drainExecuteToolCalls(
         toolCalls,
         [tool],
+        'thread-1',
         new Map(),
         clientResults,
       )
 
       expect(result.results).toHaveLength(1)
       expect(result.results[0]?.result).toBe(false)
+    })
+
+    it('preserves failed client tool results', async () => {
+      const tool: Tool = {
+        name: 'get_count',
+        description: 'Get a count',
+        inputSchema: z.object({}),
+        outputSchema: z.object({ count: z.number() }),
+      }
+      const toolCalls = [makeToolCall('call_1', 'get_count')]
+      const result = await drainExecuteToolCalls(
+        toolCalls,
+        [tool],
+        'thread-1',
+        new Map(),
+        new Map(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          clientToolErrors: new Map([['call_1', 'Client execution failed']]),
+        },
+      )
+
+      expect(result.results).toEqual([
+        expect.objectContaining({
+          result: { error: 'Client execution failed' },
+          state: 'output-error',
+        }),
+      ])
     })
   })
 
@@ -797,12 +950,16 @@ describe('executeToolCalls', () => {
       const result = await drainExecuteToolCalls(
         toolCalls,
         [serverToolWithApproval],
+        'thread-1',
         new Map(),
         new Map(),
       )
 
       expect(result.needsApproval).toHaveLength(1)
       expect(result.needsApproval[0]?.approvalId).toBe('approval_call_1')
+      expect(result.needsApproval[0]?.toolCallId).toBe('call_1')
+      expect(result.needsApproval[0]?.toolName).toBe('delete_record')
+      expect(result.needsApproval[0]?.input).toEqual({ id: 'rec_123' })
       expect(result.results).toHaveLength(0)
     })
 
@@ -815,6 +972,7 @@ describe('executeToolCalls', () => {
       const result = await drainExecuteToolCalls(
         toolCalls,
         [serverToolWithApproval],
+        'thread-1',
         approvals,
         new Map(),
       )
@@ -829,6 +987,40 @@ describe('executeToolCalls', () => {
   })
 
   describe('mixed approval batch gating', () => {
+    it('should batch plain client execution requests with pending approvals', async () => {
+      vi.mocked(serverToolWithApproval.execute!).mockClear()
+      const plainClientTool: Tool = {
+        name: 'show_notification',
+        description: 'Show a notification in the client',
+        inputSchema: z.object({ message: z.string() }),
+      }
+
+      const toolCalls = [
+        makeToolCall('call_1', 'delete_record', '{"id":"rec_123"}'),
+        makeToolCall('call_2', 'show_notification', '{"message":"done"}'),
+      ]
+
+      const result = await drainExecuteToolCalls(
+        toolCalls,
+        [serverToolWithApproval, plainClientTool],
+        'thread-1',
+        new Map(),
+        new Map(),
+      )
+
+      expect(result.needsApproval).toHaveLength(1)
+      expect(result.needsApproval[0]?.toolCallId).toBe('call_1')
+      expect(result.needsClientExecution).toEqual([
+        {
+          toolCallId: 'call_2',
+          toolName: 'show_notification',
+          input: { message: 'done' },
+        },
+      ])
+      expect(result.results).toHaveLength(0)
+      expect(serverToolWithApproval.execute).not.toHaveBeenCalled()
+    })
+
     it('should not execute non-approval tools when the same batch contains unapproved tools', async () => {
       // Non-approval tools should wait until all approvals in the batch are resolved,
       // otherwise side effects happen before the user has a chance to deny.
@@ -847,6 +1039,7 @@ describe('executeToolCalls', () => {
       const result = await drainExecuteToolCalls(
         toolCalls,
         [serverToolWithApproval, normalTool],
+        'thread-1',
         new Map(), // No approval decision yet
         new Map(),
       )
@@ -881,6 +1074,7 @@ describe('executeToolCalls', () => {
       const result = await drainExecuteToolCalls(
         toolCalls,
         [serverToolWithApproval, normalTool],
+        'thread-1',
         approvals,
         new Map(),
       )
@@ -894,6 +1088,33 @@ describe('executeToolCalls', () => {
   })
 
   describe('argument normalization', () => {
+    it('should return malformed arguments as an error result', async () => {
+      const execute = vi.fn(() => ({ ok: true }))
+      const tool: Tool = {
+        name: 'test_tool',
+        description: 'Test tool',
+        execute,
+      }
+      const result = await drainExecuteToolCalls(
+        [makeToolCall('call_1', 'test_tool', '{')],
+        [tool],
+        'thread-1',
+      )
+
+      expect(execute).not.toHaveBeenCalled()
+      expect(result.results).toEqual([
+        {
+          toolCallId: 'call_1',
+          toolName: 'test_tool',
+          result: { error: 'Failed to parse tool arguments as JSON: {' },
+          input: {},
+          state: 'output-error',
+        },
+      ])
+      expect(result.needsApproval).toHaveLength(0)
+      expect(result.needsClientExecution).toHaveLength(0)
+    })
+
     it('should normalize empty arguments to empty object', async () => {
       const tool: Tool = {
         name: 'simple_tool',
@@ -907,6 +1128,7 @@ describe('executeToolCalls', () => {
       const result = await drainExecuteToolCalls(
         toolCalls,
         [tool],
+        'thread-1',
         new Map(),
         new Map(),
       )

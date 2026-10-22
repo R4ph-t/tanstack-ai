@@ -3,9 +3,7 @@ id: ToolResultPart
 title: ToolResultPart
 ---
 
-# Interface: ToolResultPart
-
-Defined in: [packages/ai/src/types.ts:400](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L400)
+Defined in: packages/ai/src/types.ts:524
 
 ## Properties
 
@@ -17,17 +15,69 @@ content:
   | ContentPart<unknown, unknown, unknown, unknown, unknown>[];
 ```
 
-Defined in: [packages/ai/src/types.ts:403](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L403)
+Defined in: packages/ai/src/types.ts:529
+
+***
+
+### createdAt?
+
+```ts
+optional createdAt?: Date;
+```
+
+Defined in: packages/ai/src/types.ts:535
 
 ***
 
 ### error?
 
 ```ts
-optional error: string;
+optional error?: string;
 ```
 
-Defined in: [packages/ai/src/types.ts:405](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L405)
+Defined in: packages/ai/src/types.ts:533
+
+***
+
+### id?
+
+```ts
+optional id?: string;
+```
+
+Defined in: packages/ai/src/types.ts:526
+
+***
+
+### metadata?
+
+```ts
+optional metadata?: Record<string, unknown>;
+```
+
+Defined in: packages/ai/src/types.ts:534
+
+***
+
+### name?
+
+```ts
+optional name?: string;
+```
+
+Defined in: packages/ai/src/types.ts:527
+
+***
+
+### outcome?
+
+```ts
+optional outcome?: ToolResultOutcome;
+```
+
+Defined in: packages/ai/src/types.ts:532
+
+Set when the user or middleware cancelled or denied the tool call; state remains `error`.
 
 ***
 
@@ -37,7 +87,7 @@ Defined in: [packages/ai/src/types.ts:405](https://github.com/TanStack/ai/blob/m
 state: ToolResultState;
 ```
 
-Defined in: [packages/ai/src/types.ts:404](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L404)
+Defined in: packages/ai/src/types.ts:530
 
 ***
 
@@ -47,7 +97,7 @@ Defined in: [packages/ai/src/types.ts:404](https://github.com/TanStack/ai/blob/m
 toolCallId: string;
 ```
 
-Defined in: [packages/ai/src/types.ts:402](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L402)
+Defined in: packages/ai/src/types.ts:528
 
 ***
 
@@ -57,4 +107,4 @@ Defined in: [packages/ai/src/types.ts:402](https://github.com/TanStack/ai/blob/m
 type: "tool-result";
 ```
 
-Defined in: [packages/ai/src/types.ts:401](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L401)
+Defined in: packages/ai/src/types.ts:525

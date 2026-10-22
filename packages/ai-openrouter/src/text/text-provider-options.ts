@@ -26,8 +26,6 @@ export type PluginAutoRouter = Extract<Plugin, { id: 'auto-router' }>
 
 export type PdfParserOptions = NonNullable<PluginFileParser['pdf']>
 
-export type ReasoningOptions = NonNullable<ChatRequest['reasoning']>
-
 export type StreamOptions = NonNullable<ChatRequest['streamOptions']>
 
 // ---------------------------------------------------------------------------
@@ -84,7 +82,6 @@ export type OpenRouterBaseOptions = Pick<
   | 'topLogprobs'
   | 'seed'
   | 'responseFormat'
-  | 'reasoning'
   | 'toolChoice'
   | 'parallelToolCalls'
 >

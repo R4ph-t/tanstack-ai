@@ -1,48 +1,130 @@
-import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { Client } from '@modelcontextprotocol/client'
 import {
   DuplicateToolNameError,
   MCPConnectionError,
+  MCPEventConfigError,
   MCPTaskRequiredToolError,
+  MCPToolFilterError,
   MCPToolNotFoundError,
 } from './errors'
-import { makeMcpExecute, requiresTaskExecution, toServerTools } from './tools'
+import { listPages } from './list-pages'
+import {
+  serverSupportsEvents,
+  withEventsClientCapability,
+} from './events/capability'
+import { createDirectMCPEvents } from './events/direct'
+import { createDiscoveryMCPEvents } from './events/discovery'
+import {
+  createManagedMCPEvents,
+  validateMCPEventOperations,
+} from './events/managed'
+import type {
+  DirectMCPEventsOptions,
+  ManagedMCPEvents,
+  ManagedMCPEventsOptions,
+  MCPEventAdapterTransport,
+  MCPEventOperations,
+  MCPEvents,
+  MCPEventsContext,
+  MCPEventsOptions,
+} from './events/types'
+import {
+  callMcpTool,
+  makeMcpExecute,
+  requiresTaskExecution,
+  sdkRequestOptions,
+  serverSupportsTaskCalls,
+  toolMcpMetadata,
+  toServerTools,
+} from './tools'
+import { directMCPClient } from './direct-client'
 import { isTransportInstance, resolveTransport } from './transport'
-import type { TransportConfig } from './transport'
+import type {
+  DescriptorFromServer,
+  DirectClientOptions,
+  DirectMCPClient,
+} from './direct-client'
+import type { MCPServer } from './server/create-server'
+import type { TransportConfig, TransportInput } from './transport'
 import type {
   AnyToolDefinition,
   AutomaticDescriptor,
   DescriptorTools,
   MCPClientOptions,
   MappedServerTools,
+  McpServerTool,
   ServerDescriptor,
   ToolsOptions,
 } from './types'
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type {
+  ClientOptions,
+  DiscoverResult,
   GetPromptResult,
+  McpSubscription,
+  PriorDiscovery,
   Prompt,
   ReadResourceResult,
+  Request as McpRequest,
+  RequestMethod,
+  RequestOptions,
   Resource,
-  ResourceTemplate,
-} from '@modelcontextprotocol/sdk/types.js'
+  ResourceTemplateType,
+  StandardSchemaV1,
+  Tool as McpToolDef,
+  Transport,
+} from '@modelcontextprotocol/client'
 import type { ServerTool } from '@tanstack/ai'
+
+type CallToolResult = Awaited<ReturnType<Client['callTool']>>
+
+/**
+ * The raw MCP result of `callTool`. When the tool output type is known,
+ * `structuredContent` has that type. An untyped tool keeps the SDK type.
+ */
+export type TypedCallToolResult<TOutput> = unknown extends TOutput
+  ? CallToolResult
+  : Omit<CallToolResult, 'structuredContent'> & { structuredContent?: TOutput }
+
+type ToolPolicy = Pick<
+  MCPClientOptions,
+  'toolFilter' | 'needsApproval' | 'toolName' | 'requestOptions'
+>
 
 export interface MCPClient<
   TServer extends ServerDescriptor = AutomaticDescriptor,
 > {
   readonly capabilities: TServer['capabilities']
   /**
+   * The server's instructions from the connect handshake: how to use its
+   * tools, meant for the model's system prompt. `undefined` when the server
+   * sends none.
+   *
+   * Optional so an existing hand-rolled `MCPClient` keeps compiling.
+   */
+  readonly instructions?: string
+  /**
+   * The `server/discover` result of this connection, or the `prior` it
+   * adopted. Save it and pass it back as `prior: { kind: 'modern', discover }`
+   * to skip the `server/discover` request on a later connect. `undefined`
+   * when the server speaks protocol `2025-11-25`, or after a
+   * `{ kind: 'legacy' }` prior.
+   */
+  getDiscoverResult: () => DiscoverResult | undefined
+  /**
    * Auto-discovery: every server tool as a ServerTool. With a generated
    * descriptor, tool names are typed as the descriptor's name literals;
    * args/results stay untyped — use the `tools(defs)` overload for typed args.
+   *
+   * Both overloads yield {@link McpServerTool}s, so `tool.metadata.mcp` (the
+   * server's title / annotations) is typed without an annotation or a cast.
    */
   tools: {
     (options?: ToolsOptions): Promise<DescriptorTools<TServer>>
     /**
      * Explicit: bind these TanStack toolDefinitions to the server (typed +
-     * validated, allowlist). Note: when the client has a `prefix`, the
-     * runtime tool name is `${prefix}_${def.name}` while the static `TName`
-     * stays the unprefixed definition name.
+     * validated, allowlist). Note: the runtime tool name is `toolName(tool)`
+     * when the client sets `toolName`, else `${prefix}_${def.name}` with a
+     * `prefix`. The static `TName` stays the definition name.
      */
     <const TDefs extends ReadonlyArray<AnyToolDefinition>>(
       defs: TDefs,
@@ -50,17 +132,47 @@ export interface MCPClient<
     ): Promise<MappedServerTools<TDefs>>
   }
   resources: () => Promise<Array<Resource>>
-  readResource: (uri: string) => Promise<ReadResourceResult>
-  resourceTemplates: () => Promise<Array<ResourceTemplate>>
+  /**
+   * Reads one resource. With a typed server, `uri` is one of its resource URIs.
+   */
+  readResource: (
+    uri: TServer['resources'][keyof TServer['resources']]['uri'],
+  ) => Promise<ReadResourceResult>
+  resourceTemplates: () => Promise<Array<ResourceTemplateType>>
   prompts: () => Promise<Array<Prompt>>
-  getPrompt: (
-    name: string,
-    args?: Record<string, string>,
+  /**
+   * Renders one prompt. With a typed server, `name` is one of its prompt
+   * names and `args` has that prompt's argument type. MCP sends each
+   * argument as a string.
+   */
+  getPrompt: <TName extends keyof TServer['prompts'] & string>(
+    name: TName,
+    args?: TServer['prompts'][TName]['args'],
   ) => Promise<GetPromptResult>
-  callTool: (
-    name: string,
-    args?: Record<string, unknown>,
-  ) => Promise<Awaited<ReturnType<Client['callTool']>>>
+  /**
+   * Call a tool directly and return its raw MCP result. Tools declaring
+   * `execution.taskSupport: 'required'` automatically use task execution when
+   * the server declares the tasks capability for tools/call. Pass
+   * `options.signal` to abort — an in-flight task is best-effort cancelled on
+   * the server.
+   *
+   * With a typed server, `name` is one of its tool names and `args` has
+   * that tool's input type. The result is the raw MCP result. For a tool
+   * with an output schema, `structuredContent` has the tool output type.
+   */
+  callTool: <TName extends keyof TServer['tools'] & string>(
+    name: TName,
+    args?: TServer['tools'][TName]['input'],
+    options?: { signal?: AbortSignal },
+  ) => Promise<TypedCallToolResult<TServer['tools'][TName]['output']>>
+  /**
+   * Sends one request with the SDK `Client.request`, with the same
+   * arguments. Use it for a method this client has no helper for, such as
+   * a method of an MCP extension. Pass a result schema as the second
+   * argument for a method that is not in the MCP spec. The client's
+   * `requestOptions` apply under the options you pass.
+   */
+  request: Client['request']
   /**
    * The ORIGINAL connection descriptor this client was created from — the
    * `transport` input and `prefix` passed to `createMCPClient`. Used by
@@ -76,53 +188,214 @@ export interface MCPClient<
   getInfo: () => {
     transport: TransportConfig | undefined
     prefix: string | undefined
+    /**
+     * The options this client was built with, so a caller that reconstructs it
+     * from this descriptor keeps them. Without it a rebuilt client silently
+     * reverts to the SDK defaults — including the AJV validator that edge
+     * runtimes cannot compile.
+     *
+     * Optional so an existing hand-rolled `MCPClient` keeps compiling.
+     */
+    clientOptions?: ClientOptions
+    toolFilter?: MCPClientOptions['toolFilter']
+    needsApproval?: MCPClientOptions['needsApproval']
+    toolName?: MCPClientOptions['toolName']
+    requestOptions?: MCPClientOptions['requestOptions']
   }
   close: () => Promise<void>
   [Symbol.asyncDispose]: () => Promise<void>
+  /**
+   * MCP Events (SEP-3415). Always present after `createMCPClient` connects
+   * over a transport. Optional so a hand-rolled `MCPClient` keeps compiling.
+   *
+   * Managed mode narrows this to {@link ManagedMCPEvents} via overloads.
+   *
+   * @experimental
+   */
+  readonly experimental_events?: MCPEvents
 }
 
-class MCPClientImpl<
-  TServer extends ServerDescriptor,
-> implements MCPClient<TServer> {
+/**
+ * Client created with `experimental_events: { adapter }`.
+ *
+ * @experimental
+ */
+export type ManagedMCPClient<
+  TDescriptor extends ServerDescriptor = AutomaticDescriptor,
+> = Omit<MCPClient<TDescriptor>, 'experimental_events'> & {
+  readonly experimental_events: ManagedMCPEvents
+}
+
+class MCPClientImpl<TServer extends ServerDescriptor> implements Omit<
+  MCPClient<TServer>,
+  'experimental_events'
+> {
   capabilities: TServer['capabilities'] = {}
+  instructions: string | undefined
+  experimental_events?: MCPEvents | ManagedMCPEvents
   readonly #client: Client
   #closed = false
+  #toolDefinitions?: Map<string, McpToolDef>
+  // Open only after a spec 2026 connect when the server can report tool changes.
+  #toolListSubscription?: McpSubscription
   private readonly prefix?: string
   // The ORIGINAL serializable transport config (undefined for clients built
   // from a ready-made Transport instance, which is single-use / not reconnectable).
   readonly #transport: TransportConfig | undefined
+  // Retained for the same reason as #transport: the MCP Apps call handler
+  // rebuilds a client per call from getInfo(), and a rebuilt client that lost
+  // `jsonSchemaValidator` falls straight back to AJV.
+  readonly #clientOptions: ClientOptions | undefined
+  readonly #policy: ToolPolicy
+  readonly #eventsOptions?: MCPEventsOptions
+  readonly #eventsTransport: MCPEventAdapterTransport
+  readonly #managedOps?: MCPEventOperations
 
   constructor(
     prefix?: string,
     name = 'tanstack-ai-mcp',
     version = '0.0.1',
     transport?: TransportConfig,
+    clientOptions?: ClientOptions,
+    policy: ToolPolicy = {},
+    eventsSetup?: {
+      options?: MCPEventsOptions
+      transport: MCPEventAdapterTransport
+    },
   ) {
     this.prefix = prefix
     this.#transport = transport
-    this.#client = new Client({ name, version })
+    this.#clientOptions = clientOptions
+    this.#policy = policy
+    this.#eventsOptions = eventsSetup?.options
+    this.#eventsTransport = eventsSetup?.transport ?? { type: 'custom' }
+    this.#managedOps = bindManagedOperations(
+      eventsSetup?.options,
+      this.#eventsTransport,
+    )
+    const capabilities = {
+      elicitation: { form: {} },
+      sampling: {},
+      ...clientOptions?.capabilities,
+    }
+    // Try spec 2026-07-28 first. If the server does not support it, the
+    // client uses the 2025 initialize handshake. Caller options still apply.
+    // `mode` stays `auto` even when `clientOptions` sets another mode.
+    // A spec 2026 server returns `input_required` only to a client that
+    // declares elicitation and sampling. `chat()` turns that result into an
+    // `mcp_input` interrupt, so the client declares both by default.
+    this.#client = new Client(
+      { name, version },
+      {
+        ...clientOptions,
+        capabilities:
+          eventsSetup?.options === undefined
+            ? capabilities
+            : withEventsClientCapability(capabilities),
+        versionNegotiation: {
+          ...clientOptions?.versionNegotiation,
+          mode: 'auto',
+        },
+      },
+    )
   }
 
   getInfo(): {
     transport: TransportConfig | undefined
     prefix: string | undefined
+    clientOptions?: ClientOptions
+    toolFilter?: MCPClientOptions['toolFilter']
+    needsApproval?: MCPClientOptions['needsApproval']
+    toolName?: MCPClientOptions['toolName']
+    requestOptions?: MCPClientOptions['requestOptions']
   } {
-    return { transport: this.#transport, prefix: this.prefix }
+    const { toolFilter, needsApproval, toolName, requestOptions } = this.#policy
+    return {
+      transport: this.#transport,
+      prefix: this.prefix,
+      ...(this.#clientOptions ? { clientOptions: this.#clientOptions } : {}),
+      ...(toolFilter ? { toolFilter } : {}),
+      ...(needsApproval ? { needsApproval } : {}),
+      ...(toolName ? { toolName } : {}),
+      ...(requestOptions ? { requestOptions } : {}),
+    }
   }
 
-  async connect(transport: Transport): Promise<void> {
+  async connect(transport: Transport, prior?: PriorDiscovery): Promise<void> {
     try {
-      await this.#client.connect(transport)
+      // A tools/list_changed notice drops the cached definitions so the next
+      // callTool reads each tool's execution mode again.
+      this.#client.setNotificationHandler(
+        'notifications/tools/list_changed',
+        () => {
+          this.#toolDefinitions = undefined
+        },
+      )
+      // The connect handshake gets the request options too, so `timeout`
+      // also limits a server that does not answer while it connects.
+      // With `prior`, the SDK skips the server/discover probe and sends
+      // nothing here, so a dead or unauthorized server fails on first use.
+      await this.#client.connect(transport, {
+        ...sdkRequestOptions(this.#policy.requestOptions),
+        prior,
+      })
       this.capabilities = this.#client.getServerCapabilities() ?? {}
+      this.instructions = this.#client.getInstructions()
+      this.experimental_events = this.#createEventsApi()
+      // A failed listen only means that tool changes are not pushed.
+      // The connection still works, so the error does not fail connect.
+      await this.#listenForToolListChanges().catch(() => undefined)
     } catch (err) {
+      await this.#toolListSubscription?.close().catch(() => undefined)
+      await this.#client.close().catch(() => undefined)
       throw new MCPConnectionError('Failed to connect to MCP server', err)
     }
+  }
+
+  // Spec 2026 does not push tool-list changes. Open subscriptions/listen when
+  // the server says it can report them. The notice handler above drops the cache.
+  async #listenForToolListChanges() {
+    if (this.#client.getProtocolEra() !== 'modern') return
+    const tools = this.#client.getServerCapabilities()?.tools
+    if (tools?.listChanged !== true) return
+    this.#toolListSubscription = await this.#client.listen({
+      toolsListChanged: true,
+    })
+  }
+
+  // Read every tools/list page into the definition cache.
+  // listPages throws when a cursor repeats or the page cap is passed.
+  // A raw list does not compile `jsonSchemaValidator`. On spec 2025, SDK
+  // `callTool` then skips output checks. So `tools()` follows the raw walk
+  // with `listTools()` to fill the SDK cache and run the validator.
+  // Spec 2026 calls pass the listed input schema to `callTool` for the
+  // Mcp-Param-* headers, and do not read that cache. So the second walk is
+  // skipped there.
+  // `raw: true` is the lazy `callTool` path. It must stay free of that cache.
+  async #listTools(options?: { raw?: boolean }) {
+    const client = this.#client
+    const requestOptions = sdkRequestOptions(this.#policy.requestOptions)
+    const defs = await listPages(async (cursor) => {
+      const page =
+        cursor === undefined
+          ? await client.request({ method: 'tools/list' }, requestOptions)
+          : await client.request(
+              { method: 'tools/list', params: { cursor } },
+              requestOptions,
+            )
+      return { items: page.tools, nextCursor: page.nextCursor }
+    })
+    this.#toolDefinitions = new Map(defs.map((def) => [def.name, def]))
+    if (options?.raw !== true && client.getProtocolEra() !== 'modern') {
+      await client.listTools(undefined, requestOptions)
+    }
+    return defs
   }
 
   async tools(
     defsOrOptions?: ReadonlyArray<AnyToolDefinition> | ToolsOptions,
     maybeOptions: ToolsOptions = {},
-  ): Promise<Array<ServerTool>> {
+  ): Promise<Array<McpServerTool>> {
     if (this.#closed) throw new MCPConnectionError('MCP client is closed')
 
     const isDefs = Array.isArray(defsOrOptions)
@@ -131,44 +404,79 @@ class MCPClientImpl<
       : // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
         ((defsOrOptions as ToolsOptions) ?? {}) // SDK interop: defsOrOptions may be undefined at runtime even though TS types it as ToolsOptions here
 
-    let tools: Array<ServerTool>
+    const { toolFilter, needsApproval, toolName, requestOptions } = this.#policy
+    const listed = await this.#listTools()
+    const defs = applyToolFilter(
+      listed,
+      toolFilter,
+      serverSupportsTaskCalls(this.#client),
+    )
+
+    let tools: Array<McpServerTool>
     if (isDefs) {
       // Explicit path: bind each TanStack toolDefinition to the server by name.
-      const available = new Map(
-        (await this.#client.listTools()).tools.map((t) => [t.name, t]),
-      )
+      const available = new Map(defs.map((tool) => [tool.name, tool]))
       tools = (defsOrOptions as ReadonlyArray<AnyToolDefinition>).map((def) => {
         const serverTool = available.get(def.name)
         if (!serverTool) throw new MCPToolNotFoundError(def.name)
-        // Explicitly binding a task-required tool is an error (it would fail
-        // on every callTool with -32600) — unlike discovery, which skips them.
-        if (requiresTaskExecution(serverTool))
+        // A task-required tool on a server without the tasks capability for
+        // tools/call cannot be invoked (every call fails) — refuse the binding.
+        if (
+          requiresTaskExecution(serverTool) &&
+          !serverSupportsTaskCalls(this.#client)
+        ) {
           throw new MCPTaskRequiredToolError(def.name)
-        const tool = def.server(
-          makeMcpExecute(this.#client, def.name, Boolean(def.outputSchema)),
+        }
+        const bound = def.server(
+          makeMcpExecute(
+            this.#client,
+            def.name,
+            Boolean(def.outputSchema),
+            requiresTaskExecution(serverTool),
+            requestOptions,
+            serverTool.inputSchema,
+          ),
         ) as ServerTool
-        if (this.prefix) tool.name = `${this.prefix}_${def.name}`
-        if (options.lazy) tool.lazy = true
-        // Stamp MCP metadata so `serverToolNameOf` (and the call handler) can
-        // recover the UNPREFIXED native name + serverId — mirror toServerTools.
-        // `metadata.mcp` is `unknown`; only spread it when it's a plain object.
-        const existingMcp = tool.metadata?.mcp
+        // A caller-supplied definition may already carry its own `mcp` block,
+        // and `metadata.mcp` is untyped there — only spread it when it really
+        // is a plain object.
+        const existingMcp: unknown = bound.metadata?.mcp
         const mcpBase =
           existingMcp !== null && typeof existingMcp === 'object'
             ? existingMcp
             : {}
-        tool.metadata = {
-          ...tool.metadata,
-          mcp: { ...mcpBase, serverToolName: def.name, serverId: this.prefix },
+        // Rebuilt rather than mutated in place: assigning `metadata` on a
+        // `ServerTool` can't narrow its declared `Record<string, any> |
+        // undefined` type, so a fresh literal is what lets the return value be
+        // an `McpServerTool` (typed `metadata.mcp`) without a cast.
+        //
+        // Stamping MCP metadata lets `serverToolNameOf` (and the call handler)
+        // recover the UNPREFIXED native name + serverId, and carries the
+        // server's display title / annotations to the host — mirrors
+        // toServerTools.
+        // `toolName` wins over the prefix. metadata.mcp keeps the server name.
+        const name =
+          toolName?.(serverTool) ??
+          (this.prefix ? `${this.prefix}_${def.name}` : def.name)
+        const tool: McpServerTool = {
+          ...bound,
+          name,
+          ...(options.lazy ? { lazy: true } : {}),
+          metadata: {
+            ...bound.metadata,
+            mcp: { ...mcpBase, ...toolMcpMetadata(serverTool, this.prefix) },
+          },
         }
         return tool
       })
     } else {
       // Auto-discovery path.
-      const defs = (await this.#client.listTools()).tools
       tools = toServerTools(this.#client, defs, {
         prefix: this.prefix,
+        toolName,
         lazy: options.lazy,
+        needsApproval,
+        requestOptions,
       })
     }
 
@@ -183,55 +491,270 @@ class MCPClientImpl<
 
   async resources(): Promise<Array<Resource>> {
     if (this.#closed) throw new MCPConnectionError('MCP client is closed')
-    return (await this.#client.listResources()).resources
+    const options = sdkRequestOptions(this.#policy.requestOptions)
+    return (await this.#client.listResources(undefined, options)).resources
   }
 
   async readResource(uri: string): Promise<ReadResourceResult> {
     if (this.#closed) throw new MCPConnectionError('MCP client is closed')
-    return this.#client.readResource({ uri })
+    const options = sdkRequestOptions(this.#policy.requestOptions)
+    return this.#client.readResource({ uri }, options)
   }
 
-  async resourceTemplates(): Promise<Array<ResourceTemplate>> {
+  async resourceTemplates(): Promise<Array<ResourceTemplateType>> {
     if (this.#closed) throw new MCPConnectionError('MCP client is closed')
-    return (await this.#client.listResourceTemplates()).resourceTemplates
+    const options = sdkRequestOptions(this.#policy.requestOptions)
+    return (await this.#client.listResourceTemplates(undefined, options))
+      .resourceTemplates
   }
 
   async prompts(): Promise<Array<Prompt>> {
     if (this.#closed) throw new MCPConnectionError('MCP client is closed')
-    return (await this.#client.listPrompts()).prompts
+    const options = sdkRequestOptions(this.#policy.requestOptions)
+    return (await this.#client.listPrompts(undefined, options)).prompts
   }
 
-  async getPrompt(
-    name: string,
-    args?: Record<string, string>,
-  ): Promise<GetPromptResult> {
+  async getPrompt(name: string, args?: unknown): Promise<GetPromptResult> {
     if (this.#closed) throw new MCPConnectionError('MCP client is closed')
-    return this.#client.getPrompt({ name, arguments: args })
+    // MCP prompt arguments are strings.
+    const promptArgs = isArgs(args)
+      ? Object.fromEntries(
+          Object.entries(args).map(([key, value]) => [key, String(value)]),
+        )
+      : undefined
+    const options = sdkRequestOptions(this.#policy.requestOptions)
+    return this.#client.getPrompt({ name, arguments: promptArgs }, options)
   }
 
-  async callTool(
-    name: string,
-    args?: Record<string, unknown>,
-  ): Promise<Awaited<ReturnType<Client['callTool']>>> {
+  async callTool<TName extends keyof TServer['tools'] & string>(
+    name: TName,
+    args?: TServer['tools'][TName]['input'],
+    options?: { signal?: AbortSignal },
+  ): Promise<TypedCallToolResult<TServer['tools'][TName]['output']>> {
     if (this.#closed) throw new MCPConnectionError('MCP client is closed')
-    return this.#client.callTool({ name, arguments: args ?? {} })
+    if (!this.#toolDefinitions) {
+      // Lazy discovery so task-required tools work without a prior tools()
+      // call. Best-effort: a server whose tools/list fails (or omits the
+      // tool) still gets the plain tools/call it would have received before
+      // task support existed. See #listTools.
+      try {
+        await this.#listTools({ raw: true })
+      } catch {
+        // fall through to a plain tools/call
+      }
+    }
+    const definition = this.#toolDefinitions?.get(name)
+    const taskRequired =
+      definition !== undefined && requiresTaskExecution(definition)
+    // A known task-required tool on a server without the tasks capability can
+    // never execute — fail with the clear local error rather than the server's
+    // opaque -32600 (mirrors the tools([...defs]) binding guard).
+    if (taskRequired && !serverSupportsTaskCalls(this.#client)) {
+      throw new MCPTaskRequiredToolError(name)
+    }
+    const result = await callMcpTool(
+      this.#client,
+      name,
+      isArgs(args) ? args : {},
+      taskRequired,
+      options?.signal,
+      undefined,
+      this.#policy.requestOptions,
+      definition?.inputSchema,
+    )
+    // Trust boundary: the server type says what `structuredContent` holds.
+    // The client does not check the wire value against that type.
+    return result as TypedCallToolResult<TServer['tools'][TName]['output']>
+  }
+
+  // The SDK method is overloaded: (request, options?) for a spec method, and
+  // (request, resultSchema, options?) for any other. This takes both shapes
+  // and forwards the same one, so the casts to the SDK types are safe.
+  request = (async (
+    request: McpRequest,
+    schemaOrOptions?: StandardSchemaV1 | RequestOptions,
+    options?: RequestOptions,
+  ) => {
+    if (this.#closed) throw new MCPConnectionError('MCP client is closed')
+    const defaults = sdkRequestOptions(this.#policy.requestOptions)
+    if (schemaOrOptions !== undefined && '~standard' in schemaOrOptions) {
+      return this.#client.request(request, schemaOrOptions, {
+        ...defaults,
+        ...options,
+      })
+    }
+    return this.#client.request(
+      request as { method: RequestMethod; params?: Record<string, unknown> },
+      { ...defaults, ...schemaOrOptions },
+    )
+  }) as Client['request']
+
+  getDiscoverResult(): DiscoverResult | undefined {
+    return this.#client.getDiscoverResult()
   }
 
   async close(): Promise<void> {
     if (this.#closed) return
     this.#closed = true
-    await this.#client.close()
+    const subscription = this.#toolListSubscription
+    this.#toolListSubscription = undefined
+    try {
+      await subscription?.close()
+    } finally {
+      await this.#client.close()
+    }
   }
 
   async [Symbol.asyncDispose](): Promise<void> {
     await this.close()
   }
+
+  #createEventsApi(): MCPEvents | ManagedMCPEvents {
+    const ctx = this.#eventsContext()
+    if (this.#managedOps !== undefined) {
+      return createManagedMCPEvents(ctx, this.#managedOps)
+    }
+    if (
+      this.#eventsOptions !== undefined &&
+      isDirectEvents(this.#eventsOptions)
+    ) {
+      return createDirectMCPEvents(ctx, this.#eventsOptions)
+    }
+    return createDiscoveryMCPEvents(ctx)
+  }
+
+  #eventsContext(): MCPEventsContext {
+    return {
+      assertOpen: () => {
+        if (this.#closed) throw new MCPConnectionError('MCP client is closed')
+      },
+      supportsEvents: serverSupportsEvents(this.capabilities),
+      transport: this.#eventsTransport,
+      request: (method, params, schema, signal) =>
+        this.#client.request(
+          { method, params },
+          schema,
+          sdkRequestOptions(this.#policy.requestOptions, signal),
+        ),
+    }
+  }
 }
 
+function isArgs(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Applies the client `toolFilter` to the listed tools.
+ * A function keeps the tools it returns `true` for.
+ * A list keeps exactly the listed tools, in list order. A missing or
+ * repeated name throws `MCPToolFilterError`. A listed tool that needs a task
+ * on a server without task support throws `MCPTaskRequiredToolError`.
+ */
+function applyToolFilter(
+  listed: Array<McpToolDef>,
+  toolFilter: MCPClientOptions['toolFilter'],
+  supportsTasks: boolean,
+): Array<McpToolDef> {
+  if (toolFilter === undefined) return listed
+  if (typeof toolFilter === 'function') {
+    return listed.filter((def) => toolFilter(def))
+  }
+  const byName = new Map(listed.map((def) => [def.name, def]))
+  const seen = new Set<string>()
+  const repeated = new Set<string>()
+  const missing: Array<string> = []
+  const kept: Array<McpToolDef> = []
+  for (const name of toolFilter) {
+    if (seen.has(name)) {
+      repeated.add(name)
+      continue
+    }
+    seen.add(name)
+    const def = byName.get(name)
+    if (def === undefined) missing.push(name)
+    else kept.push(def)
+  }
+  if (missing.length > 0 || repeated.size > 0) {
+    throw new MCPToolFilterError({
+      missing,
+      repeated: [...repeated],
+      available: listed.map((def) => def.name),
+    })
+  }
+  const unsupported = kept.find(
+    (def) => requiresTaskExecution(def) && !supportsTasks,
+  )
+  if (unsupported !== undefined) {
+    throw new MCPTaskRequiredToolError(unsupported.name)
+  }
+  return kept
+}
+
+/**
+ * Connects to an MCP server.
+ *
+ * Pass `transport` for a server at a URL, on SSE, or on stdio.
+ * The client speaks MCP over that transport, so server auth applies.
+ *
+ * To type a transport client from a TanStack server, pass `typeof server`
+ * as the type argument. Import the server with `import type`.
+ *
+ * Pass `server` to call a `createMCPServer` result in this process.
+ * That client calls the tool functions directly. It opens no connection,
+ * and the server `auth` option does not run.
+ *
+ * @param options - A transport, or a TanStack MCP server in this process
+ *
+ * @example
+ * ```ts
+ * const remote = await createMCPClient<typeof server>({
+ *   transport: { type: 'http', url: 'https://mcp.example.com/mcp' },
+ * })
+ * await remote.callTool('get_weather', { city: 'Paris' })
+ *
+ * const local = await createMCPClient({ server })
+ * await local.callTool('get_weather', { city: 'Paris' })
+ * ```
+ */
 export async function createMCPClient<
+  TDescriptor extends ServerDescriptor = AutomaticDescriptor,
+>(
+  options: MCPClientOptions & { experimental_events: ManagedMCPEventsOptions },
+): Promise<ManagedMCPClient<TDescriptor>>
+export async function createMCPClient<TServer extends MCPServer>(
+  options: MCPClientOptions & { experimental_events: ManagedMCPEventsOptions },
+): Promise<ManagedMCPClient<DescriptorFromServer<TServer>>>
+export async function createMCPClient<TServer extends MCPServer>(
+  options: DirectClientOptions<TServer>,
+): Promise<DirectMCPClient<TServer>>
+export async function createMCPClient<
+  TDescriptor extends ServerDescriptor = AutomaticDescriptor,
+>(
+  options: MCPClientOptions,
+): Promise<MCPClient<TDescriptor> & { readonly experimental_events: MCPEvents }>
+export async function createMCPClient<TServer extends MCPServer>(
+  options: MCPClientOptions,
+): Promise<
+  MCPClient<DescriptorFromServer<TServer>> & {
+    readonly experimental_events: MCPEvents
+  }
+>
+export async function createMCPClient(
+  options: MCPClientOptions | DirectClientOptions<MCPServer>,
+): Promise<MCPClient | ManagedMCPClient | DirectMCPClient<MCPServer>> {
+  if ('server' in options) {
+    return directMCPClient(options.server)
+  }
+  return connectTransport(options)
+}
+
+async function connectTransport<
   TServer extends ServerDescriptor = AutomaticDescriptor,
->(options: MCPClientOptions): Promise<MCPClient<TServer>> {
-  const transport = await resolveTransport(options.transport)
+>(options: MCPClientOptions) {
+  const transport = await resolveTransport(options.transport, {
+    events: options.experimental_events !== undefined,
+  })
   const impl = new MCPClientImpl<TServer>(
     options.prefix,
     options.name,
@@ -239,16 +762,77 @@ export async function createMCPClient<
     // Only a serializable config is reconnectable; a ready-made Transport
     // instance is single-use, so it is not retained as a descriptor.
     isTransportInstance(options.transport) ? undefined : options.transport,
+    options.clientOptions,
+    {
+      toolFilter: options.toolFilter,
+      needsApproval: options.needsApproval,
+      toolName: options.toolName,
+      requestOptions: options.requestOptions,
+    },
+    {
+      options: options.experimental_events,
+      transport: eventsTransportOf(options.transport),
+    },
   )
-  await impl.connect(transport)
-  return impl
+  await impl.connect(transport, options.prior)
+  return impl as MCPClient<TServer> & {
+    readonly experimental_events: MCPEvents | ManagedMCPEvents
+  }
 }
 
 /** Test-only: connect directly from a transport instance (skips resolveTransport). */
 export async function createMCPClientFromTransport<
   TServer extends ServerDescriptor = AutomaticDescriptor,
->(transport: Transport, prefix?: string): Promise<MCPClient<TServer>> {
-  const impl = new MCPClientImpl<TServer>(prefix)
+>(
+  transport: Transport,
+  prefix?: string,
+  clientOptions?: ClientOptions,
+): Promise<MCPClient<TServer>> {
+  const impl = new MCPClientImpl<TServer>(
+    prefix,
+    undefined,
+    undefined,
+    undefined,
+    clientOptions,
+  )
   await impl.connect(transport)
-  return impl
+  return impl as MCPClient<TServer>
+}
+
+function isDirectEvents(
+  options: MCPEventsOptions,
+): options is DirectMCPEventsOptions {
+  return options.store !== undefined
+}
+
+function eventsTransportOf(input: TransportInput): MCPEventAdapterTransport {
+  if (isTransportInstance(input)) return { type: 'custom' }
+  if (input.type === 'http') return { type: 'http', url: input.url }
+  if (input.type === 'sse') return { type: 'sse', url: input.url }
+  return { type: 'custom' }
+}
+
+function bindManagedOperations(
+  options: MCPEventsOptions | undefined,
+  transport: MCPEventAdapterTransport,
+): MCPEventOperations | undefined {
+  if (options === undefined) return undefined
+  const hasStore = options.store !== undefined
+  const hasAdapter = options.adapter !== undefined
+  if (hasStore && hasAdapter) {
+    throw new MCPEventConfigError(
+      'experimental_events cannot include both store and adapter',
+    )
+  }
+  if (!hasStore && !hasAdapter) {
+    throw new MCPEventConfigError(
+      'experimental_events requires store or adapter',
+    )
+  }
+  if (!hasAdapter) return undefined
+  const adapter = options.adapter
+  if (typeof adapter.createAdapter !== 'function') {
+    throw new MCPEventConfigError('adapter is missing createAdapter')
+  }
+  return validateMCPEventOperations(adapter.createAdapter({ transport }))
 }

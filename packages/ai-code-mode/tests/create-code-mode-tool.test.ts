@@ -59,6 +59,20 @@ describe('createCodeModeTool', () => {
     expect(tool.description).toContain('external_dbQuery')
   })
 
+  it('tool description says discover_tools is a separate tool', () => {
+    const { driver } = createMockDriver()
+    const tool = createCodeModeTool({
+      driver,
+      tools: [
+        createMockTool('fetchWeather'),
+        { ...createMockTool('dbQuery'), lazy: true },
+      ],
+    })
+    expect(tool.description).toContain(
+      'discover_tools is a separate tool. It is not available inside this sandbox.',
+    )
+  })
+
   it('execute calls stripTypeScript then driver.createContext', async () => {
     const { driver, mockContext } = createMockDriver()
     const tool = createCodeModeTool({
@@ -211,7 +225,13 @@ describe('createCodeModeTool', () => {
       tools: [createMockTool('fetchWeather')],
     })
 
-    await tool.execute!({ typescriptCode: 'return 1' }, { emitCustomEvent })
+    await tool.execute!(
+      { typescriptCode: 'return 1' },
+      {
+        threadId: 'thread-1',
+        emitCustomEvent,
+      },
+    )
 
     expect(emitCustomEvent).toHaveBeenCalledWith(
       'code_mode:execution_started',
@@ -235,7 +255,13 @@ describe('createCodeModeTool', () => {
       tools: [createMockTool('fetchWeather')],
     })
 
-    await tool.execute!({ typescriptCode: 'return null' }, { emitCustomEvent })
+    await tool.execute!(
+      { typescriptCode: 'return null' },
+      {
+        threadId: 'thread-1',
+        emitCustomEvent,
+      },
+    )
 
     const consoleEvents = emitCustomEvent.mock.calls.filter(
       ([eventName]) => eventName === 'code_mode:console',
@@ -256,11 +282,11 @@ describe('createCodeModeTool', () => {
     )
   })
 
-  it('getSkillBindings merges dynamic bindings into context', async () => {
+  it('getSnippetBindings merges dynamic bindings into context', async () => {
     const { driver } = createMockDriver()
 
-    const skillBinding = {
-      name: 'skill_greet',
+    const snippetBinding = {
+      name: 'snippet_greet',
       description: 'Greet someone',
       inputSchema: { type: 'object' },
       execute: vi.fn().mockResolvedValue('hi'),
@@ -269,7 +295,7 @@ describe('createCodeModeTool', () => {
     const tool = createCodeModeTool({
       driver,
       tools: [createMockTool('fetchWeather')],
-      getSkillBindings: async () => ({ skill_greet: skillBinding }),
+      getSnippetBindings: async () => ({ snippet_greet: snippetBinding }),
     })
 
     await tool.execute!({ typescriptCode: 'return 1' })
@@ -279,8 +305,76 @@ describe('createCodeModeTool', () => {
     if (!contextConfig) {
       throw new Error('Expected createContext to be called')
     }
-    expect(contextConfig.bindings).toHaveProperty('skill_greet')
+    expect(contextConfig.bindings).toHaveProperty('snippet_greet')
     expect(contextConfig.bindings).toHaveProperty('external_fetchWeather')
+  })
+
+  it('passes the run abort signal and context to external_* calls', async () => {
+    const seen: Array<ToolExecutionContext | undefined> = []
+    const slowTool = toolDefinition({
+      name: 'slow',
+      description: 'Waits until the run aborts',
+      inputSchema: z.object({}),
+    }).server(
+      (_input, ctx) =>
+        new Promise((_resolve, reject) => {
+          seen.push(ctx)
+          ctx?.abortSignal?.addEventListener('abort', () =>
+            reject(new Error('aborted')),
+          )
+        }),
+    )
+
+    const mockContext: IsolateContext = {
+      execute: vi.fn().mockImplementation(async () => {
+        const bindings = vi.mocked(driver.createContext).mock.calls[0]![0]
+          .bindings
+        try {
+          await bindings['external_slow']!.execute({})
+          return { success: true, value: 'finished', logs: [] }
+        } catch (error) {
+          return {
+            success: false,
+            error: { name: 'Error', message: String(error) },
+            logs: [],
+          }
+        }
+      }),
+      dispose: vi.fn().mockResolvedValue(undefined),
+    }
+    const driver: IsolateDriver = {
+      createContext: vi.fn().mockResolvedValue(mockContext),
+    }
+
+    const tool = createCodeModeTool({ driver, tools: [slowTool] })
+    const controller = new AbortController()
+    const emitCustomEvent = vi.fn()
+    const pending = tool.execute!(
+      { typescriptCode: 'return await external_slow({})' },
+      {
+        toolCallId: 'parent-call',
+        threadId: 'thread-1',
+        abortSignal: controller.signal,
+        context: { userId: 'u1' },
+        inputResponse: { status: 'cancelled' },
+        emitCustomEvent,
+      },
+    )
+
+    await vi.waitFor(() => expect(seen).toHaveLength(1))
+    controller.abort()
+    const result = await pending
+
+    expect(result.success).toBe(false)
+    expect(result.error?.message).toBe('Error: aborted')
+    expect(seen[0]?.abortSignal).toBe(controller.signal)
+    expect(seen[0]?.context).toEqual({ userId: 'u1' })
+    expect(seen[0]?.toolCallId).toBeUndefined()
+    expect(seen[0]?.inputResponse).toBeUndefined()
+    expect(emitCustomEvent).toHaveBeenCalledWith(
+      'code_mode:external_error',
+      expect.objectContaining({ function: 'external_slow', error: 'aborted' }),
+    )
   })
 
   it('returns validation error for empty/non-string input', async () => {
@@ -293,5 +387,149 @@ describe('createCodeModeTool', () => {
     const result = await tool.execute!({ typescriptCode: '' })
     expect(result.success).toBe(false)
     expect(result.error?.name).toBe('ValidationError')
+  })
+})
+
+describe('createCodeModeTool debug logging', () => {
+  const makeSpyLogger = () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  })
+
+  const failingDriver = () =>
+    createMockDriver({
+      success: false,
+      error: { name: 'TypeError', message: 'boom' },
+      logs: [],
+    }).driver
+
+  it('routes execution failures to the configured logger, not console', async () => {
+    const logger = makeSpyLogger()
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const tool = createCodeModeTool({
+        driver: failingDriver(),
+        tools: [createMockTool('fetchWeather')],
+        debug: { logger },
+      })
+
+      const result = await tool.execute!({ typescriptCode: 'return 1' })
+
+      expect(result.success).toBe(false)
+      expect(consoleError).not.toHaveBeenCalled()
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('execute_typescript failed'),
+        expect.objectContaining({
+          phase: 'execute',
+          success: false,
+          error: expect.objectContaining({
+            name: 'TypeError',
+            message: 'boom',
+          }),
+        }),
+      )
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
+  it('logs execution failures to console.error when debug is unset', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const tool = createCodeModeTool({
+        driver: failingDriver(),
+        tools: [createMockTool('fetchWeather')],
+      })
+
+      await tool.execute!({ typescriptCode: 'return 1' })
+
+      // The default ConsoleLogger prints meta separately (console.dir on Node).
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining('execute_typescript failed'),
+      )
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
+  it('silences execution failures with debug: false', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const tool = createCodeModeTool({
+        driver: failingDriver(),
+        tools: [createMockTool('fetchWeather')],
+        debug: false,
+      })
+
+      await tool.execute!({ typescriptCode: 'return 1' })
+
+      expect(consoleError).not.toHaveBeenCalled()
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
+  it('logs successful executions under the tools category', async () => {
+    const logger = makeSpyLogger()
+    const { driver } = createMockDriver()
+    const tool = createCodeModeTool({
+      driver,
+      tools: [createMockTool('fetchWeather')],
+      debug: { logger, tools: true },
+    })
+
+    await tool.execute!({ typescriptCode: 'return 1' })
+
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('[tanstack-ai:tools]'),
+      expect.objectContaining({ phase: 'execute', logCount: 0 }),
+    )
+    expect(logger.error).not.toHaveBeenCalled()
+  })
+
+  it('does not log successful executions with tools: false', async () => {
+    const logger = makeSpyLogger()
+    const { driver } = createMockDriver()
+    const tool = createCodeModeTool({
+      driver,
+      tools: [createMockTool('fetchWeather')],
+      debug: { logger, tools: false },
+    })
+
+    await tool.execute!({ typescriptCode: 'return 1' })
+
+    expect(logger.debug).not.toHaveBeenCalled()
+  })
+
+  it('routes secret-parameter warnings to the configured logger', () => {
+    const logger = makeSpyLogger()
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const secretTool = toolDefinition({
+        name: 'callApi',
+        description: 'Call an API',
+        inputSchema: z.object({ apiKey: z.string() }),
+        outputSchema: z.object({ ok: z.boolean() }),
+      }).server(async () => ({ ok: true }))
+
+      createCodeModeTool({
+        driver: createMockDriver().driver,
+        tools: [secretTool],
+        debug: { logger },
+      })
+
+      expect(consoleWarn).not.toHaveBeenCalled()
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('apiKey'),
+        expect.objectContaining({
+          toolName: 'external_callApi',
+          paramName: 'apiKey',
+        }),
+      )
+    } finally {
+      consoleWarn.mockRestore()
+    }
   })
 })

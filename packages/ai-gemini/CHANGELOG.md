@@ -1,5 +1,534 @@
 # @tanstack/ai-gemini
 
+## 0.38.2
+
+### Patch Changes
+
+- Updated dependencies [[`824ee98`](https://github.com/TanStack/ai/commit/824ee98060983dd2b5728f288cecefa6a1250325)]:
+  - @tanstack/ai@0.71.0
+
+## 0.38.1
+
+### Patch Changes
+
+- [#1750](https://github.com/TanStack/ai/pull/1750) [`3170517`](https://github.com/TanStack/ai/commit/3170517d1c3faa0c1ee6fb004b8a551978fa2a7b) - Keep the provider's raw tool argument string for replay.
+  - Adapters now send the raw argument string as `args` on `TOOL_CALL_END`.
+  - The tool call in the history keeps that exact string when it is the same JSON value as the parsed input, so the next request sends the provider's own bytes back (for example `1.50`, or an id past `Number.MAX_SAFE_INTEGER`). When the parsed input differs, only the changed values are written again.
+  - The `TOOL_CALL_END` that reaches the client carries the same string in `metadata.tanstack.args`, so the client history matches the server history. It no longer also carries `metadata.tanstack.input`: in-process `chat()` and `StreamProcessor` parse `input` from `args`. Run the client and the server on the same release: an older client ignores `args`, so it builds the tool input from the streamed deltas only, and a tool call with no deltas (for example an Anthropic server tool) gets no input.
+  - History converters for Bedrock and the Gemini Interactions API send malformed tool arguments as `{}` instead of failing the request.
+  - Gemini Interactions: the initial `step.arguments` snapshot goes out as a `TOOL_CALL_ARGS` delta only when no argument deltas follow, so the deltas always add up to the final arguments.
+  - Malformed tool arguments are no longer turned into `{}` by an adapter. The tool gets a "Failed to parse tool arguments as JSON" error that the model can repair. Mistral still ends the run with an error on malformed arguments, as before.
+
+- Updated dependencies [[`1d0f8f1`](https://github.com/TanStack/ai/commit/1d0f8f11f4e781c4ecc38baa99c30320b593c555), [`1d0f8f1`](https://github.com/TanStack/ai/commit/1d0f8f11f4e781c4ecc38baa99c30320b593c555), [`5f95dbd`](https://github.com/TanStack/ai/commit/5f95dbd08f2780442000ac52074ea747d1b44187), [`3170517`](https://github.com/TanStack/ai/commit/3170517d1c3faa0c1ee6fb004b8a551978fa2a7b), [`3292bad`](https://github.com/TanStack/ai/commit/3292bad7b26990c5aa4676cc9d9fe33b1741fc1a), [`3170517`](https://github.com/TanStack/ai/commit/3170517d1c3faa0c1ee6fb004b8a551978fa2a7b), [`4298480`](https://github.com/TanStack/ai/commit/429848047c8c514f29855f8a99a7260253eb5d5b), [`f68da51`](https://github.com/TanStack/ai/commit/f68da51f63f999b70ac7aaf5aebc0109a7e9daf7), [`85c2956`](https://github.com/TanStack/ai/commit/85c2956c68f3226ef409b3a4e54d5be82198931e), [`30fa651`](https://github.com/TanStack/ai/commit/30fa651d173e519db8de50c9f888ded71b951640), [`1d0f8f1`](https://github.com/TanStack/ai/commit/1d0f8f11f4e781c4ecc38baa99c30320b593c555), [`3170517`](https://github.com/TanStack/ai/commit/3170517d1c3faa0c1ee6fb004b8a551978fa2a7b), [`3170517`](https://github.com/TanStack/ai/commit/3170517d1c3faa0c1ee6fb004b8a551978fa2a7b)]:
+  - @tanstack/ai@0.70.0
+  - @tanstack/ai-utils@0.5.0
+
+## 0.38.0
+
+### Minor Changes
+
+- [#1739](https://github.com/TanStack/ai/pull/1739) [`a0150c2`](https://github.com/TanStack/ai/commit/a0150c26b9e2b6050663450171e36a9dfa80915b) - Text adapters now set one stable code on `RUN_ERROR` when the input does not fit in the model's context window: `code: 'context_overflow'`. `@tanstack/ai` exports it as `CONTEXT_OVERFLOW_CODE`. The provider's own text stays in `message`.
+
+  ```ts
+  if (chunk.type === 'RUN_ERROR' && chunk.code === CONTEXT_OVERFLOW_CODE) {
+    // shorten the messages, then call chat() again
+  }
+  ```
+
+  These adapters set it: OpenAI and the other OpenAI-compatible adapters (from `code: 'context_length_exceeded'`), Anthropic, Gemini, Bedrock (Converse, Chat Completions, and Responses), OpenRouter, Grok, Cloudflare Workers AI, and BytePlus.
+
+  Changes to code that reads the old values:
+  - OpenAI-compatible adapters gave `code: 'context_length_exceeded'`. They now give `'context_overflow'`. `rawEvent` still has the provider's code.
+  - Anthropic, Grok, OpenRouter, and BytePlus gave the HTTP status or a general bad-request code for this error. Gemini and Bedrock Converse gave no code.
+  - The Anthropic adapter now sends `RUN_ERROR` with this code when the model stops with `stop_reason: 'model_context_window_exceeded'`. Before, it sent `RUN_FINISHED` with `finishReason: 'stop'`, so a cut-off answer looked complete.
+
+- [#1692](https://github.com/TanStack/ai/pull/1692) [`7532b2b`](https://github.com/TanStack/ai/commit/7532b2b09188ebd1095a60a7c5df6ef08b06916c) - Set thinking with `chat({ reasoning })`.
+  - Gemini 3 models get `thinkingLevel`.
+  - Gemini 2.5 models get `thinkingBudget`, from `budgetTokens` or a per-model table. `off` sends `thinkingBudget: 0`.
+  - `summary` sets `includeThoughts`.
+  - The experimental Interactions adapter sends `thinking_level` and `thinking_summaries`.
+  - Each chat model has its reasoning data in `model-meta.ts`. `GeminiModelReasoningByName` and `GEMINI_MODEL_REASONING` come from it.
+
+  Breaking: `thinkingConfig` is no longer in the chat `modelOptions`, and `GeminiThinkingOptions` is removed. The Interactions adapter no longer takes `generation_config.thinking_level` or `thinking_summaries`. Image generation keeps its own `thinkingConfig`.
+
+  ```ts
+  // Before
+  chat({
+    adapter: geminiText('gemini-3.5-flash'),
+    messages,
+    modelOptions: {
+      thinkingConfig: { includeThoughts: true, thinkingLevel: 'HIGH' },
+    },
+  })
+
+  // After
+  chat({
+    adapter: geminiText('gemini-3.5-flash'),
+    messages,
+    reasoning: 'high',
+  })
+  ```
+
+### Patch Changes
+
+- [#1732](https://github.com/TanStack/ai/pull/1732) [`eb4eea0`](https://github.com/TanStack/ai/commit/eb4eea05b6c53b748bba5fd414b04ce387ead05d) - Keep a schema property or a tool argument named `__proto__`. Before this fix, code that copied it with `out[key] = value` went to the `__proto__` setter instead, so the key was lost.
+  - `@tanstack/ai-utils`: `transformNullsToUndefined` and `undoNullWidening` keep the key.
+  - `@tanstack/openai-base`: the strict schema and its null-widening map keep the key.
+  - `@tanstack/ai-mistral`: the null-widening map keeps the key.
+  - `@tanstack/ai-openrouter`: the Responses tool input normalizer keeps the key.
+  - `@tanstack/ai-gemini`: the Interactions adapter keeps the key in tool parameters.
+  - `@tanstack/ai-bedrock`: the Converse adapter puts the tool schemas and tool inputs back into the request body after the AWS SDK serializes it, because the SDK drops the key.
+
+- [#1698](https://github.com/TanStack/ai/pull/1698) [`1bfcee3`](https://github.com/TanStack/ai/commit/1bfcee35bb3cf0ff3aac005440c842e66c3d687d) - Keep a conversation valid when the next request goes to a different model.
+  - Each assistant message records `metadata.tanstack.source` (`{ provider, api, model }`), and `responseId` and the resolved `model` when the provider sends them. A failed or aborted answer gets `stopReason: 'error'` or `'aborted'`. `RUN_FINISHED` has a new `responseId` field. `TextAdapter` has new optional `provider` and `api` fields.
+  - When the next request goes to a different source, the adapter removes signatures and redacted thinking, turns readable thinking into text, and rewrites tool call IDs to the shape the target API accepts. Each call stays paired with its result.
+  - Every request drops failed and aborted assistant batches and adds a `No result provided` result for an unanswered tool call. The saved history does not change.
+  - `RUN_FINISHED` and `RUN_ERROR` metadata now merge onto the assistant messages of that model call in `StreamProcessor`.
+  - Anthropic: the new `allowEmptySignature` option (default `false`) replays unsigned thinking from the same source, for gateways. The new `provider` option names a gateway.
+  - Azure OpenAI reports the `azure-openai-responses` API.
+  - Gemini, Mistral, and Bedrock Converse send same-source thinking back to the model, in block order.
+  - `withPersistence` writes the source and the stop reason onto streaming snapshot rows.
+  - Adapter authors get `transformMessagesForReplay()` and `hashToolCallId()` from `@tanstack/ai/adapter-internals`.
+
+- [#1692](https://github.com/TanStack/ai/pull/1692) [`7532b2b`](https://github.com/TanStack/ai/commit/7532b2b09188ebd1095a60a7c5df6ef08b06916c) - Send `chat({ toolChoice })` to each provider.
+  - **Anthropic and Bedrock Converse.** Claude Fable 5.1, Mythos 5.1, Opus 5.5, and Sonnet 5.5 reject a forced tool, and every Claude model rejects one while thinking is on. On those, `'required'` and a named tool fall back to `auto`.
+  - **Bedrock Converse** has no `none`. `'none'` sends no tool config. Bedrock refuses tool calls in the history without a tool config, so the history goes out as text.
+  - **Gemini** maps the choice to `functionCallingConfig` (`AUTO`, `NONE`, `ANY`, and `allowedFunctionNames`). With only provider tools, such as Google Search, it sends no tool config.
+  - **OpenAI and Azure OpenAI (Responses), Grok, Mistral, and OpenRouter** (Chat Completions and Responses) send their own `tool_choice` shape.
+
+- Updated dependencies [[`1bfcee3`](https://github.com/TanStack/ai/commit/1bfcee35bb3cf0ff3aac005440c842e66c3d687d), [`412b0fe`](https://github.com/TanStack/ai/commit/412b0fea4f4bb569998c3d253d174efd7b501e3c), [`a0150c2`](https://github.com/TanStack/ai/commit/a0150c26b9e2b6050663450171e36a9dfa80915b), [`b881627`](https://github.com/TanStack/ai/commit/b881627d51076dcc1af031ac951046e2fb7d84c4), [`fac0555`](https://github.com/TanStack/ai/commit/fac055559de98eb0fa23a0bc725808033ba3c2fc), [`6774e80`](https://github.com/TanStack/ai/commit/6774e803da3205101613ab2857c9ed4fbf975681), [`5bd27f2`](https://github.com/TanStack/ai/commit/5bd27f2fc94ebfb6d11bfb28d46d5d858310805e), [`c20f7b0`](https://github.com/TanStack/ai/commit/c20f7b021aa618fbfcc114b3f0bef5e888ff6b84), [`cef1911`](https://github.com/TanStack/ai/commit/cef19119c76fc5f618d6c971efbc486323b213c3), [`51f72fb`](https://github.com/TanStack/ai/commit/51f72fbf60e201f9c8d014aefa6406e777c05d6a), [`6f1e559`](https://github.com/TanStack/ai/commit/6f1e55934fe95ddf2bf3fb3031488a713e48c7af), [`eb4eea0`](https://github.com/TanStack/ai/commit/eb4eea05b6c53b748bba5fd414b04ce387ead05d), [`cef1911`](https://github.com/TanStack/ai/commit/cef19119c76fc5f618d6c971efbc486323b213c3), [`7532b2b`](https://github.com/TanStack/ai/commit/7532b2b09188ebd1095a60a7c5df6ef08b06916c), [`1bfcee3`](https://github.com/TanStack/ai/commit/1bfcee35bb3cf0ff3aac005440c842e66c3d687d), [`78edeb2`](https://github.com/TanStack/ai/commit/78edeb20a5ba89f2513c3f46f1267a7ed7185045), [`44e3a0a`](https://github.com/TanStack/ai/commit/44e3a0a89c86defebd38b2221dd3b7725a12839a), [`7532b2b`](https://github.com/TanStack/ai/commit/7532b2b09188ebd1095a60a7c5df6ef08b06916c), [`7a5c0d6`](https://github.com/TanStack/ai/commit/7a5c0d6fc1541187a7f01b444bc07a0478274bcb), [`b881627`](https://github.com/TanStack/ai/commit/b881627d51076dcc1af031ac951046e2fb7d84c4)]:
+  - @tanstack/ai@0.69.0
+  - @tanstack/ai-utils@0.4.2
+
+## 0.37.2
+
+### Patch Changes
+
+- Updated dependencies [[`723b4a4`](https://github.com/TanStack/ai/commit/723b4a4e8432825374d4980cc74c5f66dc7d1122), [`d84a49e`](https://github.com/TanStack/ai/commit/d84a49e5fef03499b10f63255880d056a55767a3)]:
+  - @tanstack/ai@0.68.0
+
+## 0.37.1
+
+### Patch Changes
+
+- [#1685](https://github.com/TanStack/ai/pull/1685) [`7dbfaf6`](https://github.com/TanStack/ai/commit/7dbfaf6c37a3d97de3b1f5bdb87be8bbbe2b0164) - Text adapters can now give `inputModalities` at run time: the input kinds that the model reads, for example `['text', 'image', 'document']`. `undefined` means that the adapter does not know.
+  - `TextAdapter` has the new optional `inputModalities` property. A `BaseTextAdapter` subclass sets it from its model metadata.
+  - The text adapters of OpenAI, Anthropic, Gemini, Mistral, Groq, BytePlus, Grok, OpenRouter, and LLM Gateway set it. A known model gives its input kinds. An unknown model gives `undefined`.
+
+- Updated dependencies [[`7dbfaf6`](https://github.com/TanStack/ai/commit/7dbfaf6c37a3d97de3b1f5bdb87be8bbbe2b0164), [`88fd67c`](https://github.com/TanStack/ai/commit/88fd67cd7ddfbe2b154173d2395b2c0338e97644), [`3aa2e3d`](https://github.com/TanStack/ai/commit/3aa2e3d95e2dcb1c14b4fda3bcdbdf3152582092), [`c5ae415`](https://github.com/TanStack/ai/commit/c5ae4152d0a040bb6ce7321e16b7ee66d3c36f96), [`13ba1b0`](https://github.com/TanStack/ai/commit/13ba1b0e47dc822f10f6c5133184f92c2eb0a013), [`377262c`](https://github.com/TanStack/ai/commit/377262c0b4e5f59f8fd467a831b9341cc705077e)]:
+  - @tanstack/ai@0.67.0
+
+## 0.37.0
+
+### Minor Changes
+
+- [#1510](https://github.com/TanStack/ai/pull/1510) [`e77401d`](https://github.com/TanStack/ai/commit/e77401d4026b65e0196488ed3b024d4fb8ca0f9f) - Remove the deprecated `gemini-omni-flash-preview` model id, which shut down on 2026-09-30. Use the GA id `gemini-omni-1.1-flash` instead. This removes the `GEMINI_OMNI_FLASH_PREVIEW` model metadata, its entries in `GEMINI_VIDEO_MODELS`, `GEMINI_INTERACTIONS_VIDEO_MODELS`, `GeminiVideoModelDurationByName`, and `GEMINI_VIDEO_DURATIONS`, plus the deprecated `createGeminiVideo`/`geminiVideo` overloads that accepted the preview id.
+
+## 0.36.1
+
+### Patch Changes
+
+- [#1655](https://github.com/TanStack/ai/pull/1655) [`3e1c5ad`](https://github.com/TanStack/ai/commit/3e1c5ad5707cff9dbcdedd1122309d4508811655) - Gemini-native image calls now use the Interactions API, return the interaction id as result.id, and reject thinkingConfig.thinkingBudget. ThinkingLevel is exported from @tanstack/ai-gemini.
+
+- [#1548](https://github.com/TanStack/ai/pull/1548) [`68aeada`](https://github.com/TanStack/ai/commit/68aeadad200425f7e40fadaa86922941a9e25624) - Structured output now reports a truncation error when the response stops at the output token limit. Before, you got a JSON parse error, or the partial result came back as valid data. `openai-base` and `ai-openrouter` already do this ([#1426](https://github.com/TanStack/ai/issues/1426)).
+
+- Updated dependencies [[`f687c54`](https://github.com/TanStack/ai/commit/f687c54ae4b8a67f2154ff9dea0319b8d2712856), [`fb55bcb`](https://github.com/TanStack/ai/commit/fb55bcba5193d4465f43006505918a2dc4472ec4), [`630ec86`](https://github.com/TanStack/ai/commit/630ec86e9997fabe046cae1a491060d72cbc71ea)]:
+  - @tanstack/ai@0.66.0
+
+## 0.36.0
+
+### Minor Changes
+
+- [#1641](https://github.com/TanStack/ai/pull/1641) [`8421e3d`](https://github.com/TanStack/ai/commit/8421e3da11d4b454aee9dbf9463636ff920c3174) - Add **Nano Banana 2.1** (`gemini-nano-banana-2.1`) as a Gemini-native image model. It routes through the `generateContent` API, accepts image-conditioned prompts, and takes `aspectRatio_resolution` sizes: all 14 aspect ratios at `1K`, `2K`, or `4K` (for example `"16:9_4K"`). The `512` tier is rejected at compile time because the API does not accept it on this model.
+
+## 0.35.0
+
+### Minor Changes
+
+- [#1541](https://github.com/TanStack/ai/pull/1541) [`30254ad`](https://github.com/TanStack/ai/commit/30254ad70161894d232d3b45e3b21f45d49f336e) - Video adapters can hand a provider's download stream to generation persistence instead of buffering it. Adapters now implement `getVideo()`. When a provider has no public URL for the finished video (OpenRouter, Lovable, Sora jobs without `url`), it returns a `VideoStreamResult` (`{ body, contentType }`), and `withGenerationPersistence` streams it into your blob store and sets `url` from `artifactUrl`.
+
+  Nothing changes without persistence: `getVideoJobStatus()` and streaming `generateVideo()` still return a base64 `data:` URL for those providers.
+
+  `VideoAdapter.getVideoUrl()` is deprecated in favor of `getVideo()`. It still works: on the built-in adapters it is `getVideo()` with a stream buffered into a `data:` URL, and custom adapters that only implement `getVideoUrl()` keep working. A custom adapter that extends `BaseVideoAdapter` with TypeScript's `noImplicitOverride` must add `override` to its `getVideoUrl()`, or rename it to `getVideo()`.
+
+### Patch Changes
+
+- Updated dependencies [[`7b6b1a9`](https://github.com/TanStack/ai/commit/7b6b1a99d45e40165f0a1f833a04e793a09275de), [`592c72c`](https://github.com/TanStack/ai/commit/592c72c2aa2cc3ea40942d96095170b3b4cbbd66), [`592c72c`](https://github.com/TanStack/ai/commit/592c72c2aa2cc3ea40942d96095170b3b4cbbd66), [`592c72c`](https://github.com/TanStack/ai/commit/592c72c2aa2cc3ea40942d96095170b3b4cbbd66), [`592c72c`](https://github.com/TanStack/ai/commit/592c72c2aa2cc3ea40942d96095170b3b4cbbd66), [`82291b2`](https://github.com/TanStack/ai/commit/82291b22941d2c813ff0050fc9d41b024480153d), [`ff3a66e`](https://github.com/TanStack/ai/commit/ff3a66ed8f628d45b282316fab337d3ed19f34cd), [`560c76f`](https://github.com/TanStack/ai/commit/560c76fd638b5691e195e1d0619fee8a78d98c20), [`4b9dcb4`](https://github.com/TanStack/ai/commit/4b9dcb44d8fe1e7c933b79c23d8f072e7bc300f4), [`30254ad`](https://github.com/TanStack/ai/commit/30254ad70161894d232d3b45e3b21f45d49f336e), [`40fdd22`](https://github.com/TanStack/ai/commit/40fdd22ce05d55e71514b4cc80b1c28cefb4a431)]:
+  - @tanstack/ai@0.65.0
+
+## 0.34.2
+
+### Patch Changes
+
+- Updated dependencies [[`3a09cf0`](https://github.com/TanStack/ai/commit/3a09cf04431a45810051ea5df6bb3935af421ddb), [`ee726f5`](https://github.com/TanStack/ai/commit/ee726f537dbb036d5edb756b92739afaa7573824), [`a5fce7f`](https://github.com/TanStack/ai/commit/a5fce7f95b8b9c6eb57697aa1e3f587bf27483b9), [`94116ad`](https://github.com/TanStack/ai/commit/94116ad137015b6f62fe62b4c06a335dbde36a49)]:
+  - @tanstack/ai@0.64.0
+
+## 0.34.1
+
+### Patch Changes
+
+- Updated dependencies [[`37b2826`](https://github.com/TanStack/ai/commit/37b282655ea9c780e9793ef33013d64b1bf88625), [`8e8ee26`](https://github.com/TanStack/ai/commit/8e8ee26959a471bb6fac180ded3a9a048ae93609), [`c5c1996`](https://github.com/TanStack/ai/commit/c5c19961b8c98497fd88ae93c5d6330d7b2ecb6a), [`3e30cde`](https://github.com/TanStack/ai/commit/3e30cde8ae7f5be7be3bc9c4f30c842159fc7edf), [`0eb8f0b`](https://github.com/TanStack/ai/commit/0eb8f0b7f4ffa0133a814f8fcfccbc1acedd7488), [`f44b6b2`](https://github.com/TanStack/ai/commit/f44b6b22578b893501e05612f02ea1aaee0951d3), [`d632d41`](https://github.com/TanStack/ai/commit/d632d41df227bf11bc3cdbf5542823f87562b3d4)]:
+  - @tanstack/ai@0.63.0
+
+## 0.34.0
+
+### Minor Changes
+
+- [#1376](https://github.com/TanStack/ai/pull/1376) [`740ae66`](https://github.com/TanStack/ai/commit/740ae6664d358f00deddf72319ef947fe3bb0935) - Preserve source links for hosted web search calls. OpenAI Responses `web_search_call` items and Gemini Google Search grounding now surface as provider-executed tool calls with a normalized `metadata.sources` array (new `ProviderExecutedToolSource` type) and the raw provider data under `metadata.openai` / `metadata.gemini`. The OpenAI adapter requests `web_search_call.action.sources` when a branded web search tool is used, and both adapters replay the raw items on the next turn instead of treating them as function calls.
+
+### Patch Changes
+
+- Updated dependencies [[`a450d00`](https://github.com/TanStack/ai/commit/a450d007a039610994342dd9c3387f880a4eb992), [`c54e20c`](https://github.com/TanStack/ai/commit/c54e20cf5be8e1f73e0be661e242391fa0e4633e), [`a56192e`](https://github.com/TanStack/ai/commit/a56192eafa0da2ccca2d576dc4371b196355c605), [`740ae66`](https://github.com/TanStack/ai/commit/740ae6664d358f00deddf72319ef947fe3bb0935), [`5099a32`](https://github.com/TanStack/ai/commit/5099a32cbfb6c77e335769793415fe7e90bb17d8), [`820429f`](https://github.com/TanStack/ai/commit/820429fa9bea8ba220cf073406760475ac07b112), [`0abae97`](https://github.com/TanStack/ai/commit/0abae97f94fe4d37523f8a6427972ae7fe3b7fde), [`8c68c2d`](https://github.com/TanStack/ai/commit/8c68c2d9750bcc818201089bbbb7d90aa26d99a1)]:
+  - @tanstack/ai@0.62.0
+
+## 0.33.1
+
+### Patch Changes
+
+- Updated dependencies [[`54d39d3`](https://github.com/TanStack/ai/commit/54d39d30704bbdbdccea756af31530cc6713fc2e), [`2d047c5`](https://github.com/TanStack/ai/commit/2d047c5cf5f25c244c05f0cb0e816b9634616fbb), [`74b5823`](https://github.com/TanStack/ai/commit/74b582305471eaf37a3b68595e60ed1a6f42d914), [`abb0169`](https://github.com/TanStack/ai/commit/abb0169bf96c38f59791450ce060d089a7fcd26e), [`ed87986`](https://github.com/TanStack/ai/commit/ed87986069bcfe42a51cedf1365cc10662b0e088), [`a0f7c14`](https://github.com/TanStack/ai/commit/a0f7c14a9d9a4b2e72e87b976f46d193deb5921b)]:
+  - @tanstack/ai@0.61.0
+
+## 0.33.0
+
+### Minor Changes
+
+- [#915](https://github.com/TanStack/ai/pull/915) [`ef0a00f`](https://github.com/TanStack/ai/commit/ef0a00f09059abfd9e96eb1367e8ff0280458abd) - feat(ai): native Files API support across providers (upload adapters + `file` content source)
+
+  Adds first-class support for provider **Files / storage APIs** so callers can upload media once and reference it by a provider-issued handle instead of re-sending base64 or a public URL each request (lower latency/bandwidth, no re-buffering on memory-constrained runtimes).
+  - **New tree-shakeable `files` adapter kind** — `openaiFiles()`, `anthropicFiles()`, `geminiFiles()`, `grokFiles()`, and `falFiles()`. Each exposes `upload()`, and (where the provider has a lifecycle API) `get()` / `delete()`. Drive them with the new `uploadFile()` / `getFile()` / `deleteFile()` activity functions. fal is upload-only.
+  - **New `{ type: 'file' }` arm on `ContentPartSource`**, matching the AG-UI `FileSource` arm field for field: `{ type: 'file', value, provider?, mimeType? }`. `value` is the opaque handle the provider issued; `provider` names the adapter that issued it. Each adapter maps `value` to its native wire field: OpenAI (Responses) `input_image`/`input_file` `file_id`, Anthropic `file_id` message source (with the `files-api-2025-04-14` beta), Gemini `fileData.fileUri`, fal storage URL, Grok public URL. `fileSourceFromHandle(handle)` builds the source.
+  - **Fail-closed capability preflight** — adapters that can consume file references declare `supportsFileSources`; `chat()` / `generateImage()` / `generateVideo()` / `embed()` reject `{ type: 'file' }` sources for every other adapter (Bedrock, Mistral, Groq, OpenRouter, Ollama, BytePlus, Cohere, and any future adapter that doesn't opt in) **before a request is built**, so a reference can never be silently mis-mapped onto a URL/data field. Endpoints that need raw bytes (image edits, Sora `input_reference`, Veo, Chat Completions images) throw endpoint-specific errors. A supporting adapter handed a source whose `provider` names a different adapter throws an error naming the issuer.
+  - **Provider-literal typed handles** — `FileHandle<'openai'>` etc. flow from each files adapter through `uploadFile()`, and `getFile()`/`deleteFile()` accept the handle itself, so cross-provider lifecycle calls fail at compile time. `fileSourceFromHandle` and `FileHandle` are also exported from the browser-safe `@tanstack/ai/client` entry. A `{ type: 'file' }` source cannot cross the chat wire format (which carries `data`/`url` sources only) and throws rather than being dropped, so a browser that holds a handle sends it in its own request body and the server builds the source.
+
+### Patch Changes
+
+- Updated dependencies [[`ef0a00f`](https://github.com/TanStack/ai/commit/ef0a00f09059abfd9e96eb1367e8ff0280458abd)]:
+  - @tanstack/ai@0.60.0
+
+## 0.32.1
+
+### Patch Changes
+
+- Updated dependencies [[`9ab4f76`](https://github.com/TanStack/ai/commit/9ab4f7691f39884eebe8153caa9653926ae12fd0), [`9ab4f76`](https://github.com/TanStack/ai/commit/9ab4f7691f39884eebe8153caa9653926ae12fd0), [`9ab4f76`](https://github.com/TanStack/ai/commit/9ab4f7691f39884eebe8153caa9653926ae12fd0)]:
+  - @tanstack/ai@0.59.0
+
+## 0.32.0
+
+### Minor Changes
+
+- [#1449](https://github.com/TanStack/ai/pull/1449) [`fe4e13b`](https://github.com/TanStack/ai/commit/fe4e13b72b54f82f19353a3f1254daa000dbb70b) - Add `gemini-3.8-live` and `gemini-3.8-live-extended-thinking` to `GeminiRealtimeModel`. The realtime adapter now defaults to `gemini-3.8-live`; pass `model: 'gemini-3.1-flash-live-preview'` to keep the legacy preview model.
+
+## 0.31.2
+
+### Patch Changes
+
+- Updated dependencies [[`796f2b5`](https://github.com/TanStack/ai/commit/796f2b5f7c05debe251ad3ecd4073d8cd119b3db)]:
+  - @tanstack/ai@0.58.0
+
+## 0.31.1
+
+### Patch Changes
+
+- [#1198](https://github.com/TanStack/ai/pull/1198) [`418142b`](https://github.com/TanStack/ai/commit/418142ba482003863265e0db4d596af29f233852) - Fix `mergeConsecutiveSameRoleMessages` deduplicating `functionResponse` parts by `name` instead of `id`. Two parallel calls to the same tool in one turn share a `name` but have distinct ids, so the second response was silently dropped, leaving Gemini with fewer response parts than call parts on the next request (`400 INVALID_ARGUMENT: ... number of function response parts is equal to the number of function call parts`). Deduping by `id` still collapses a genuine duplicate tool result while preserving both responses for same-tool parallel calls.
+
+- Updated dependencies [[`04bfd8c`](https://github.com/TanStack/ai/commit/04bfd8c26ce337cca53f3f8d286f14ed0432a329), [`254ab5f`](https://github.com/TanStack/ai/commit/254ab5ff5b0a9ca945cb313588f4b56394c7ecf7)]:
+  - @tanstack/ai@0.57.0
+
+## 0.31.0
+
+### Minor Changes
+
+- [#1396](https://github.com/TanStack/ai/pull/1396) [`f60f736`](https://github.com/TanStack/ai/commit/f60f73612dd7621e2f1ad76abb1a640307dea3c6) - Add dialogue turns and timing alignment to the text-to-speech contract.
+
+  `generateSpeech()` takes `turns` (an array of `{ text, voice }`) in place of `text` for a multi-voice script, and `timestamps: true` to ask for timings. `TTSResult` gains `alignment` (per character or per word, with `alignment.unit` saying which, all times in seconds) and `segments` (one per turn for dialogue, one per sentence for a single voice). Use `alignment` rather than `duration` to find where speech stops.
+
+  Both are adapter capabilities, declared on `adapter.capabilities` as `maxSpeakers` and `timestamps`. The activity rejects a request the adapter cannot serve before it reaches the provider, so too many speakers is a typed error rather than a provider 422.
+
+  Wired through three adapters:
+  - `byteplusSpeech` (Seed Audio 1.0): up to 3 voices, mapped to `references` plus a role-structured `text_prompt`. `timestamps` sets `audio_config.enable_subtitle`, and the subtitle block becomes word alignment and sentence segments, converted from milliseconds to seconds.
+  - `elevenlabsSpeech`: up to 10 voices. Picks between `textToSpeech.convert`, `textToSpeech.convertWithTimestamps`, `textToDialogue.convert` and `textToDialogue.convertWithTimestamps` from `turns` and `timestamps`. Dialogue also returns per-turn `segments` with the voice that spoke each one.
+  - `geminiSpeech`: up to 2 voices, building `multiSpeakerVoiceConfig` and the labelled prompt from the turns.
+
+  Every addition is optional, so existing adapters and callers are unaffected.
+
+### Patch Changes
+
+- Updated dependencies [[`7c4b25e`](https://github.com/TanStack/ai/commit/7c4b25ebefc64e4f209c282788f515939eca02e9), [`f60f736`](https://github.com/TanStack/ai/commit/f60f73612dd7621e2f1ad76abb1a640307dea3c6)]:
+  - @tanstack/ai@0.56.0
+
+## 0.30.0
+
+### Minor Changes
+
+- [#971](https://github.com/TanStack/ai/pull/971) [`507f66c`](https://github.com/TanStack/ai/commit/507f66ca88e609f801e8710cafa863ca5ba6fe33) - Add native structured-output streaming for the Gemini and experimental Gemini Interactions text adapters.
+
+## 0.29.4
+
+### Patch Changes
+
+- Updated dependencies [[`fa13446`](https://github.com/TanStack/ai/commit/fa13446fab9b9048de9433a5ebf55bc626f5fd74), [`0945a79`](https://github.com/TanStack/ai/commit/0945a79b0923b31a5122d0bf28c115879341a410)]:
+  - @tanstack/ai@0.55.0
+
+## 0.29.3
+
+### Patch Changes
+
+- [#1375](https://github.com/TanStack/ai/pull/1375) [`bad612a`](https://github.com/TanStack/ai/commit/bad612a3ae64702a3194c986a70f1905cad42751) - Forward the caller's abort signal to the Google SDK request (`config.abortSignal`) so aborting a Gemini chat actually cancels the in-flight HTTP request, matching the OpenAI-compatible adapters.
+
+## 0.29.2
+
+### Patch Changes
+
+- Updated dependencies [[`c17bc95`](https://github.com/TanStack/ai/commit/c17bc951ca783d8023bf54d69035c19c0c72ea2f), [`53e2ec0`](https://github.com/TanStack/ai/commit/53e2ec082b40d8c3fcd09f408c29f0b895436198), [`6269eff`](https://github.com/TanStack/ai/commit/6269eff90e770205ffd9cae8c5989b8ff02b57ce)]:
+  - @tanstack/ai@0.54.0
+
+## 0.29.1
+
+### Patch Changes
+
+- Updated dependencies [[`21775ee`](https://github.com/TanStack/ai/commit/21775ee2d23dd594cdc184678ff587341bd74871)]:
+  - @tanstack/ai@0.53.0
+
+## 0.29.0
+
+### Minor Changes
+
+- [#1312](https://github.com/TanStack/ai/pull/1312) [`5305d32`](https://github.com/TanStack/ai/commit/5305d320aae400b07bfe3a440d2d720cece44197) - Accept `baseURL` and `defaultHeaders` on every adapter's client config so one gateway config (Cloudflare AI Gateway, Vercel AI Gateway, a corporate proxy) can be spread into any adapter. The vendor-specific names (`httpOptions`, `serverURL`, `host`, `baseUrl`, `headers`) keep working. Bedrock's Converse adapter now applies `defaultHeaders` too.
+
+### Patch Changes
+
+- Updated dependencies [[`819e77c`](https://github.com/TanStack/ai/commit/819e77cee018106bdcd44870cea2c4f9b6d3004a)]:
+  - @tanstack/ai@0.52.3
+
+## 0.28.0
+
+### Minor Changes
+
+- [#1301](https://github.com/TanStack/ai/pull/1301) [`307b7ec`](https://github.com/TanStack/ai/commit/307b7ec285e60f4a1b9a6c03345130ec9bb93356) - Add Gemini 3.8 Flash (`gemini-3.8-flash`) with multimodal input, thinking, structured output, caching, built-in tools, and agentic video understanding.
+
+  Limit its thinking levels to low, medium, and high in both the standard and Interactions adapters.
+
+### Patch Changes
+
+- Updated dependencies [[`452d6a4`](https://github.com/TanStack/ai/commit/452d6a405d669d00f2cc82d5725c53dfad8602cc)]:
+  - @tanstack/ai@0.52.2
+
+## 0.27.0
+
+### Minor Changes
+
+- [#1294](https://github.com/TanStack/ai/pull/1294) [`4964221`](https://github.com/TanStack/ai/commit/49642217ca1efa521773643036ab9480720ad63a) - Add agentic video understanding to the Gemini text adapter.
+
+  Set `metadata.processing: 'agentic'` on a video content part to route the request through the Gemini Interactions API for multi-pass "agentic" video understanding (GA on `gemini-3.7-flash`, `gemini-3.6-flash`, and `gemini-3.5-flash-lite`). Omit it for the default single-pass `generateContent` sampling. New `uploadGeminiFile()` and `geminiVideoPart()` helpers cover the Files API upload + poll-until-ACTIVE flow, and the three models now carry an `agentic_video` capability.
+
+## 0.26.5
+
+### Patch Changes
+
+- [#1259](https://github.com/TanStack/ai/pull/1259) [`845696b`](https://github.com/TanStack/ai/commit/845696b00dab158821ef12fc6062aa0f93c6e30e) - Send Gemini function tool inputs through `parametersJsonSchema` so complete JSON Schema keywords reach the provider.
+
+- [#1273](https://github.com/TanStack/ai/pull/1273) [`9c9746b`](https://github.com/TanStack/ai/commit/9c9746bd4bbe94198ebd973b12fedfbdb9fdb231) - Add Gemini Omni 1.1 Flash (`gemini-omni-1.1-flash`) as the GA Interactions video model.
+
+  `geminiVideo('gemini-omni-1.1-flash')` uses the existing Interactions video path. `gemini-omni-flash-preview` stays as a deprecated alias until it shuts down on 2026-09-30. Omni `size` is an `aspectRatio_resolution` template (`'16:9'` or `'16:9_1080p'`) that maps onto `response_format.aspect_ratio` and `response_format.resolution` (`360p` | `720p` | `1080p` | `4k`, default 720p). Duration stays 3–10 seconds per call.
+
+- Updated dependencies [[`cfb8454`](https://github.com/TanStack/ai/commit/cfb845469875e1b74def21b9525ee19d68a4abbd)]:
+  - @tanstack/ai@0.52.1
+
+## 0.26.4
+
+### Patch Changes
+
+- Updated dependencies [[`49fc54c`](https://github.com/TanStack/ai/commit/49fc54ca0aacf2fc60bb36647a61a23559dda4bc), [`e04ff6a`](https://github.com/TanStack/ai/commit/e04ff6abcb86c5ede17cd8c1c96df82e9aae03d7), [`e04ff6a`](https://github.com/TanStack/ai/commit/e04ff6abcb86c5ede17cd8c1c96df82e9aae03d7)]:
+  - @tanstack/ai@0.52.0
+
+## 0.26.3
+
+### Patch Changes
+
+- Updated dependencies [[`5dc4e1a`](https://github.com/TanStack/ai/commit/5dc4e1a08728b410f85956093ccef621d12b4d6b), [`a7e0798`](https://github.com/TanStack/ai/commit/a7e079872af372496728d25e6ec23149cd5e04b9), [`6a083bf`](https://github.com/TanStack/ai/commit/6a083bfcfaa4fd0c83368c4d10067e5c2298e22c)]:
+  - @tanstack/ai@0.51.0
+
+## 0.26.2
+
+### Patch Changes
+
+- Updated dependencies [[`62c19ed`](https://github.com/TanStack/ai/commit/62c19edce7a814d868491ca920003899ec4c486b), [`62c19ed`](https://github.com/TanStack/ai/commit/62c19edce7a814d868491ca920003899ec4c486b)]:
+  - @tanstack/ai@0.50.0
+
+## 0.26.1
+
+### Patch Changes
+
+- [#1216](https://github.com/TanStack/ai/pull/1216) [`dbb25bf`](https://github.com/TanStack/ai/commit/dbb25bfb01d3d9660c4bc8becc7c54b81b23f949) - Fix duplicate TOOL_CALL_START/TOOL_CALL_END events when a Gemini stream chunk carries both functionCall parts and finishReason UNEXPECTED_TOOL_CALL. The finish handler re-registered and re-emitted tool calls the per-part loop had already processed, which crashed the chat run with "Duplicate interrupt id in final batch".
+
+- Updated dependencies [[`67ce4e5`](https://github.com/TanStack/ai/commit/67ce4e529c42e64d4591f996c7e3e32458d5dd7c)]:
+  - @tanstack/ai@0.49.1
+
+## 0.26.0
+
+### Minor Changes
+
+- [#906](https://github.com/TanStack/ai/pull/906) [`b7ebcb0`](https://github.com/TanStack/ai/commit/b7ebcb0bbe63e425facb5e38f138bd0cd36637dd) - Add headless BYOK: `defineByok` in `@tanstack/ai-client/byok`, pass `byok` into chat and generation hooks, and read keys on the relay with `getByokKey` from `@tanstack/ai/byok/server`. Provider ids are open slugs (`x-byok-<slug>`). Each adapter exports a `{ id, label, env? }` object (`openaiByok`, …); `id` is required. `env` is the env var name(s) for the relay — names only; the client never reads `process.env`. A wrong key surfaces as the provider's own `401` through the relay, so no client-side key check is needed. OpenRouter PKCE (`@tanstack/ai-openrouter/pkce`) saves the minted key under `openrouterByok.id`.
+
+### Patch Changes
+
+- Updated dependencies [[`b7ebcb0`](https://github.com/TanStack/ai/commit/b7ebcb0bbe63e425facb5e38f138bd0cd36637dd)]:
+  - @tanstack/ai@0.49.0
+
+## 0.25.1
+
+### Patch Changes
+
+- Updated dependencies [[`1c0415b`](https://github.com/TanStack/ai/commit/1c0415bec4bbefcd3abf784d0209af05aca5db46)]:
+  - @tanstack/ai@0.48.0
+
+## 0.25.0
+
+### Minor Changes
+
+- [#989](https://github.com/TanStack/ai/pull/989) [`75dbdfa`](https://github.com/TanStack/ai/commit/75dbdfa2fe4141cc240fe74307820fe43bd31e07) - Add `@tanstack/ai-vertex` for Gemini on Vertex AI, and allow the Gemini
+  client to start without an API key when Vertex or Enterprise mode is on.
+
+### Patch Changes
+
+- Updated dependencies [[`7c4b73a`](https://github.com/TanStack/ai/commit/7c4b73af5023e7ab7e113121644213c75d611aac), [`87e497f`](https://github.com/TanStack/ai/commit/87e497f2e282c2389579051ec743fa4cc8cf493e), [`c0ba484`](https://github.com/TanStack/ai/commit/c0ba48402a807d6482e1cb36a0cf393d0cd26b2b), [`d34b6c0`](https://github.com/TanStack/ai/commit/d34b6c01fbc9ed83e5dc9bd2725eb05f6b03bfd4)]:
+  - @tanstack/ai@0.47.3
+
+## 0.24.2
+
+### Patch Changes
+
+- Updated dependencies [[`5f68cbc`](https://github.com/TanStack/ai/commit/5f68cbccf3621b48dae73cedcb1e59cb4cbe72b4), [`32e62ab`](https://github.com/TanStack/ai/commit/32e62ab8b7dc6a8a13ca3851c8925ab806e08f29)]:
+  - @tanstack/ai@0.47.0
+
+## 0.24.1
+
+### Patch Changes
+
+- [#932](https://github.com/TanStack/ai/pull/932) [`3eda66c`](https://github.com/TanStack/ai/commit/3eda66cb132def6346829ba113f315ffdd4edf6b) - Classify Anthropic, Gemini, and OpenAI native tools with stable runtime discriminators so ordinary functions can use the same public names without selecting provider-native behavior. Native tools must come from the adapter factory (`webSearchTool()`, `googleSearchTool()`, and the rest). A reserved `name` alone does not select a native converter. `chat()` throws `DuplicateToolNameError` when a factory tool and a custom function share the same public name.
+
+  Previously the converters picked provider-native behavior by `tool.name`. Tool names are public application identifiers, so a plain function called `web_search`, `google_search`, or `code_execution` was routed into a native converter: it lost its `inputSchema` and was sent as a provider-only payload (and on Anthropic could also flip on `code_execution` / skills beta headers). Native tools are now identified by adapter-owned metadata, which converters strip before building the wire payload, so provider API versions stay confined to the wire converters.
+
+  Also preserves Anthropic `webSearchTool` options (`max_uses`, `allowed_domains`, `blocked_domains`, `user_location`, `cache_control`) on the wire payload.
+
+  Also fixes `googleSearchTool({ searchTypes: … })` being silently dropped on the experimental `geminiTextInteractions()` adapter. The Interactions converter read a snake_case `search_types` array, but the public factory takes the Generate Content shape (`GoogleSearch.searchTypes: { webSearch?, imageSearch? }`), so the field never matched and every request fell back to the provider default of web-search-only. The camelCase config is now translated to the Interactions wire list.
+
+- Updated dependencies [[`41a5d18`](https://github.com/TanStack/ai/commit/41a5d189082331e052e1f2f5e987848501ffd08b), [`4599019`](https://github.com/TanStack/ai/commit/4599019eb02f72562ef155b69b8f61f9d25d187a), [`3eda66c`](https://github.com/TanStack/ai/commit/3eda66cb132def6346829ba113f315ffdd4edf6b), [`ecd12a4`](https://github.com/TanStack/ai/commit/ecd12a408987bc75649c21aada6948282a2a66dd)]:
+  - @tanstack/ai@0.46.0
+
+## 0.24.0
+
+### Minor Changes
+
+- [#1104](https://github.com/TanStack/ai/pull/1104) [`a8454a7`](https://github.com/TanStack/ai/commit/a8454a7c90b04e4a68b9b3f26de23ed55d391525) - Add the GA Gemini native image model ids and give each native image model its own size type.
+
+  `gemini-3.1-flash-image-preview` and `gemini-3-pro-image-preview` were shut down on 2026-06-25 and now 404. Their GA replacements — `gemini-3.1-flash-image` and `gemini-3-pro-image` — are now the primary ids. The `-preview` ids remain in the model union as aliases so existing code keeps compiling; `gemini-2.5-flash-image` stays fully supported ahead of its 2026-10-02 shutdown.
+
+  Sizes were a single flat union (`{8 ratios}_{1K|2K|4K}`) applied to every native model. Google documents four different sets, so each model now maps to its own:
+
+  | model                                   | aspect ratios | resolutions                      |
+  | --------------------------------------- | ------------- | -------------------------------- |
+  | `gemini-3.1-flash-image` (+ `-preview`) | 14            | `512` `1K` `2K` `4K`             |
+  | `gemini-3.1-flash-lite-image`           | 14            | `1K`                             |
+  | `gemini-3-pro-image` (+ `-preview`)     | 10            | `1K` `2K` `4K`                   |
+  | `gemini-2.5-flash-image`                | 10            | none — bare ratio, e.g. `'16:9'` |
+
+  `4:5` and `5:4` are now accepted on every native model (Google lists them for all four; the old union omitted them). `9:21` is deliberately still rejected — it exists on Vertex/Cloud only and the Gemini API rejects it.
+
+  **Runtime behaviour changes in two places.** The rest of the change is types-only, but these two are real wire-format deltas:
+  - `parseNativeImageSize()` now accepts a bare aspect ratio. Previously `'16:9'` failed to parse, so the adapter omitted `imageConfig` entirely and the model picked its own aspect ratio; it now parses to `{ aspectRatio: '16:9' }` and the adapter sends `imageConfig.aspectRatio = '16:9'`. A JavaScript caller — or a TypeScript caller whose `size` is computed at runtime and widened to `string` — that already passed a bare ratio will get a differently-framed image after upgrading, with no compile or runtime error.
+  - Migrating a `gemini-2.5-flash-image` call from `'16:9_1K'` to the now-required bare `'16:9'` drops `imageSize` from the `generateContent` request. That is intended: Google publishes no `image_size` value or default for this model, so the adapter no longer guesses a tier the API never documented.
+
+  **BREAKING (types only):** size combinations the selected model never supported no longer compile. No model id was removed.
+  - `gemini-3.1-flash-lite-image`: `2K` and `4K` are rejected (the model only emits 1K). Use `'<ratio>_1K'`.
+  - `gemini-3-pro-image` / `gemini-3-pro-image-preview`: the extreme banner ratios `1:4` `4:1` `1:8` `8:1` are rejected (Gemini 3.1 Flash Image only), as is the `512` tier.
+  - `gemini-2.5-flash-image`: any `_1K` / `_2K` / `_4K` suffix is rejected — pass the bare ratio (`'16:9'`, not `'16:9_1K'`) — as are the four extreme banner ratios.
+  - `GeminiNativeImageSize` is now the union of the per-model types rather than one flat template literal. It was not previously reachable from the package entry point, so this is a new export rather than a changed one.
+
+  **New type exports**, so the per-model narrowing is nameable and not just inferred at the call site: `GeminiImageModelSizeByName`, `GeminiStandardImageAspectRatio`, `GeminiExtendedImageAspectRatio`, `Gemini31FlashImageSize`, `Gemini31FlashLiteImageSize`, `Gemini3ProImageSize`, `Gemini25FlashImageSize`, `GeminiNativeImageSize`.
+
+  **Two caveats worth knowing before you rely on this.**
+  - _No in-editor deprecation warning on the dead `-preview` ids._ The `@deprecated` tags live on module-private model-metadata consts, and `GeminiImageModels` is projected out of a const array (`(typeof GEMINI_IMAGE_MODELS)[number]`), which collapses to bare string literals — JSDoc does not survive that projection. So `geminiImage('gemini-3-pro-image-preview')` still compiles cleanly with no strikethrough and no hint, and fails only at request time. Grep your codebase for `-image-preview` rather than expecting the compiler to flag it.
+  - _`gemini-3.1-flash-lite-image`'s four extreme ratios (`1:4` `4:1` `1:8` `8:1`) are partially inferred._ Unlike the other three native models, Flash Lite has no per-model ratio table on the Gemini API guide. The 14-value set rests on the Cloud model page's explicit enumeration plus `ai.google.dev`'s bare "a discrete set of 14 aspect ratios" assertion; the only Gemini-API enumeration for this model is a 10-item bullet prefixed "New aspect ratios", read here as a what's-new list rather than an exhaustive set. If the API rejects those four in practice, this type over-accepts and should narrow to the 10-ratio set.
+
+- [#1103](https://github.com/TanStack/ai/pull/1103) [`4f02789`](https://github.com/TanStack/ai/commit/4f027898a8e957353c29dcf423e59daa54868aee) - Type Gemini-native image models with their own provider options. `GeminiImageModelProviderOptionsByName` mapped **every** image model to the Imagen-shaped `GeminiImageProviderOptions`, so `modelOptions: { safetySettings, thinkingConfig, imageConfig, systemInstruction }` was a compile error on `gemini-3.1-flash-image-preview`, `gemini-3.1-flash-lite-image`, `gemini-3-pro-image-preview`, and `gemini-2.5-flash-image` — even though those models are served by `generateContent`, whose `GenerateContentConfig` accepts all of them. The adapter compensated by forwarding only `seed`, silently dropping anything else.
+
+  The map now splits native vs Imagen, mirroring the split already used by `GeminiImageModelSizeByName` and `GeminiImageModelInputModalitiesByName`: native models get the new `GeminiNativeImageProviderOptions` (`seed`, `safetySettings`, `thinkingConfig`, `imageConfig`, `systemInstruction`), Imagen models keep `GeminiImageProviderOptions`. Both API paths now pick their config fields by name — never a wholesale spread — so neither shape's fields can reach the other's endpoint. Runtime routing moves the same way, off a `gemini-` prefix test onto membership in `GEMINI_NATIVE_IMAGE_MODELS`: a `gemini-*` image model not present in that list now routes to `generateImages` instead of `generateContent`, so it fails against that endpoint rather than silently taking the native path.
+
+  `responseModalities` stays a protected adapter default (`['TEXT', 'IMAGE']`) and is deliberately absent from the new type. `modelOptions.imageConfig` merges **over** the `imageConfig` derived from the portable `size` option, per field — passing only `imageConfig.imageSize` keeps the `aspectRatio` that `size` implied. `HarmCategory` and `HarmBlockThreshold` are now re-exported so `safetySettings` can be written without adding `@google/genai` to your own dependencies.
+
+  `GEMINI_NATIVE_IMAGE_MODELS` and `isGeminiNativeImageModel` are exported so callers can read the same list the adapter uses for routing.
+
+  Native `imageConfig` is now `GeminiNativeImageConfig`: only `aspectRatio` and `imageSize`. Other `@google/genai` `ImageConfig` keys type-checked and then threw on the Gemini Developer API.
+
+  **BREAKING (types only):** Imagen fields no longer compile on Gemini-native image models — `aspectRatio`, `negativePrompt`, `personGeneration`, `safetyFilterLevel`, `addWatermark`, `language`, `outputMimeType`, `outputCompressionQuality`, `guidanceScale`, `enhancePrompt`, `includeSafetyAttributes`, `includeRaiReason`, `outputGcsUri`, `labels`. They previously type-checked but were already dropped at runtime (only `seed` was ever forwarded to `generateContent`), so no request behaviour changes. The compiler now reports what was already happening. Migrate `aspectRatio` to the portable `size` option (`'16:9_4K'`) or to `modelOptions.imageConfig`, and drop the rest. Native `imageConfig` also no longer accepts Vertex-only SDK keys such as `personGeneration` and `outputMimeType`. `GeminiImageAdapter.generateImages` (and its `~types.providerOptions`) also widens from `ImageGenerationOptions<GeminiImageProviderOptions>` to `ImageGenerationOptions<GeminiAnyImageProviderOptions>`, which affects code structurally annotated against the old signature.
+
+### Patch Changes
+
+- Updated dependencies [[`d10dfe6`](https://github.com/TanStack/ai/commit/d10dfe6eca788ae52631d45e5599aa0c45e9ba37), [`eda82cc`](https://github.com/TanStack/ai/commit/eda82cc8a86923afd604a663d050c6edfa6b829b), [`c63319e`](https://github.com/TanStack/ai/commit/c63319e34a2ca2f1d56b90addf28784f7c3e13ad), [`b09e010`](https://github.com/TanStack/ai/commit/b09e010b32932c812e65b1e14f6faa2b0e6d5cb8), [`0fb8263`](https://github.com/TanStack/ai/commit/0fb826321c9ba7bd5d8ba0062be2a00b6178726d)]:
+  - @tanstack/ai@0.45.0
+
+## 0.23.0
+
+### Minor Changes
+
+- [#1105](https://github.com/TanStack/ai/pull/1105) [`03f0f5d`](https://github.com/TanStack/ai/commit/03f0f5dde47f92219a4e23b2d81f0b631a74b4ec) - Add Gemini 3.7 Flash (`gemini-3.7-flash`) with full multimodal input, thinking, structured output, caching, and the same built-in tools as Gemini 3.6 Flash.
+
+### Patch Changes
+
+- Updated dependencies [[`99fb2b7`](https://github.com/TanStack/ai/commit/99fb2b7b113548b20afa894e014bd03773815a41)]:
+  - @tanstack/ai@0.44.1
+
+## 0.22.0
+
+### Minor Changes
+
+- [#926](https://github.com/TanStack/ai/pull/926) [`ee07854`](https://github.com/TanStack/ai/commit/ee07854fd3d2d4bb279e6e4748802f7f9a5a7167) - Add a multimodal `embed()` activity. A single primitive covers one input or a batch — `input` accepts a string, a text part, an image part, or a fused text+image item written as a nested `Array<ContentPart>` (`[textPart, imagePart]`, the same shape chat messages use), one vector per item, with the accepted item types narrowed per model at compile time. Top-level `dimensions` requests Matryoshka output sizes where supported. Results carry `embeddings: [{ vector, index }]` plus `usage` when the provider reports it, and `embed()` participates in generation middleware, debug logging, OTel (`gen_ai.operation.name: embeddings`), and devtools events like every other activity.
+
+  Provider adapters: `openaiEmbedding` (text-embedding-3-small/large), `geminiEmbedding` (gemini-embedding-001), `mistralEmbedding` (mistral-embed, codestral-embed), `ollamaEmbedding` (nomic-embed-text and any local model), `bedrockEmbedding` (Titan Text V2, Titan Multimodal G1 with fused text+image, Cohere Embed v3 on Bedrock), and `@tanstack/ai-cohere`'s `cohereEmbedding` (embed-v4.0, multimodal text+image with required `inputType`).
+
+### Patch Changes
+
+- [#1071](https://github.com/TanStack/ai/pull/1071) [`ea9c077`](https://github.com/TanStack/ai/commit/ea9c07724bd6992480238a699fbb18835eab743e) - fix: publish internal dependency ranges as `^x.y.z` instead of exact pins
+
+  Internal dependencies on other TanStack AI packages used `workspace:*` in
+  `dependencies` and `peerDependencies`. pnpm rewrites that to an **exact** version
+  at publish time, so a released package asked for e.g. `@tanstack/ai-utils@0.4.0`
+  rather than `^0.4.0`.
+
+  Two consequences for consumers:
+  - **Duplicate copies.** An exact pin cannot dedupe. Installing a newer
+    `@tanstack/ai` alongside a package pinned to the previous patch produced two
+    copies in the tree, which breaks `instanceof` checks and module-level state,
+    and inflates bundles.
+  - **Unsatisfiable peers.** An exactly pinned `peerDependency` conflicts the
+    moment the internal package ships its next patch, forcing consumers into
+    overrides or `--legacy-peer-deps`.
+
+  These fields now use `workspace:^`, which publishes as `^x.y.z`. Every package
+  here is still `0.x`, so `^0.43.1` resolves to `0.43.x` only — patches dedupe
+  cleanly and no breaking minor is ever pulled in.
+
+  `devDependencies` deliberately keep `workspace:*`: they are never published, and
+  `*` correctly means "always build against the local copy".
+
+- Updated dependencies [[`59aa8b5`](https://github.com/TanStack/ai/commit/59aa8b5049549246227c8f2cf736ce50d05205a5), [`ee07854`](https://github.com/TanStack/ai/commit/ee07854fd3d2d4bb279e6e4748802f7f9a5a7167), [`b785cc4`](https://github.com/TanStack/ai/commit/b785cc4ae382fb0e2a337199d192bd9335ac9249), [`47e2464`](https://github.com/TanStack/ai/commit/47e246480d29e2ab5a83ca684e047670e75ba66c), [`dd7ddf1`](https://github.com/TanStack/ai/commit/dd7ddf19283358adfbf61d057321d7daee3ca50d), [`6903978`](https://github.com/TanStack/ai/commit/690397804254dca638961c79b7941555edc52c02), [`fdb791a`](https://github.com/TanStack/ai/commit/fdb791a1c9c8de906eecf76f59743f697621b027), [`7aa4ae9`](https://github.com/TanStack/ai/commit/7aa4ae9d07d21195dd3d62598ac503f1dfdc79e4), [`ea9c077`](https://github.com/TanStack/ai/commit/ea9c07724bd6992480238a699fbb18835eab743e)]:
+  - @tanstack/ai@0.44.0
+
+## 0.21.0
+
+### Minor Changes
+
+- [#1041](https://github.com/TanStack/ai/pull/1041) [`399b4b1`](https://github.com/TanStack/ai/commit/399b4b1855a5fb93dfc37a2afa71cedb092ac36e) - Add Gemini 3.6 Flash (`gemini-3.6-flash`) and Gemini 3.5 Flash-Lite (`gemini-3.5-flash-lite`) chat models.
+
+  Both are stable GA text models with full multimodal input, thinking, structured output, batch/caching, and the native combined tools + `responseSchema` path. Tool surface includes code execution, file search, Google Search, Google Maps, and URL context. Computer Use (Preview) is listed for 3.6 Flash (and corrected onto existing 3.5 Flash); 3.5 Flash-Lite does not support Computer Use.
+
+### Patch Changes
+
+- Updated dependencies [[`7499171`](https://github.com/TanStack/ai/commit/74991716aea4d90a5d0363676a1e3349689a48e8)]:
+  - @tanstack/ai@0.43.0
+  - @tanstack/ai-utils@0.4.0
+
 ## 0.20.1
 
 ### Patch Changes
@@ -22,7 +551,9 @@
   ```ts
   createOpenaiImage('gpt-image-1', apiKey, { allowUrlFetch: true })
   createOpenaiVideo('sora-2', apiKey, { allowUrlFetch: true })
-  createGeminiVideo('veo-3.1-generate-preview', apiKey, { allowUrlFetch: true })
+  createGeminiVideo('veo-3.1-generate-preview', apiKey, {
+    allowUrlFetch: true,
+  })
   ```
 
   Migration: if you passed HTTP(S) URL image inputs to these adapters, either fetch the bytes yourself and pass a `data:` URI, pass a `gs://` reference (Veo), or set `allowUrlFetch: true`.

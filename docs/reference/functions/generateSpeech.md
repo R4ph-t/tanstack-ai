@@ -3,13 +3,11 @@ id: generateSpeech
 title: generateSpeech
 ---
 
-# Function: generateSpeech()
-
 ```ts
 function generateSpeech<TAdapter, TStream>(options): TTSActivityResult<TStream>;
 ```
 
-Defined in: [packages/ai/src/activities/generateSpeech/index.ts:142](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/generateSpeech/index.ts#L142)
+Defined in: packages/ai/src/activities/generateSpeech/index.ts:257
 
 TTS activity - generates speech from text.
 
@@ -37,6 +35,8 @@ Uses AI text-to-speech models to create audio from natural language text.
 
 ## Examples
 
+**Generate speech from text**
+
 ```ts
 import { generateSpeech } from '@tanstack/ai'
 import { openaiSpeech } from '@tanstack/ai-openai'
@@ -44,17 +44,21 @@ import { openaiSpeech } from '@tanstack/ai-openai'
 const result = await generateSpeech({
   adapter: openaiSpeech('tts-1-hd'),
   text: 'Hello, welcome to TanStack AI!',
-  voice: 'nova'
+  voice: 'nova',
+  threadId,
 })
 
 console.log(result.audio) // base64-encoded audio
 ```
+
+**With format and speed options**
 
 ```ts
 const result = await generateSpeech({
   adapter: openaiSpeech('tts-1'),
   text: 'This is slower speech.',
   voice: 'alloy',
+  threadId,
   format: 'wav',
   speed: 0.8
 })

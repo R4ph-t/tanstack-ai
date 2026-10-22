@@ -3,40 +3,31 @@ id: SandboxFileCustomEvent
 title: SandboxFileCustomEvent
 ---
 
-# Interface: SandboxFileCustomEvent
-
-Defined in: [packages/ai/src/types.ts:1426](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1426)
+Defined in: packages/ai/src/types.ts:1811
 
 Custom event for extensibility.
 
-@ag-ui/core provides: `name`, `value`
-TanStack AI adds: `model?`
+@ag-ui/core provides: `name`, `value`, `subagentRunId?`
 
 ## Extends
 
 - [`CustomEvent`](CustomEvent.md)
 
-## Indexable
-
-```ts
-[k: string]: unknown
-```
-
 ## Properties
 
-### model?
+### metadata?
 
 ```ts
-optional model: string;
+optional metadata?: Record<string, any>;
 ```
 
-Defined in: [packages/ai/src/types.ts:1339](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1339)
+Defined in: packages/ai/src/types.ts:1756
 
-Model identifier for multi-model support
+Extra information attached to this event.
 
 #### Inherited from
 
-[`CustomEvent`](CustomEvent.md).[`model`](CustomEvent.md#model)
+[`CustomEvent`](CustomEvent.md).[`metadata`](CustomEvent.md#metadata)
 
 ***
 
@@ -46,7 +37,10 @@ Model identifier for multi-model support
 name: "sandbox.file";
 ```
 
-Defined in: [packages/ai/src/types.ts:1427](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1427)
+Defined in: packages/ai/src/types.ts:1812
+
+What this custom event is. Required: without it a consumer cannot route
+the value.
 
 #### Overrides
 
@@ -56,13 +50,29 @@ CustomEvent.name
 
 ***
 
+### type
+
+```ts
+type: "CUSTOM";
+```
+
+Defined in: packages/ai/src/types.ts:1755
+
+#### Inherited from
+
+[`CustomEvent`](CustomEvent.md).[`type`](CustomEvent.md#type)
+
+***
+
 ### value
 
 ```ts
 value: object;
 ```
 
-Defined in: [packages/ai/src/types.ts:1428](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1428)
+Defined in: packages/ai/src/types.ts:1813
+
+The payload. Any JSON value, and required.
 
 #### path
 

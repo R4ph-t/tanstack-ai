@@ -1,10 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 import { generateVideo } from '@tanstack/ai'
 import { resolveDebugOption } from '@tanstack/ai/adapter-internals'
 
 import { falVideo } from '../src/adapters/video'
 import { recordBillableUnitsFromResponse } from '../src/utils/billing'
-import type { FalVideoProviderOptions } from '../src/model-meta'
+import type {
+  FalModelVideoDuration,
+  FalVideoProviderOptions,
+} from '../src/model-meta'
 
 function seedBillableUnits(requestId: string, units: string) {
   recordBillableUnitsFromResponse(
@@ -67,6 +70,7 @@ describe('Fal Video Adapter', () => {
       const adapter = createAdapter()
 
       const result = await generateVideo({
+        threadId: 'thread-1',
         adapter: adapter,
         prompt: 'A cat walking in the garden',
         modelOptions: {
@@ -96,6 +100,7 @@ describe('Fal Video Adapter', () => {
       const adapter = createAdapter()
 
       await generateVideo({
+        threadId: 'thread-1',
         adapter: adapter,
         prompt: 'A stylish woman walks down a Tokyo street',
         modelOptions: {
@@ -109,7 +114,7 @@ describe('Fal Video Adapter', () => {
       })
     })
 
-    it('includes duration option', async () => {
+    it('includes duration option using the model-typed keyword', async () => {
       mockQueueSubmit.mockResolvedValueOnce({
         request_id: 'job-789',
       })
@@ -117,9 +122,11 @@ describe('Fal Video Adapter', () => {
       const adapter = createAdapter()
 
       await generateVideo({
+        threadId: 'thread-1',
         adapter: adapter,
         prompt: 'A time lapse of a sunset',
-        duration: 10,
+        // veo3/image-to-video accepts '4s' | '6s' | '8s'
+        duration: '8s',
         modelOptions: {
           image_url: 'https://example.com/sunset.jpg',
         },
@@ -127,8 +134,39 @@ describe('Fal Video Adapter', () => {
 
       const [, options] = mockQueueSubmit.mock.calls[0]!
       expect(options.input).toMatchObject({
+        duration: '8s',
+      })
+    })
+
+    it('passes a numeric duration through for models not in the SDK', async () => {
+      mockQueueSubmit.mockResolvedValueOnce({ request_id: 'job-unk' })
+
+      await generateVideo({
+        threadId: 'thread-1',
+        adapter: falVideo('fal-ai/not-in-the-sdk', { apiKey: 'test' }),
+        prompt: 'A fox running through snow',
         duration: 10,
       })
+
+      const [, options] = mockQueueSubmit.mock.calls[0]!
+      expect(options.input).toMatchObject({ duration: 10 })
+    })
+
+    it('omits duration for kind: none models (Minimax)', async () => {
+      mockQueueSubmit.mockResolvedValueOnce({
+        request_id: 'job-mini',
+      })
+
+      const adapter = falVideo('fal-ai/minimax/video-01', { apiKey: 'test' })
+
+      await generateVideo({
+        threadId: 'thread-1',
+        adapter,
+        prompt: 'A fox running through snow',
+      })
+
+      const [, options] = mockQueueSubmit.mock.calls[0]!
+      expect(options.input).not.toHaveProperty('duration')
     })
 
     it('converts size with aspect_ratio and resolution', async () => {
@@ -139,6 +177,7 @@ describe('Fal Video Adapter', () => {
       const adapter = createAdapter()
 
       await generateVideo({
+        threadId: 'thread-1',
         adapter: adapter,
         prompt: 'A wide landscape video',
         size: '16:9_720p',
@@ -161,6 +200,7 @@ describe('Fal Video Adapter', () => {
       const adapter = createAdapter()
 
       await generateVideo({
+        threadId: 'thread-1',
         adapter: adapter,
         prompt: 'Test video',
         modelOptions: {
@@ -259,6 +299,104 @@ describe('Fal Video Adapter', () => {
     })
   })
 
+  describe('availableDurations / snapDuration', () => {
+    it('returns discrete keyword durations for Veo3', () => {
+      const adapter = falVideo('fal-ai/veo3', { apiKey: 'test' })
+      expect(adapter.availableDurations()).toEqual({
+        kind: 'discrete',
+        values: ['4s', '6s', '8s'],
+      })
+      expect(adapter.snapDuration(7)).toBe('6s')
+      expect(adapter.snapDuration('7s')).toBe('6s')
+      expect(adapter.snapDuration('auto')).toBeUndefined()
+      expect(adapter.snapDuration(9)).toBe('8s')
+    })
+
+    it('returns discrete numeric durations for Kling', () => {
+      const adapter = falVideo(
+        'fal-ai/kling-video/v1.6/standard/text-to-video',
+        { apiKey: 'test' },
+      )
+      expect(adapter.availableDurations()).toEqual({
+        kind: 'discrete',
+        values: ['5', '10'],
+      })
+      expect(adapter.snapDuration(7)).toBe('5')
+      expect(adapter.snapDuration(8)).toBe('10')
+    })
+
+    it('returns kind: none for Minimax (no duration field)', () => {
+      const adapter = falVideo('fal-ai/minimax/video-01', { apiKey: 'test' })
+      expect(adapter.availableDurations()).toEqual({ kind: 'none' })
+      expect(adapter.snapDuration(7)).toBeUndefined()
+    })
+
+    it('falls back to kind: none for uncurated models', () => {
+      const adapter = falVideo('fal-ai/some-unknown-video-model', {
+        apiKey: 'test',
+      })
+      expect(adapter.availableDurations()).toEqual({ kind: 'none' })
+    })
+
+    it('types duration as the model-specific union at compile time', () => {
+      const veo3 = falVideo('fal-ai/veo3', { apiKey: 'test' })
+      expectTypeOf(veo3.snapDuration).returns.toEqualTypeOf<
+        '4s' | '6s' | '8s' | undefined
+      >()
+      expectTypeOf<
+        FalModelVideoDuration<'fal-ai/minimax/video-01'>
+      >().toEqualTypeOf<undefined>()
+      expectTypeOf<
+        FalModelVideoDuration<'fal-ai/not-in-the-sdk'>
+      >().toEqualTypeOf<string | number | undefined>()
+    })
+
+    it('rejects out-of-union durations at the generateVideo call site', () => {
+      // Type-only: never invoked, so nothing hits the mocked queue.
+      const typeOnly = () => {
+        const veo = falVideo('fal-ai/veo3.1', { apiKey: 'test' })
+        // @ts-expect-error 7 is not '4s' | '6s' | '8s'
+        void generateVideo({ adapter: veo, prompt: 'x', duration: 7 })
+        // @ts-expect-error '5' is not '4s' | '6s' | '8s'
+        void generateVideo({ adapter: veo, prompt: 'x', duration: '5' })
+
+        const mini = falVideo('fal-ai/minimax/video-01', { apiKey: 'test' })
+        // @ts-expect-error minimax has no duration field
+        void generateVideo({ adapter: mini, prompt: 'x', duration: 5 })
+
+        const kling = falVideo('fal-ai/kling-video/v3/pro/text-to-video', {
+          apiKey: 'test',
+        })
+        void generateVideo({
+          adapter: kling,
+          prompt: 'x',
+          // @ts-expect-error duration moved out of modelOptions
+          modelOptions: { duration: '5' },
+        })
+      }
+      expect(typeOnly).toBeTypeOf('function')
+    })
+
+    it('curates the models used by the docs and example app', () => {
+      expect(
+        falVideo('fal-ai/veo3.1', { apiKey: 'test' }).snapDuration(7),
+      ).toBe('6s')
+      expect(
+        falVideo('fal-ai/kling-video/v3/pro/text-to-video', {
+          apiKey: 'test',
+        }).availableDurations(),
+      ).toMatchObject({
+        kind: 'discrete',
+        values: expect.arrayContaining(['3', '15']),
+      })
+      expect(
+        falVideo('fal-ai/kling-video/v2.6/pro/image-to-video', {
+          apiKey: 'test',
+        }).snapDuration(8),
+      ).toBe('10')
+    })
+  })
+
   describe('getVideoStatus', () => {
     it('returns pending status for queued jobs', async () => {
       mockQueueStatus.mockResolvedValueOnce({
@@ -318,7 +456,7 @@ describe('Fal Video Adapter', () => {
     })
   })
 
-  describe('getVideoUrl', () => {
+  describe('getVideo', () => {
     it('returns video URL from video object', async () => {
       mockQueueResult.mockResolvedValueOnce({
         data: {
@@ -328,7 +466,7 @@ describe('Fal Video Adapter', () => {
 
       const adapter = createAdapter()
 
-      const result = await adapter.getVideoUrl('job-123')
+      const result = await adapter.getVideo('job-123')
 
       expect(mockQueueResult).toHaveBeenCalledWith(
         'fal-ai/veo3/image-to-video',
@@ -348,7 +486,7 @@ describe('Fal Video Adapter', () => {
 
       const adapter = createAdapter()
 
-      const result = await adapter.getVideoUrl('job-456')
+      const result = await adapter.getVideo('job-456')
 
       expect(result.url).toBe('https://fal.media/files/video2.mp4')
     })
@@ -371,7 +509,7 @@ describe('Fal Video Adapter', () => {
 
       const adapter = createAdapter()
 
-      await expect(adapter.getVideoUrl('job-failed')).rejects.toThrow(
+      await expect(adapter.getVideo('job-failed')).rejects.toThrow(
         'Video generation failed: body.prompt: String should have at most 2500 characters',
       )
     })
@@ -383,7 +521,7 @@ describe('Fal Video Adapter', () => {
 
       const adapter = createAdapter()
 
-      await expect(adapter.getVideoUrl('job-789')).rejects.toThrow(
+      await expect(adapter.getVideo('job-789')).rejects.toThrow(
         'Video URL not found in response',
       )
     })
@@ -397,14 +535,14 @@ describe('Fal Video Adapter', () => {
         requestId: 'job-billed',
       })
 
-      const result = await createAdapter().getVideoUrl('job-billed')
+      const result = await createAdapter().getVideo('job-billed')
 
       expect(result.url).toBe('https://fal.media/files/billed.mp4')
       expect(result.usage).toEqual({
         promptTokens: 0,
         completionTokens: 0,
         totalTokens: 0,
-        unitsBilled: 12,
+        billed: { quantity: 12, unit: 'units' },
       })
     })
 
@@ -416,7 +554,7 @@ describe('Fal Video Adapter', () => {
         requestId: 'job-unbilled',
       })
 
-      const result = await createAdapter().getVideoUrl('job-unbilled')
+      const result = await createAdapter().getVideo('job-unbilled')
 
       expect(result.usage).toBeUndefined()
     })

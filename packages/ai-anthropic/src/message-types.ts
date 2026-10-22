@@ -8,29 +8,14 @@
 
 import type {
   CacheControlEphemeral,
+  CitationsConfigParam,
   TextCitationParam,
 } from '@anthropic-ai/sdk/resources'
-
-/**
- * Supported image media types for Anthropic.
- */
-export type AnthropicImageMediaType =
-  | 'image/jpeg'
-  | 'image/png'
-  | 'image/gif'
-  | 'image/webp'
 
 /**
  * Metadata for Anthropic image content parts.
  */
 export interface AnthropicImageMetadata {
-  /**
-   * The MIME type of the image.
-   * Required when using base64 source type.
-   *
-   * @see https://docs.anthropic.com/claude/docs/vision#supported-image-types
-   */
-  mediaType?: AnthropicImageMediaType
   /**
    * Cache control settings for the image content.
    */
@@ -48,27 +33,22 @@ export interface AnthropicTextMetadata {
   citations?: Array<TextCitationParam>
 }
 /**
- * Supported document media types for Anthropic.
- */
-export type AnthropicDocumentMediaType = 'application/pdf'
-
-/**
  * Metadata for Anthropic document content parts (e.g., PDFs).
  */
 export interface AnthropicDocumentMetadata {
-  /**
-   * The MIME type of the document.
-   * Required for document content, typically 'application/pdf'.
-   *
-   * @see https://docs.anthropic.com/claude/docs/pdf-support
-   */
-  mediaType?: AnthropicDocumentMediaType
   /**
    * Cache control settings for the document.
    */
   cache_control?: CacheControlEphemeral
 
+  citations?: CitationsConfigParam
+
   context?: string
+
+  /**
+   * The document filename. Used as the document title when `title` is absent.
+   */
+  filename?: string
 
   title?: string
 }

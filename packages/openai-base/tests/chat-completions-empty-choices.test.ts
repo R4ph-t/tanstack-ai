@@ -3,7 +3,7 @@ import { OpenAIBaseChatCompletionsTextAdapter } from '../src/adapters/chat-compl
 import OpenAI from 'openai'
 import { EventType } from '@tanstack/ai'
 import { resolveDebugOption } from '@tanstack/ai/adapter-internals'
-import type { StreamChunk, Tool } from '@tanstack/ai'
+import type { AdapterYieldChunk, Tool } from '@tanstack/ai'
 
 const testLogger = resolveDebugOption(false)
 
@@ -120,9 +120,10 @@ describe('OpenAIBaseChatCompletionsTextAdapter — usage-only terminal chunk', (
 
     setupMockSdkClient(streamChunks)
     const adapter = new TestChatCompletionsAdapter(testConfig, 'test-model')
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
 
     for await (const chunk of adapter.chatStream({
+      threadId: 'thread-1',
       logger: testLogger,
       model: 'test-model',
       messages: [{ role: 'user', content: 'Weather in Berlin?' }],
@@ -135,7 +136,7 @@ describe('OpenAIBaseChatCompletionsTextAdapter — usage-only terminal chunk', (
     expect(toolEnd).toBeDefined()
     if (toolEnd?.type === EventType.TOOL_CALL_END) {
       expect(toolEnd.toolCallId).toBe('call_1')
-      expect(toolEnd.toolName).toBe('get_weather')
+      expect(toolEnd.toolCallName).toBe('get_weather')
     }
 
     const runFinished = chunks.find((c) => c.type === EventType.RUN_FINISHED)
@@ -188,9 +189,10 @@ describe('OpenAIBaseChatCompletionsTextAdapter — usage-only terminal chunk', (
 
     setupMockSdkClient(streamChunks)
     const adapter = new TestChatCompletionsAdapter(testConfig, 'test-model')
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
 
     for await (const chunk of adapter.chatStream({
+      threadId: 'thread-1',
       logger: testLogger,
       model: 'test-model',
       messages: [{ role: 'user', content: 'Weather in Berlin?' }],
@@ -203,7 +205,7 @@ describe('OpenAIBaseChatCompletionsTextAdapter — usage-only terminal chunk', (
     expect(toolEnd).toBeDefined()
     if (toolEnd?.type === EventType.TOOL_CALL_END) {
       expect(toolEnd.toolCallId).toBe('call_1')
-      expect(toolEnd.toolName).toBe('get_weather')
+      expect(toolEnd.toolCallName).toBe('get_weather')
       expect(toolEnd.input).toEqual({ location: 'Berlin' })
     }
 
@@ -219,5 +221,40 @@ describe('OpenAIBaseChatCompletionsTextAdapter — usage-only terminal chunk', (
         totalTokens: 12,
       })
     }
+  })
+
+  it('skips a usage-only chunk that has no choices field at all', async () => {
+    // Some gateways omit `choices` on the usage trailer instead of sending
+    // `choices: []`.
+    setupMockSdkClient([
+      {
+        id: 'chatcmpl-no-choices',
+        model: 'test-model',
+        choices: [{ delta: { content: 'Hi.' }, finish_reason: 'stop' }],
+      },
+      {
+        id: 'chatcmpl-no-choices',
+        model: 'test-model',
+        usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+      },
+    ])
+    const adapter = new TestChatCompletionsAdapter(testConfig, 'test-model')
+    const chunks: Array<AdapterYieldChunk> = []
+
+    for await (const chunk of adapter.chatStream({
+      threadId: 'thread-1',
+      logger: testLogger,
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Hello' }],
+    })) {
+      chunks.push(chunk)
+    }
+
+    expect(chunks.find((c) => c.type === EventType.RUN_ERROR)).toBeUndefined()
+    const runFinished = chunks.find((c) => c.type === EventType.RUN_FINISHED)
+    expect(runFinished).toMatchObject({
+      finishReason: 'stop',
+      usage: { promptTokens: 3, completionTokens: 1, totalTokens: 4 },
+    })
   })
 })

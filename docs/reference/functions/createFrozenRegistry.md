@@ -3,17 +3,15 @@ id: createFrozenRegistry
 title: createFrozenRegistry
 ---
 
-# Function: createFrozenRegistry()
-
 ```ts
-function createFrozenRegistry<TTool>(tools): ToolRegistry<TTool>;
+function createFrozenRegistry<TTool>(tools?): ToolRegistry<TTool>;
 ```
 
-Defined in: [packages/ai/src/tool-registry.ts:119](https://github.com/TanStack/ai/blob/main/packages/ai/src/tool-registry.ts#L119)
+Defined in: packages/ai/src/tool-registry.ts:119
 
 Create a frozen (immutable) tool registry from a tools array.
 
-This is used internally to wrap static `tools` arrays for backward compatibility.
+Use it to wrap a static `tools` array.
 Add and remove operations are no-ops on frozen registries.
 
 ## Type Parameters
@@ -24,7 +22,7 @@ Add and remove operations are no-ops on frozen registries.
 
 ## Parameters
 
-### tools
+### tools?
 
 `TTool`[] = `[]`
 

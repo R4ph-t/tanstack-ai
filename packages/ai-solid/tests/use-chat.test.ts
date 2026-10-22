@@ -1,19 +1,108 @@
-import { waitFor } from '@solidjs/testing-library'
-import type { ModelMessage } from '@tanstack/ai'
+import { renderHook, waitFor } from '@solidjs/testing-library'
+import { ChatClient } from '@tanstack/ai-client'
+import { createSignal } from 'solid-js'
 import { describe, expect, it, vi } from 'vitest'
-import type { UIMessage } from '../src/types'
+import { useChat } from '../src/use-chat'
 import {
+  createInterruptResumeSnapshot,
   createMockConnectionAdapter,
   createTextChunks,
   createToolCallChunks,
   renderUseChat,
 } from './test-utils'
+import type { UIMessage } from '../src/types'
+import type { ModelMessage } from '@tanstack/ai'
 
 describe('useChat', () => {
+  describe('interrupt state', () => {
+    it('projects one immutable reactive snapshot', async () => {
+      const onInterruptStateChange = vi.fn()
+      const rendered = renderHook(() =>
+        useChat({
+          threadId: 'thread-1',
+          connection: createMockConnectionAdapter(),
+          initialResumeSnapshot: createInterruptResumeSnapshot(),
+          onInterruptStateChange,
+        }),
+      )
+      const chat = rendered.result
+
+      expect(Object.isFrozen(chat.interrupts())).toBe(true)
+      expect(chat.interrupts()[0]).toMatchObject({
+        id: 'staged-interrupt',
+        status: 'pending',
+      })
+      expect(chat.interrupts()[1]).toMatchObject({
+        id: 'invalid-interrupt',
+        status: 'pending',
+      })
+      expect(chat.interruptErrors()).toEqual([])
+      expect(chat.resuming()).toBe(false)
+      expect(chat.interrupts()[0]).toEqual(
+        expect.objectContaining({
+          resolveInterrupt: expect.any(Function),
+          cancel: expect.any(Function),
+          clearResolution: expect.any(Function),
+        }),
+      )
+
+      chat.resolveInterrupts(false)
+      await waitFor(() => {
+        expect(chat.interruptErrors()[0]?.code).toBe(
+          'unsupported-bulk-operation',
+        )
+      })
+      expect(onInterruptStateChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          interrupts: chat.interrupts(),
+          interruptErrors: chat.interruptErrors(),
+        }),
+        { source: 'live' },
+      )
+    })
+
+    it('delegates every root interrupt control to ChatClient', async () => {
+      const resolve = vi
+        .spyOn(ChatClient.prototype, 'resolveInterrupts')
+        .mockImplementation(() => {})
+      const cancel = vi
+        .spyOn(ChatClient.prototype, 'cancelInterrupts')
+        .mockImplementation(() => {})
+      const retry = vi
+        .spyOn(ChatClient.prototype, 'retryInterrupts')
+        .mockImplementation(() => {})
+      const unsafe = vi
+        .spyOn(ChatClient.prototype, 'resumeInterruptsUnsafe')
+        .mockResolvedValue(true)
+      const rendered = renderHook(() =>
+        useChat({
+          threadId: 'thread-1',
+          connection: createMockConnectionAdapter(),
+        }),
+      )
+      const chat = rendered.result
+      const resolver = () => undefined
+      const resume = [{ interruptId: 'one', status: 'cancelled' as const }]
+
+      chat.resolveInterrupts(resolver)
+      chat.cancelInterrupts()
+      chat.retryInterrupts()
+      await expect(chat.resumeInterruptsUnsafe(resume)).resolves.toBe(true)
+
+      expect(resolve).toHaveBeenCalledWith(resolver)
+      expect(cancel).toHaveBeenCalledOnce()
+      expect(retry).toHaveBeenCalledOnce()
+      expect(unsafe).toHaveBeenCalledWith(resume, undefined)
+    })
+  })
+
   describe('initialization', () => {
     it('should initialize with default state', () => {
       const adapter = createMockConnectionAdapter()
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       expect(result.current.messages).toEqual([])
       expect(result.current.isLoading).toBe(false)
@@ -26,7 +115,11 @@ describe('useChat', () => {
 
     it('should subscribe immediately when live is true', async () => {
       const adapter = createMockConnectionAdapter()
-      const { result } = renderUseChat({ connection: adapter, live: true })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+        live: true,
+      })
 
       await waitFor(() => {
         expect(result.current.isSubscribed).toBe(true)
@@ -38,7 +131,7 @@ describe('useChat', () => {
 
     it('should initialize with provided messages', () => {
       const adapter = createMockConnectionAdapter()
-      const initialMessages: UIMessage[] = [
+      const initialMessages: Array<UIMessage> = [
         {
           id: 'msg-1',
           role: 'user',
@@ -48,6 +141,7 @@ describe('useChat', () => {
       ]
 
       const { result } = renderUseChat({
+        threadId: 'thread-1',
         connection: adapter,
         initialMessages,
       })
@@ -57,7 +151,7 @@ describe('useChat', () => {
 
     it('should initialize with persisted messages', async () => {
       const adapter = createMockConnectionAdapter()
-      const persistedMessages: UIMessage[] = [
+      const persistedMessages: Array<UIMessage> = [
         {
           id: 'persisted-1',
           role: 'user',
@@ -66,26 +160,32 @@ describe('useChat', () => {
         },
       ]
       const persistence = {
-        getItem: vi.fn(() => persistedMessages),
+        getItem: vi.fn(() => ({ messages: persistedMessages })),
         setItem: vi.fn(),
         removeItem: vi.fn(),
       }
 
-      const { result } = renderUseChat({
-        connection: adapter,
-        id: 'persisted-chat',
-        persistence,
+      let firstMessages: ReadonlyArray<UIMessage> | undefined
+      const rendered = renderHook(() => {
+        const chat = useChat({
+          connection: adapter,
+          threadId: 'persisted-chat',
+          persistence,
+        })
+        firstMessages ??= chat.messages()
+        return chat
       })
 
+      expect(firstMessages).toEqual(persistedMessages)
       await waitFor(() => {
-        expect(result.current.messages).toEqual(persistedMessages)
+        expect(rendered.result.messages()).toEqual(persistedMessages)
       })
       expect(persistence.getItem).toHaveBeenCalledWith('persisted-chat')
     })
 
     it('should preserve persisted empty messages over provided initial messages', async () => {
       const adapter = createMockConnectionAdapter()
-      const initialMessages: UIMessage[] = [
+      const initialMessages: Array<UIMessage> = [
         {
           id: 'initial-1',
           role: 'user',
@@ -94,16 +194,16 @@ describe('useChat', () => {
         },
       ]
       const persistence = {
-        getItem: vi.fn(() => []),
+        getItem: vi.fn(() => ({ messages: [] })),
         setItem: vi.fn(),
         removeItem: vi.fn(),
       }
 
       const { result } = renderUseChat({
         connection: adapter,
-        id: 'persisted-empty-chat',
+        threadId: 'persisted-empty-chat',
         initialMessages,
-        persistence,
+        persistence: persistence,
       })
 
       await waitFor(() => {
@@ -112,13 +212,13 @@ describe('useChat', () => {
       expect(result.current.messages).toEqual([])
     })
 
-    it('should use provided id', async () => {
+    it('should use provided threadId', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
 
       const { result } = renderUseChat({
         connection: adapter,
-        id: 'custom-id',
+        threadId: 'custom-id',
       })
 
       await result.current.sendMessage('Test')
@@ -138,7 +238,10 @@ describe('useChat', () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
 
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Test')
 
@@ -154,7 +257,10 @@ describe('useChat', () => {
 
     it('should maintain client instance across re-renders', () => {
       const adapter = createMockConnectionAdapter()
-      const { result, rerender } = renderUseChat({ connection: adapter })
+      const { result, rerender } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       const initialMessages = result.current.messages
 
@@ -166,10 +272,76 @@ describe('useChat', () => {
   })
 
   describe('state synchronization', () => {
+    it('keeps conversation history when reactive forwardedProps changes', async () => {
+      const requests: Array<{ users: number; body: unknown }> = []
+      const adapter = createMockConnectionAdapter({
+        chunks: createTextChunks('Response'),
+        onConnect: (messages, data) => {
+          requests.push({
+            users: messages.filter((message) => message.role === 'user').length,
+            body: data?.['provider'],
+          })
+        },
+      })
+      const { result } = renderHook(() => {
+        const [provider, setProvider] = createSignal('openai')
+        const chat = useChat({
+          threadId: 'thread-1',
+          connection: adapter,
+          get forwardedProps() {
+            return { provider: provider() }
+          },
+        })
+        return { chat, setProvider }
+      })
+
+      await result.chat.sendMessage('First')
+      result.setProvider('anthropic')
+      await result.chat.sendMessage('Second')
+
+      expect(requests).toEqual([
+        { users: 1, body: 'openai' },
+        { users: 2, body: 'anthropic' },
+      ])
+      expect(
+        result.chat.messages().filter((message) => message.role === 'user'),
+      ).toHaveLength(2)
+    })
+
+    it('starts a new client when reactive threadId changes', async () => {
+      const users: Array<number> = []
+      const adapter = createMockConnectionAdapter({
+        chunks: createTextChunks('Response'),
+        onConnect: (messages) => {
+          users.push(
+            messages.filter((message) => message.role === 'user').length,
+          )
+        },
+      })
+      const { result } = renderHook(() => {
+        const [threadId, setThreadId] = createSignal('first-thread')
+        const chat = useChat({
+          connection: adapter,
+          get threadId() {
+            return threadId()
+          },
+        })
+        return { chat, setThreadId }
+      })
+
+      await result.chat.sendMessage('First')
+      result.setThreadId('second-thread')
+      await result.chat.sendMessage('Second')
+
+      expect(users).toEqual([1, 1])
+    })
     it('should update messages via onMessagesChange callback', async () => {
       const chunks = createTextChunks('Hello, world!')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
 
@@ -193,7 +365,10 @@ describe('useChat', () => {
         chunks,
         chunkDelay: 50,
       })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       expect(result.current.isLoading).toBe(false)
 
@@ -218,7 +393,10 @@ describe('useChat', () => {
         shouldError: true,
         error,
       })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Test')
 
@@ -232,7 +410,10 @@ describe('useChat', () => {
     it('should persist state across re-renders', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result, rerender } = renderUseChat({ connection: adapter })
+      const { result, rerender } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
 
@@ -253,7 +434,10 @@ describe('useChat', () => {
     it('should send a message and append it', async () => {
       const chunks = createTextChunks('Hello, world!')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
 
@@ -271,10 +455,43 @@ describe('useChat', () => {
       }
     })
 
+    it('should merge sendMessage options.body into the request', async () => {
+      const chunks = createTextChunks('Response')
+      let capturedData: Record<string, unknown> | undefined
+      const adapter = createMockConnectionAdapter({
+        chunks,
+        onConnect: (_messages, data) => {
+          capturedData = data
+        },
+      })
+
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+        forwardedProps: { provider: 'openai' },
+      })
+
+      await result.current.sendMessage('Test', {
+        whenBusy: 'queue',
+        body: { provider: 'anthropic', attachmentIds: ['a1', 'a2'] },
+      })
+
+      await waitFor(() => {
+        expect(result.current.messages.length).toBeGreaterThan(0)
+      })
+
+      expect(capturedData?.['provider']).toBe('anthropic')
+      expect(capturedData?.['attachmentIds']).toEqual(['a1', 'a2'])
+      expect(capturedData?.['whenBusy']).toBeUndefined()
+    })
+
     it('should create assistant message from stream chunks', async () => {
       const chunks = createTextChunks('Hello, world!')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
 
@@ -300,7 +517,10 @@ describe('useChat', () => {
 
     it('should not send empty messages', async () => {
       const adapter = createMockConnectionAdapter()
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('')
       await result.current.sendMessage('   ')
@@ -313,7 +533,10 @@ describe('useChat', () => {
         chunks: createTextChunks('Response'),
         chunkDelay: 100,
       })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       const promise1 = result.current.sendMessage('First')
       const promise2 = result.current.sendMessage('Second')
@@ -338,7 +561,10 @@ describe('useChat', () => {
         shouldError: true,
         error,
       })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Test')
 
@@ -355,7 +581,10 @@ describe('useChat', () => {
     it('should append a UIMessage', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       const message: UIMessage = {
         id: 'user-1',
@@ -376,7 +605,10 @@ describe('useChat', () => {
     it('should convert and append a ModelMessage', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       const modelMessage: ModelMessage = {
         role: 'user',
@@ -402,7 +634,10 @@ describe('useChat', () => {
         shouldError: true,
         error,
       })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       const message: UIMessage = {
         id: 'msg-1',
@@ -441,7 +676,10 @@ describe('useChat', () => {
 
       // Create a new adapter for the second call
       const adapter2 = createMockConnectionAdapter({ chunks: chunks2 })
-      const { result, rerender } = renderUseChat({ connection: adapter })
+      const { result, rerender } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
 
@@ -453,7 +691,7 @@ describe('useChat', () => {
       })
 
       // Reload with new adapter
-      rerender({ connection: adapter2 })
+      rerender({ threadId: 'thread-1', connection: adapter2 })
       await result.current.reload()
 
       await waitFor(() => {
@@ -471,7 +709,10 @@ describe('useChat', () => {
     it('should maintain conversation history after reload', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('First')
       await waitFor(() => {
@@ -496,7 +737,10 @@ describe('useChat', () => {
     it('should handle errors during reload', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
       await waitFor(() => {
@@ -517,7 +761,10 @@ describe('useChat', () => {
         chunks,
         chunkDelay: 50,
       })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       const sendPromise = result.current.sendMessage('Test')
 
@@ -543,7 +790,10 @@ describe('useChat', () => {
 
     it('should be safe to call multiple times', () => {
       const adapter = createMockConnectionAdapter()
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       // Should not throw
       result.current.stop()
@@ -560,7 +810,10 @@ describe('useChat', () => {
         chunks,
         chunkDelay: 50,
       })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       const sendPromise = result.current.sendMessage('Test')
 
@@ -591,7 +844,10 @@ describe('useChat', () => {
         chunks,
         chunkDelay: 50,
       })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       const sendPromise = result.current.sendMessage('Test')
 
@@ -621,7 +877,10 @@ describe('useChat', () => {
     it('should clear all messages', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
       await waitFor(() => {
@@ -634,7 +893,7 @@ describe('useChat', () => {
     })
 
     it('should reset to initial state', async () => {
-      const initialMessages: UIMessage[] = [
+      const initialMessages: Array<UIMessage> = [
         {
           id: 'msg-1',
           role: 'user',
@@ -646,6 +905,7 @@ describe('useChat', () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
       const { result } = renderUseChat({
+        threadId: 'thread-1',
         connection: adapter,
         initialMessages,
       })
@@ -666,7 +926,10 @@ describe('useChat', () => {
     it('should maintain client instance after clear', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
       await waitFor(() => {
@@ -686,9 +949,12 @@ describe('useChat', () => {
   describe('setMessages', () => {
     it('should manually set messages', () => {
       const adapter = createMockConnectionAdapter()
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
-      const newMessages: UIMessage[] = [
+      const newMessages: Array<UIMessage> = [
         {
           id: 'msg-1',
           role: 'user',
@@ -704,11 +970,14 @@ describe('useChat', () => {
 
     it('should update state immediately', () => {
       const adapter = createMockConnectionAdapter()
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       expect(result.current.messages).toEqual([])
 
-      const newMessages: UIMessage[] = [
+      const newMessages: Array<UIMessage> = [
         {
           id: 'msg-1',
           role: 'user',
@@ -726,7 +995,10 @@ describe('useChat', () => {
     it('should replace all existing messages', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
       await waitFor(() => {
@@ -735,7 +1007,7 @@ describe('useChat', () => {
 
       const originalCount = result.current.messages.length
 
-      const newMessages: UIMessage[] = [
+      const newMessages: Array<UIMessage> = [
         {
           id: 'msg-new',
           role: 'user',
@@ -759,6 +1031,7 @@ describe('useChat', () => {
       const onChunk = vi.fn()
 
       const { result } = renderUseChat({
+        threadId: 'thread-1',
         connection: adapter,
         onChunk,
       })
@@ -779,6 +1052,7 @@ describe('useChat', () => {
       const onFinish = vi.fn()
 
       const { result } = renderUseChat({
+        threadId: 'thread-1',
         connection: adapter,
         onFinish,
       })
@@ -803,6 +1077,7 @@ describe('useChat', () => {
       const onError = vi.fn()
 
       const { result } = renderUseChat({
+        threadId: 'thread-1',
         connection: adapter,
         onError,
       })
@@ -822,6 +1097,7 @@ describe('useChat', () => {
       const onResponse = vi.fn()
 
       const { result } = renderUseChat({
+        threadId: 'thread-1',
         connection: adapter,
         onResponse,
       })
@@ -840,28 +1116,33 @@ describe('useChat', () => {
     describe('options changes', () => {
       it('should maintain client instance when options change', () => {
         const adapter1 = createMockConnectionAdapter()
-        const { result, rerender } = renderUseChat({ connection: adapter1 })
+        const { result, rerender } = renderUseChat({
+          threadId: 'thread-1',
+          connection: adapter1,
+        })
 
         const initialMessages = result.current.messages
 
         const adapter2 = createMockConnectionAdapter()
-        rerender({ connection: adapter2 })
+        rerender({ threadId: 'thread-1', connection: adapter2 })
 
         // Client instance should persist (current implementation doesn't update)
         // This documents current behavior - options changes don't update client
         expect(result.current.messages).toBe(initialMessages)
       })
 
-      it('should handle body changes', () => {
+      it('should handle forwardedProps changes', () => {
         const adapter = createMockConnectionAdapter()
         const { result, rerender } = renderUseChat({
+          threadId: 'thread-1',
           connection: adapter,
-          body: { userId: '123' },
+          forwardedProps: { userId: '123' },
         })
 
         rerender({
+          threadId: 'thread-1',
           connection: adapter,
-          body: { userId: '456' },
+          forwardedProps: { userId: '456' },
         })
 
         // Should not throw
@@ -872,12 +1153,14 @@ describe('useChat', () => {
         const adapter = createMockConnectionAdapter()
         const onChunk1 = vi.fn()
         const { result, rerender } = renderUseChat({
+          threadId: 'thread-1',
           connection: adapter,
           onChunk: onChunk1,
         })
 
         const onChunk2 = vi.fn()
         rerender({
+          threadId: 'thread-1',
           connection: adapter,
           onChunk: onChunk2,
         })
@@ -894,7 +1177,10 @@ describe('useChat', () => {
           chunks,
           chunkDelay: 100,
         })
-        const { result, unmount } = renderUseChat({ connection: adapter })
+        const { result, unmount } = renderUseChat({
+          threadId: 'thread-1',
+          connection: adapter,
+        })
 
         const sendPromise = result.current.sendMessage('Test')
 
@@ -916,7 +1202,10 @@ describe('useChat', () => {
           chunks,
           chunkDelay: 100,
         })
-        const { result, unmount } = renderUseChat({ connection: adapter })
+        const { result, unmount } = renderUseChat({
+          threadId: 'thread-1',
+          connection: adapter,
+        })
 
         result.current.sendMessage('Test')
 
@@ -937,7 +1226,10 @@ describe('useChat', () => {
           chunks: createTextChunks('Response'),
           chunkDelay: 50,
         })
-        const { result } = renderUseChat({ connection: adapter })
+        const { result } = renderUseChat({
+          threadId: 'thread-1',
+          connection: adapter,
+        })
 
         const promise1 = result.current.sendMessage('First')
         const promise2 = result.current.sendMessage('Second')
@@ -961,7 +1253,10 @@ describe('useChat', () => {
           chunks,
           chunkDelay: 50,
         })
-        const { result } = renderUseChat({ connection: adapter })
+        const { result } = renderUseChat({
+          threadId: 'thread-1',
+          connection: adapter,
+        })
 
         const sendPromise = result.current.sendMessage('Test')
 
@@ -989,7 +1284,10 @@ describe('useChat', () => {
           chunks,
           chunkDelay: 50,
         })
-        const { result } = renderUseChat({ connection: adapter })
+        const { result } = renderUseChat({
+          threadId: 'thread-1',
+          connection: adapter,
+        })
 
         const sendPromise = result.current.sendMessage('Test')
 
@@ -1016,7 +1314,10 @@ describe('useChat', () => {
           shouldError: true,
           error,
         })
-        const { result } = renderUseChat({ connection: adapter })
+        const { result } = renderUseChat({
+          threadId: 'thread-1',
+          connection: adapter,
+        })
 
         await result.current.sendMessage('Test')
 
@@ -1035,7 +1336,10 @@ describe('useChat', () => {
           shouldError: true,
           error,
         })
-        const { result } = renderUseChat({ connection: adapter })
+        const { result } = renderUseChat({
+          threadId: 'thread-1',
+          connection: adapter,
+        })
 
         await result.current.sendMessage('Test')
 
@@ -1053,6 +1357,7 @@ describe('useChat', () => {
           error: new Error('Initial error'),
         })
         const { result, rerender } = renderUseChat({
+          threadId: 'thread-1',
           connection: errorAdapter,
         })
 
@@ -1067,7 +1372,7 @@ describe('useChat', () => {
         const workingAdapter = createMockConnectionAdapter({
           chunks: createTextChunks('Success'),
         })
-        rerender({ connection: workingAdapter })
+        rerender({ threadId: 'thread-1', connection: workingAdapter })
 
         await result.current.sendMessage('Test')
 
@@ -1095,11 +1400,11 @@ describe('useChat', () => {
 
         const { result: result1 } = renderUseChat({
           connection: adapter1,
-          id: 'chat-1',
+          threadId: 'chat-1',
         })
         const { result: result2 } = renderUseChat({
           connection: adapter2,
-          id: 'chat-2',
+          threadId: 'chat-2',
         })
 
         await result1.current.sendMessage('Hello 1')
@@ -1123,11 +1428,11 @@ describe('useChat', () => {
         const adapter = createMockConnectionAdapter()
         const { result: result1 } = renderUseChat({
           connection: adapter,
-          id: 'chat-1',
+          threadId: 'chat-1',
         })
         const { result: result2 } = renderUseChat({
           connection: adapter,
-          id: 'chat-2',
+          threadId: 'chat-2',
         })
 
         // Should not interfere with each other
@@ -1144,9 +1449,11 @@ describe('useChat', () => {
         })
 
         const { result: result1 } = renderUseChat({
+          threadId: 'thread-1',
           connection: adapter1,
         })
         const { result: result2 } = renderUseChat({
+          threadId: 'thread-1',
           connection: adapter2,
         })
 
@@ -1184,6 +1491,7 @@ describe('useChat', () => {
         // via `as any` and then never exercised its result — `addToolResult`
         // itself is the public API under test.
         const { result } = renderUseChat({
+          threadId: 'thread-1',
           connection: adapter,
         })
 
@@ -1220,57 +1528,6 @@ describe('useChat', () => {
               (p) => p.type === 'tool-call' && p.id === toolCallPart.id,
             )
             expect(updatedToolCall).toBeDefined()
-          })
-        }
-      })
-
-      it('should handle addToolApprovalResponse', async () => {
-        const toolCalls = createToolCallChunks([
-          { id: 'tool-1', name: 'testTool', arguments: '{"param": "value"}' },
-        ])
-        const adapter = createMockConnectionAdapter({ chunks: toolCalls })
-        const { result } = renderUseChat({
-          connection: adapter,
-        })
-
-        await result.current.sendMessage('Test')
-
-        await waitFor(() => {
-          const assistantMessage = result.current.messages.find(
-            (m) => m.role === 'assistant',
-          )
-          expect(assistantMessage).toBeDefined()
-        })
-
-        // Find tool call with approval
-        const assistantMessage = result.current.messages.find(
-          (m) => m.role === 'assistant',
-        )
-        const toolCallPart = assistantMessage?.parts.find(
-          (p) => p.type === 'tool-call' && p.approval,
-        )
-
-        if (
-          toolCallPart &&
-          toolCallPart.type === 'tool-call' &&
-          toolCallPart.approval
-        ) {
-          await result.current.addToolApprovalResponse({
-            id: toolCallPart.approval.id,
-            approved: true,
-          })
-
-          // Should update approval state
-          await waitFor(() => {
-            const updatedMessage = result.current.messages.find(
-              (m) => m.role === 'assistant',
-            )
-            const updatedToolCall = updatedMessage?.parts.find(
-              (p) => p.type === 'tool-call' && p.id === toolCallPart.id,
-            )
-            if (updatedToolCall && updatedToolCall.type === 'tool-call') {
-              expect(updatedToolCall.approval?.approved).toBe(true)
-            }
           })
         }
       })

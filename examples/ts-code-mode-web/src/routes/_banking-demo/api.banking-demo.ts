@@ -186,20 +186,20 @@ let codeModeCache: {
 async function getCodeModeTools() {
   if (!codeModeCache) {
     const { createIsolateDriver } = await import('@/lib/create-isolate-driver')
-    const driver = await createIsolateDriver('node')
+    const driver = await createIsolateDriver()
     const { tool, systemPrompt } = createCodeMode({
       driver,
       tools: allTools,
       timeout: 60000,
       memoryLimit: 128,
-      getSkillBindings: async () => createReportBindings(),
+      getSnippetBindings: async () => createReportBindings(),
     })
     codeModeCache = { tool, systemPrompt }
   }
   return codeModeCache
 }
 
-export const Route = createFileRoute('/_banking-demo/api/banking-demo' as any)({
+export const Route = createFileRoute('/_banking-demo/api/banking-demo')({
   server: {
     handlers: {
       POST: async ({ request }) => {
@@ -210,7 +210,7 @@ export const Route = createFileRoute('/_banking-demo/api/banking-demo' as any)({
 
         const abortController = new AbortController()
         const body = await request.json()
-        const { messages, data } = body
+        const { messages, forwardedProps: data } = body
 
         const provider: Provider = data?.provider || 'anthropic'
         const model: string | undefined = data?.model
@@ -225,6 +225,7 @@ export const Route = createFileRoute('/_banking-demo/api/banking-demo' as any)({
 
         try {
           const stream = chat({
+            threadId: body.threadId,
             adapter,
             messages,
             tools: [tool, ...filteredReportTools],

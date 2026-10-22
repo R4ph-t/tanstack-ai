@@ -3,9 +3,7 @@ id: SummarizationOptions
 title: SummarizationOptions
 ---
 
-# Interface: SummarizationOptions\<TProviderOptions\>
-
-Defined in: [packages/ai/src/types.ts:1680](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1680)
+Defined in: packages/ai/src/types.ts:2138
 
 ## Type Parameters
 
@@ -15,13 +13,27 @@ Defined in: [packages/ai/src/types.ts:1680](https://github.com/TanStack/ai/blob/
 
 ## Properties
 
+### abortSignal?
+
+```ts
+optional abortSignal?: AbortSignal;
+```
+
+Defined in: packages/ai/src/types.ts:2168
+
+Effective abort signal composed by the activity from caller `abortSignal`
+and/or `timeout`. Adapters should forward this to the provider SDK when
+supported. Request-specific — never store on a global client config.
+
+***
+
 ### focus?
 
 ```ts
-optional focus: string[];
+optional focus?: string[];
 ```
 
-Defined in: [packages/ai/src/types.ts:1687](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1687)
+Defined in: packages/ai/src/types.ts:2145
 
 ***
 
@@ -31,7 +43,7 @@ Defined in: [packages/ai/src/types.ts:1687](https://github.com/TanStack/ai/blob/
 logger: InternalLogger;
 ```
 
-Defined in: [packages/ai/src/types.ts:1694](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1694)
+Defined in: packages/ai/src/types.ts:2162
 
 Internal logger threaded from the summarize() entry point. Adapters must
 call logger.request() before the SDK call and logger.errors() in catch blocks.
@@ -41,10 +53,10 @@ call logger.request() before the SDK call and logger.errors() in catch blocks.
 ### maxLength?
 
 ```ts
-optional maxLength: number;
+optional maxLength?: number;
 ```
 
-Defined in: [packages/ai/src/types.ts:1685](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1685)
+Defined in: packages/ai/src/types.ts:2143
 
 ***
 
@@ -54,29 +66,46 @@ Defined in: [packages/ai/src/types.ts:1685](https://github.com/TanStack/ai/blob/
 model: string;
 ```
 
-Defined in: [packages/ai/src/types.ts:1683](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1683)
+Defined in: packages/ai/src/types.ts:2141
 
 ***
 
 ### modelOptions?
 
 ```ts
-optional modelOptions: TProviderOptions;
+optional modelOptions?: TProviderOptions;
 ```
 
-Defined in: [packages/ai/src/types.ts:1689](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1689)
+Defined in: packages/ai/src/types.ts:2147
 
 Provider-specific options forwarded by the summarize() activity.
+
+***
+
+### runId?
+
+```ts
+optional runId?: string;
+```
+
+Defined in: packages/ai/src/types.ts:2156
+
+Run identity forwarded from the summarize() activity. When set, the
+streaming adapter stamps it onto the emitted `RUN_STARTED` (via the wrapped
+chat), so a delivery-durable route keys the run's log by the same id the
+client rejoins with — making a mid-run reload resumable, like the media
+activities. Optional and non-breaking: adapters that ignore it just mint
+their own.
 
 ***
 
 ### style?
 
 ```ts
-optional style: "bullet-points" | "paragraph" | "concise";
+optional style?: "bullet-points" | "paragraph" | "concise";
 ```
 
-Defined in: [packages/ai/src/types.ts:1686](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1686)
+Defined in: packages/ai/src/types.ts:2144
 
 ***
 
@@ -86,4 +115,14 @@ Defined in: [packages/ai/src/types.ts:1686](https://github.com/TanStack/ai/blob/
 text: string;
 ```
 
-Defined in: [packages/ai/src/types.ts:1684](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1684)
+Defined in: packages/ai/src/types.ts:2142
+
+***
+
+### threadId
+
+```ts
+threadId: string;
+```
+
+Defined in: packages/ai/src/types.ts:2157

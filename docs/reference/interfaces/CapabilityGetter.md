@@ -3,9 +3,7 @@ id: CapabilityGetter
 title: CapabilityGetter
 ---
 
-# Interface: CapabilityGetter()\<TValue\>
-
-Defined in: [packages/ai/src/activities/chat/middleware/capabilities.ts:17](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/middleware/capabilities.ts#L17)
+Defined in: packages/ai/src/activities/chat/middleware/capabilities.ts:17
 
 Reads a capability value off a context. Overloaded so the flag narrows the return.
 
@@ -21,7 +19,7 @@ Reads a capability value off a context. Overloaded so the flag narrows the retur
 CapabilityGetter(ctx): TValue;
 ```
 
-Defined in: [packages/ai/src/activities/chat/middleware/capabilities.ts:18](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/middleware/capabilities.ts#L18)
+Defined in: packages/ai/src/activities/chat/middleware/capabilities.ts:18
 
 Reads a capability value off a context. Overloaded so the flag narrows the return.
 
@@ -41,7 +39,7 @@ Reads a capability value off a context. Overloaded so the flag narrows the retur
 CapabilityGetter(ctx, opts): TValue | undefined;
 ```
 
-Defined in: [packages/ai/src/activities/chat/middleware/capabilities.ts:19](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/middleware/capabilities.ts#L19)
+Defined in: packages/ai/src/activities/chat/middleware/capabilities.ts:19
 
 Reads a capability value off a context. Overloaded so the flag narrows the return.
 

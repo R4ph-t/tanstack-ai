@@ -1,15 +1,24 @@
 import { describe, expect, it, vi } from 'vitest'
+import { z } from 'zod'
 import { memoryStream } from '../src/stream-durability'
 import {
+  RUN_ACCEPTED_EVENT,
   resumeHttpResponse,
   resumeServerSentEventsResponse,
   toHttpResponse,
   toServerSentEventsResponse,
 } from '../src/stream-to-response'
 import { EventType } from '../src/types'
-import { ev } from './test-utils'
+import { chat } from '../src/activities/chat/index'
+import { toolDefinition } from '../src/activities/chat/tools/tool-definition'
+import { CUSTOM_EVENT } from '../src/custom-events'
+import { withDurabilityBatchHint } from '../src/utilities/durability-batch'
+import { tanstackMetadata } from '../src/utilities/merge-metadata'
+import { createMockAdapter, ev } from './test-utils'
+import type { ChatMiddleware } from '../src/activities/chat/middleware/types'
 import type { StreamDurability } from '../src/stream-durability'
-import type { StreamChunk } from '../src/types'
+import type { CustomEvent, StreamChunk } from '../src/types'
+import type { AdapterYieldChunk } from '../src/utilities/adapter-yield-chunk'
 
 function fiveChunkStream(): {
   stream: AsyncIterable<StreamChunk>
@@ -77,15 +86,41 @@ function fixedOffsetDurability(
 ): StreamDurability<string> {
   return {
     resumeFrom: () => null,
-    append: async () => offsets,
+    // Hand out `offsets` across calls, one per appended chunk, so the batch
+    // shape (the run-accepted marker flushes alone) cannot cause a
+    // count-mismatch error before the offset under test is ever validated.
+    append: async (chunks) => offsets.splice(0, chunks.length),
     close: async () => undefined,
     async *read() {
       // No replay is needed by these validation tests.
     },
+    // The fixed `offsets` are handed back verbatim by `append` and never
+    // stored, so there is nothing to report for a point-in-time read.
+    snapshot: () => Promise.resolve([]),
   }
 }
 
 describe('toServerSentEventsResponse with durability', () => {
+  it('keeps persisting while a connected client does not read', async () => {
+    const durability = memoryStream(
+      new Request('https://example.test/api/chat?runId=unread-connected', {
+        method: 'POST',
+      }),
+    )
+    const { stream } = fiveChunkStream()
+    // The response is held, never read and never cancelled.
+    const response = toServerSentEventsResponse(stream, {
+      durability: { adapter: durability, batch: 1 },
+    })
+    expect(response.body!.locked).toBe(false)
+
+    await vi.waitFor(async () => {
+      expect(
+        (await durability.snapshot()).map((entry) => label(entry.chunk)),
+      ).toEqual([`[${EventType.CUSTOM}]`, '1', '2', '3', '4', '5'])
+    })
+  })
+
   it('appends a fresh run and tags every event with its adapter offset', async () => {
     const durability = memoryStream(
       new Request('https://example.test/api/chat?runId=response-fresh', {
@@ -104,9 +139,14 @@ describe('toServerSentEventsResponse with durability', () => {
     const eventOffsets = events.map((event) => event.id)
 
     expect(iterated()).toBe(true)
-    expect(events).toHaveLength(5)
+    // Six, not five: a fresh durable producer appends (and forwards) the
+    // synthetic run-accepted marker before the first real chunk, so a joiner
+    // never observes an empty log for an accepted run.
+    expect(events).toHaveLength(6)
+    expect(field(events[0]!, 'type')).toBe(EventType.CUSTOM)
+    expect(field(events[0]!, 'name')).toBe(RUN_ACCEPTED_EVENT)
     expect(eventOffsets.every((offset) => offset !== undefined)).toBe(true)
-    expect(new Set(eventOffsets).size).toBe(5)
+    expect(new Set(eventOffsets).size).toBe(6)
 
     const loggedOffsets: Array<string> = []
     const loggedLabels: Array<string> = []
@@ -115,7 +155,7 @@ describe('toServerSentEventsResponse with durability', () => {
       loggedLabels.push(label(entry.chunk))
     }
     expect(loggedOffsets).toEqual(eventOffsets)
-    expect(loggedLabels).toEqual(['1', '2', '3', '4', '5'])
+    expect(loggedLabels).toEqual(['[CUSTOM]', '1', '2', '3', '4', '5'])
   })
 
   it('logs a durability close failure server-side when debug is enabled', async () => {
@@ -130,6 +170,9 @@ describe('toServerSentEventsResponse with durability', () => {
       async *read() {
         // Not exercised by this test.
       },
+      // `append` synthesizes offsets and never stores the chunks, so there
+      // is no state to snapshot.
+      snapshot: () => Promise.resolve([]),
     }
     const errorLog = vi.fn()
     const logger = {
@@ -204,7 +247,10 @@ describe('toServerSentEventsResponse with durability', () => {
     expect(replayed.map((event) => event.id)).toEqual(
       produced.slice(2).map((event) => event.id),
     )
+    // produced[0] is the run-accepted marker, so produced[1] is chunk '1' and
+    // the replay strictly after it is '2'..'5'.
     expect(replayed.map((event) => field(event, 'delta'))).toEqual([
+      '2',
       '3',
       '4',
       '5',
@@ -228,7 +274,96 @@ describe('toServerSentEventsResponse with durability', () => {
 
     const batchSizes = appendSpy.mock.calls.map(([chunks]) => chunks.length)
     expect(batchSizes.every((size) => size <= 2)).toBe(true)
-    expect(batchSizes.reduce((sum, size) => sum + size, 0)).toBe(5)
+    // 5 stream chunks + the run-accepted marker.
+    expect(batchSizes.reduce((sum, size) => sum + size, 0)).toBe(6)
+  })
+
+  /**
+   * Ms until 'a' reaches the reader while the model is still busy after it, or
+   * `Infinity` when 'a' is still held after 1s. 'a' sits in a batch of 32 that
+   * only 1 chunk filled, so only the batch wait can send it before the run ends.
+   */
+  async function msUntilFirstText(
+    runId: string,
+    options: { batchWaitMs?: number } = {},
+  ): Promise<number> {
+    let releaseModel = (): void => undefined
+    const modelThinking = new Promise<void>((resolve) => {
+      releaseModel = resolve
+    })
+    const stream: AsyncIterable<StreamChunk> = {
+      async *[Symbol.asyncIterator]() {
+        yield ev.textContent('a')
+        await modelThinking
+        yield ev.textContent('b')
+        yield ev.runFinished('stop')
+      },
+    }
+    const startedAt = Date.now()
+    const response = toServerSentEventsResponse(stream, {
+      durability: {
+        adapter: memoryStream(
+          new Request(`https://example.test/api/chat?runId=${runId}`, {
+            method: 'POST',
+          }),
+        ),
+        ...options,
+      },
+    })
+    if (!response.body) throw new Error('Expected a response body')
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let body = ''
+    const readUntilA = async (): Promise<number> => {
+      while (!body.includes('"delta":"a"')) {
+        const result = await reader.read()
+        if (result.done) throw new Error('Stream ended before "a"')
+        body += decoder.decode(result.value)
+      }
+      return Date.now() - startedAt
+    }
+
+    const elapsed = await Promise.race([
+      readUntilA(),
+      new Promise<number>((resolve) =>
+        setTimeout(() => resolve(Infinity), 1000),
+      ),
+    ])
+    releaseModel()
+    for (;;) {
+      const result = await reader.read()
+      if (result.done) break
+    }
+    return elapsed
+  }
+
+  it('delivers a buffered chunk while the producer waits for the next one', async () => {
+    expect(await msUntilFirstText('live-while-idle')).toBeLessThan(1000)
+  })
+
+  it('holds a buffered chunk for batchWaitMs', async () => {
+    const elapsed = await msUntilFirstText('live-wait-300', {
+      batchWaitMs: 300,
+    })
+
+    expect(elapsed).toBeGreaterThanOrEqual(250)
+    expect(elapsed).toBeLessThan(1000)
+  })
+
+  it('rejects an invalid batchWaitMs', () => {
+    const durability = memoryStream(
+      new Request('https://example.test/api/chat?runId=response-bad-wait', {
+        method: 'POST',
+      }),
+    )
+    const { stream } = fiveChunkStream()
+    for (const batchWaitMs of [-1, NaN, Infinity, 2_147_483_648]) {
+      expect(() =>
+        toServerSentEventsResponse(stream, {
+          durability: { adapter: durability, batchWaitMs },
+        }),
+      ).toThrow(/Invalid durability batchWaitMs/)
+    }
   })
 
   it('rejects a non-positive-integer batch size', () => {
@@ -251,15 +386,16 @@ describe('toServerSentEventsResponse with durability', () => {
     const { stream } = fiveChunkStream()
     const response = toServerSentEventsResponse(stream, {
       durability: {
-        adapter: fixedOffsetDurability(Array.from({ length: 5 }, () => 'same')),
+        adapter: fixedOffsetDurability(Array.from({ length: 6 }, () => 'same')),
       },
     })
 
     const events = parseSseEvents(await readBody(response))
-    expect(events).toHaveLength(1)
-    expect(events[0]?.id).toBeUndefined()
-    expect(field(events[0]!, 'type')).toBe(EventType.RUN_ERROR)
-    expect(field(events[0]!, 'message')).toMatch(/unique.*offset/i)
+    // The run-accepted marker took the first 'same' offset and was forwarded;
+    // the first REAL chunk's duplicate offset is what fails.
+    expect(events).toHaveLength(2)
+    expect(field(events[1]!, 'type')).toBe(EventType.RUN_ERROR)
+    expect(field(events[1]!, 'message')).toMatch(/unique.*offset/i)
   })
 
   it('rejects SSE offsets containing U+0000', async () => {
@@ -301,6 +437,7 @@ describe('toServerSentEventsResponse with durability', () => {
     const logged: Array<StreamChunk> = []
     for await (const { chunk } of durability.read('-1')) logged.push(chunk)
     expect(logged.map((chunk) => chunk.type)).toEqual([
+      'CUSTOM',
       'TEXT_MESSAGE_CONTENT',
       'RUN_ERROR',
     ])
@@ -352,10 +489,11 @@ describe('toHttpResponse with durability', () => {
     const eventOffsets = events.map((event) => event.id)
 
     expect(iterated()).toBe(true)
-    expect(events).toHaveLength(5)
+    expect(events).toHaveLength(6)
+    expect(field(events[0]!, 'name')).toBe(RUN_ACCEPTED_EVENT)
     expect(eventOffsets.every((offset) => offset !== undefined)).toBe(true)
-    expect(new Set(eventOffsets).size).toBe(5)
-    expect(events.map((event) => field(event, 'delta'))).toEqual([
+    expect(new Set(eventOffsets).size).toBe(6)
+    expect(events.slice(1).map((event) => field(event, 'delta'))).toEqual([
       '1',
       '2',
       '3',
@@ -415,7 +553,9 @@ describe('toHttpResponse with durability', () => {
     expect(replayed.map((event) => event.id)).toEqual(
       produced.slice(2).map((event) => event.id),
     )
+    // produced[0] is the run-accepted marker, so produced[1] is chunk '1'.
     expect(replayed.map((event) => field(event, 'delta'))).toEqual([
+      '2',
       '3',
       '4',
       '5',
@@ -447,6 +587,7 @@ describe('toHttpResponse with durability', () => {
     const logged: Array<StreamChunk> = []
     for await (const { chunk } of durability.read('-1')) logged.push(chunk)
     expect(logged.map((chunk) => chunk.type)).toEqual([
+      'CUSTOM',
       'TEXT_MESSAGE_CONTENT',
       'RUN_ERROR',
     ])
@@ -469,7 +610,7 @@ describe('toHttpResponse with durability', () => {
   })
 })
 
-function runFinished(): StreamChunk {
+function runFinished(): AdapterYieldChunk {
   return {
     type: EventType.RUN_FINISHED,
     threadId: 't',
@@ -481,6 +622,49 @@ function runFinished(): StreamChunk {
 }
 
 describe('durability producer robustness', () => {
+  it('ends with RUN_ERROR when a timed flush fails while the model is still busy', async () => {
+    const log = memoryStream(
+      new Request('https://example.test/api/chat?runId=timed-flush-fails', {
+        method: 'POST',
+      }),
+    )
+    let appends = 0
+    const durability: StreamDurability<string> = {
+      ...log,
+      // Append 1 is the run-accepted marker. Append 2 is the timed flush of
+      // 'a', made while the model has not sent its next chunk.
+      append: (chunks) => {
+        appends += 1
+        return appends === 2
+          ? Promise.reject(new Error('log write failed'))
+          : log.append(chunks)
+      },
+    }
+    const stream: AsyncIterable<StreamChunk> = {
+      async *[Symbol.asyncIterator]() {
+        yield ev.textContent('a')
+        // The model never sends another chunk.
+        await new Promise(() => undefined)
+      },
+    }
+
+    const outcome = await Promise.race([
+      readBody(
+        toServerSentEventsResponse(stream, {
+          durability: { adapter: durability },
+        }),
+      ),
+      new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 1000)),
+    ])
+    if (outcome === 'hung') throw new Error('The response never ended')
+
+    const events = parseSseEvents(outcome)
+    expect(field(events.at(-1)!, 'type')).toBe(EventType.RUN_ERROR)
+    const logged: Array<StreamChunk> = []
+    for await (const { chunk } of log.read('-1')) logged.push(chunk)
+    expect(logged.at(-1)?.type).toBe(EventType.RUN_ERROR)
+  })
+
   it('flushes buffered chunks to the durable log before the terminal on abort', async () => {
     const durability = memoryStream(
       new Request('https://example.test/api/chat?runId=h1-abort', {
@@ -528,6 +712,9 @@ describe('durability producer robustness', () => {
       async *read() {
         // Not exercised.
       },
+      // `append` synthesizes offsets and never stores the chunks, so there
+      // is no state to snapshot.
+      snapshot: () => Promise.resolve([]),
     }
     const stream: AsyncIterable<StreamChunk> = {
       async *[Symbol.asyncIterator]() {
@@ -569,6 +756,9 @@ describe('durability producer robustness', () => {
       async *read() {
         // Not exercised.
       },
+      // `append` synthesizes offsets and never stores the chunks, so there
+      // is no state to snapshot.
+      snapshot: () => Promise.resolve([]),
     }
     const stream: AsyncIterable<StreamChunk> = {
       async *[Symbol.asyncIterator]() {
@@ -657,7 +847,10 @@ describe('resume response helpers', () => {
       await readBody(resumeServerSentEventsResponse({ adapter: join })),
     )
 
-    expect(events.map((event) => field(event, 'delta'))).toEqual([
+    // A from-start join replays the run-accepted marker first — the chunk that
+    // makes a boot-window join attach instead of fast-failing on an empty log.
+    expect(field(events[0]!, 'name')).toBe(RUN_ACCEPTED_EVENT)
+    expect(events.slice(1).map((event) => field(event, 'delta'))).toEqual([
       '1',
       '2',
       '3',
@@ -679,7 +872,8 @@ describe('resume response helpers', () => {
       await readBody(resumeHttpResponse({ adapter: join })),
     )
 
-    expect(events.map((event) => field(event, 'delta'))).toEqual([
+    expect(field(events[0]!, 'name')).toBe(RUN_ACCEPTED_EVENT)
+    expect(events.slice(1).map((event) => field(event, 'delta'))).toEqual([
       '1',
       '2',
       '3',
@@ -702,5 +896,408 @@ describe('resume response helpers', () => {
     expect(sse.status).toBe(400)
     expect(ndjson.status).toBe(400)
     expect(await sse.text()).toMatch(/No resume offset/)
+  })
+
+  it('logs a replay failure server-side as well as sending it to the reader', async () => {
+    const errorLog = vi.fn()
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: errorLog,
+    }
+    // A reconnect for a run this process doesn't hold (expired, or never
+    // produced here). The reader gets a RUN_ERROR; the operator needs the
+    // cause server-side too.
+    const reconnect = memoryStream(
+      new Request('https://example.test/api/chat?runId=other-worker', {
+        headers: { 'Last-Event-ID': 'memory:v1:other-worker:3' },
+      }),
+    )
+
+    const events = parseSseEvents(
+      await readBody(
+        resumeServerSentEventsResponse({
+          adapter: reconnect,
+          debug: { logger },
+        }),
+      ),
+    )
+
+    expect(events.map((event) => field(event, 'type'))).toEqual([
+      EventType.RUN_ERROR,
+    ])
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.stringContaining('replaying durability stream failed'),
+      expect.objectContaining({
+        error: expect.objectContaining({
+          message: expect.stringMatching(
+            /Unknown or expired memory stream run/,
+          ),
+        }),
+      }),
+    )
+  })
+
+  it('does not log a replay that rejects because the reader went away', async () => {
+    const errorLog = vi.fn()
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: errorLog,
+    }
+    // A backend that passes the signal straight to `fetch` rejects on abort.
+    const rejectsOnAbort: StreamDurability = {
+      resumeFrom: () => 'off-1',
+      append: () => Promise.resolve([]),
+      // eslint-disable-next-line require-yield
+      read: async function* (_offset, signal) {
+        await new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError')),
+          )
+        })
+      },
+      close: () => Promise.resolve(),
+      snapshot: () => Promise.resolve([]),
+    }
+    const abortController = new AbortController()
+
+    const body = readBody(
+      toHttpResponse((async function* () {})(), {
+        durability: { adapter: rejectsOnAbort },
+        abortController,
+        debug: { logger },
+      }),
+    )
+    abortController.abort()
+    await body
+
+    expect(errorLog).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * The user-visible consequence of `runOnFinish` REPORTING rather than swallowing
+ * (see `middleware-terminal-hook-isolation.test.ts` for the unit-level contract).
+ * `withPersistence.onFinish` is what writes the assistant turn; if it fails, the
+ * client must not be left believing the run succeeded, or its next turn sends a
+ * history the server has no record of.
+ */
+function failingPersistenceRun(): AsyncIterable<StreamChunk> {
+  const { adapter } = createMockAdapter({
+    iterations: [
+      [
+        ev.runStarted(),
+        ev.textStart(),
+        ev.textContent('saved?'),
+        ev.textEnd(),
+        ev.runFinished('stop'),
+      ],
+    ],
+  })
+
+  return chat({
+    threadId: 'thread-1',
+    adapter,
+    messages: [{ role: 'user', content: 'Hi' }],
+    middleware: [
+      {
+        name: 'flaky-persistence',
+        onFinish: () => Promise.reject(new Error('messages.append failed')),
+      },
+    ],
+  }) as AsyncIterable<StreamChunk>
+}
+
+describe('a failing middleware onFinish surfaces past the transport', () => {
+  it('ends the client SSE stream with RUN_ERROR carrying the store failure', async () => {
+    const events = parseSseEvents(
+      await readBody(toServerSentEventsResponse(failingPersistenceRun())),
+    )
+
+    const last = events.at(-1)
+    if (last === undefined) throw new Error('Expected at least one SSE event')
+    expect(field(last, 'type')).toBe(EventType.RUN_ERROR)
+    expect(field(last, 'message')).toBe('messages.append failed')
+  })
+
+  it('reaches the durability sink, which RECORDS it server-side and does NOT terminalize the run', async () => {
+    // The weaker assertion below is deliberate, not an oversight. On the durable
+    // path the failure does NOT become a RUN_ERROR: `runOnFinish` is awaited
+    // after the RUN_FINISHED was already persisted and forwarded, so
+    // `needsTerminalPersistence` is false (nothing extra is appended to the log)
+    // and `terminalForwarded` suppresses the rethrow to the live consumer (both
+    // in stream-to-response.ts) — the RUN_FINISHED stands. That is correct: the
+    // SAVE failed, not the run, and the consumer did receive the whole stream.
+    // What this fix buys is that the failure ARRIVES at the sink at all, which is
+    // why the only assertion available is the server-side record: while
+    // `runOnFinish` swallowed, the sink never saw it and the only trace anywhere
+    // was a middleware log line.
+    const errorLog = vi.fn()
+    const durability = memoryStream(
+      new Request('https://example.test/api/chat?runId=finish-hook-failure', {
+        method: 'POST',
+      }),
+    )
+
+    const events = parseSseEvents(
+      await readBody(
+        toServerSentEventsResponse(failingPersistenceRun(), {
+          durability: { adapter: durability },
+          debug: {
+            logger: {
+              debug: vi.fn(),
+              info: vi.fn(),
+              warn: vi.fn(),
+              error: errorLog,
+            },
+          },
+        }),
+      ),
+    )
+
+    expect(events.map((event) => field(event, 'type'))).toContain(
+      EventType.RUN_FINISHED,
+    )
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'durability failure after a terminal event was forwarded',
+      ),
+      expect.objectContaining({
+        error: expect.objectContaining({ message: 'messages.append failed' }),
+      }),
+    )
+  })
+})
+
+function customThenText(custom: StreamChunk): AsyncIterable<StreamChunk> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      yield custom
+      yield ev.textStart()
+      yield ev.textContent('a')
+      yield ev.textContent('b')
+      yield ev.textEnd()
+      yield ev.runFinished('stop')
+    },
+  }
+}
+
+function customEvent(name: string): CustomEvent {
+  return {
+    type: EventType.CUSTOM,
+    name,
+    value: {},
+    timestamp: Date.now(),
+  }
+}
+
+const hasModelText = (chunks: Array<StreamChunk>): boolean =>
+  chunks.some((chunk) => chunk.type === EventType.TEXT_MESSAGE_CONTENT)
+
+function namedCustom(name: string): (chunk: StreamChunk) => boolean {
+  return (chunk) => chunk.type === EventType.CUSTOM && chunk.name === name
+}
+
+describe('CUSTOM events flush through durability at emit time', () => {
+  it('flushes a progress CUSTOM event on its own, before model text', async () => {
+    const durability = memoryStream(
+      new Request('https://example.test/api/chat?runId=custom-flush', {
+        method: 'POST',
+      }),
+    )
+    const appendSpy = vi.spyOn(durability, 'append')
+
+    await readBody(
+      toServerSentEventsResponse(customThenText(customEvent('work:started')), {
+        durability: { adapter: durability },
+      }),
+    )
+
+    const batches = appendSpy.mock.calls.map(([chunks]) => chunks)
+    const startedBatch = batches.find((chunks) =>
+      chunks.some(namedCustom('work:started')),
+    )
+    if (startedBatch === undefined) {
+      throw new Error('work:started was never appended')
+    }
+    expect(startedBatch).toHaveLength(1)
+    expect(hasModelText(startedBatch)).toBe(false)
+  })
+
+  it('keeps process.stdout in the batch with later text', async () => {
+    const durability = memoryStream(
+      new Request('https://example.test/api/chat?runId=stdout-batch', {
+        method: 'POST',
+      }),
+    )
+    const appendSpy = vi.spyOn(durability, 'append')
+
+    await readBody(
+      toServerSentEventsResponse(
+        customThenText(customEvent(CUSTOM_EVENT.PROCESS_STDOUT)),
+        { durability: { adapter: durability } },
+      ),
+    )
+
+    const batches = appendSpy.mock.calls.map(([chunks]) => chunks)
+    const stdoutBatch = batches.find((chunks) =>
+      chunks.some(namedCustom(CUSTOM_EVENT.PROCESS_STDOUT)),
+    )
+    if (stdoutBatch === undefined) {
+      throw new Error('process.stdout was never appended')
+    }
+    expect(hasModelText(stdoutBatch)).toBe(true)
+  })
+
+  it('keeps emitCustomEvent({ batch: true }) in the batch with later text', async () => {
+    const durability = memoryStream(
+      new Request('https://example.test/api/chat?runId=opt-in-batch', {
+        method: 'POST',
+      }),
+    )
+    const appendSpy = vi.spyOn(durability, 'append')
+    const marked = withDurabilityBatchHint(customEvent('work:started'))
+
+    await readBody(
+      toServerSentEventsResponse(customThenText(marked), {
+        durability: { adapter: durability },
+      }),
+    )
+
+    const batches = appendSpy.mock.calls.map(([chunks]) => chunks)
+    const startedBatch = batches.find((chunks) =>
+      chunks.some(namedCustom('work:started')),
+    )
+    if (startedBatch === undefined) {
+      throw new Error('work:started was never appended')
+    }
+    expect(hasModelText(startedBatch)).toBe(true)
+    expect(
+      startedBatch.some((chunk) => {
+        const tanstack = tanstackMetadata(chunk)
+        return tanstack != null && 'batch' in tanstack
+      }),
+    ).toBe(false)
+  })
+
+  it('appends a middleware CUSTOM event while onConfig is still waiting', async () => {
+    let release = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const durability = memoryStream(
+      new Request('https://example.test/api/chat?runId=live-middleware', {
+        method: 'POST',
+      }),
+    )
+    const appendSpy = vi.spyOn(durability, 'append')
+    const { adapter } = createMockAdapter({
+      iterations: [
+        [
+          ev.runStarted(),
+          ev.textStart(),
+          ev.textContent('reply'),
+          ev.textEnd(),
+          ev.runFinished('stop'),
+        ],
+      ],
+    })
+    const middleware: ChatMiddleware = {
+      name: 'slow-prepare',
+      async onConfig(ctx) {
+        if (ctx.phase !== 'beforeModel') return
+        ctx.emitCustomEvent('work:started', { step: 'prepare' })
+        await gate
+        ctx.emitCustomEvent('work:ended', { step: 'prepare' })
+      },
+    }
+
+    const body = readBody(
+      toServerSentEventsResponse(
+        chat({
+          threadId: 'thread-1',
+          adapter,
+          messages: [{ role: 'user', content: 'go' }],
+          middleware: [middleware],
+        }),
+        { durability: { adapter: durability } },
+      ),
+    )
+
+    await vi.waitFor(() => {
+      const appended = appendSpy.mock.calls.some(([chunks]) =>
+        chunks.some(namedCustom('work:started')),
+      )
+      expect(appended).toBe(true)
+    })
+    expect(
+      appendSpy.mock.calls.some(([chunks]) =>
+        chunks.some(namedCustom('work:ended')),
+      ),
+    ).toBe(false)
+
+    release()
+    await body
+  })
+
+  it('flushes each tool progress event in its own append', async () => {
+    const durability = memoryStream(
+      new Request('https://example.test/api/chat?runId=tool-progress', {
+        method: 'POST',
+      }),
+    )
+    const appendSpy = vi.spyOn(durability, 'append')
+    const tool = toolDefinition({
+      name: 'longJob',
+      description: 'Reports progress while it runs',
+      inputSchema: z.object({}),
+    }).server((_args, ctx) => {
+      for (const step of [1, 2, 3]) {
+        ctx?.emitCustomEvent('tool:progress', { step })
+      }
+      return { done: true }
+    })
+    const { adapter } = createMockAdapter({
+      iterations: [
+        [
+          ev.runStarted(),
+          ev.toolStart('call_1', 'longJob'),
+          ev.toolArgs('call_1', '{}'),
+          ev.runFinished('tool_calls'),
+        ],
+        [
+          ev.runStarted(),
+          ev.textStart(),
+          ev.textContent('done'),
+          ev.textEnd(),
+          ev.runFinished('stop'),
+        ],
+      ],
+    })
+
+    await readBody(
+      toServerSentEventsResponse(
+        chat({
+          threadId: 'thread-1',
+          adapter,
+          messages: [{ role: 'user', content: 'go' }],
+          tools: [tool],
+        }),
+        { durability: { adapter: durability } },
+      ),
+    )
+
+    const progressBatches = appendSpy.mock.calls
+      .map(([chunks]) => chunks)
+      .filter((chunks) => chunks.some(namedCustom('tool:progress')))
+    expect(progressBatches).toHaveLength(3)
+    expect(
+      progressBatches.every(
+        (chunks) => chunks.filter(namedCustom('tool:progress')).length === 1,
+      ),
+    ).toBe(true)
   })
 })

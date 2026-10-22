@@ -1,16 +1,29 @@
 import OpenAI from 'openai'
 import { OpenAIBaseChatCompletionsTextAdapter } from '@tanstack/openai-base'
+import {
+  GROQ_MODEL_INPUT_MODALITIES,
+  GROQ_MODEL_REASONING,
+  groqModelPrefersJsonObject,
+} from '../model-meta'
 import { getGroqApiKeyFromEnv, withGroqDefaults } from '../utils/client'
-import { makeGroqStructuredOutputCompatible } from '../utils/schema-converter'
+import { makeGroqStructuredOutputCompatibleWithMap } from '../utils/schema-converter'
 import type { Modality, TextOptions } from '@tanstack/ai'
 import type {
   GROQ_CHAT_MODELS,
   GroqChatModelToolCapabilitiesByName,
+  GroqModelReasoningByName,
   ResolveInputModalities,
   ResolveProviderOptions,
 } from '../model-meta'
 import type { GroqMessageMetadataByModality } from '../message-types'
 import type { GroqClientConfig } from '../utils/client'
+import type { OpenAIBaseTextAdapterOptions } from '@tanstack/openai-base'
+
+/** The reasoning levels of a model, for `chat({ reasoning })`. `never`: none. */
+type ResolveReasoning<TModel extends string> =
+  TModel extends keyof GroqModelReasoningByName
+    ? GroqModelReasoningByName[TModel]
+    : never
 
 type ResolveToolCapabilities<TModel extends string> =
   TModel extends keyof GroqChatModelToolCapabilitiesByName
@@ -20,7 +33,8 @@ type ResolveToolCapabilities<TModel extends string> =
 /**
  * Configuration for Groq text adapter
  */
-export interface GroqTextConfig extends GroqClientConfig {}
+export interface GroqTextConfig
+  extends GroqClientConfig, OpenAIBaseTextAdapterOptions {}
 
 /**
  * Re-export of the public provider options type
@@ -52,20 +66,88 @@ export class GroqTextAdapter<
   TProviderOptions,
   TInputModalities,
   GroqMessageMetadataByModality,
-  TToolCapabilities
+  TToolCapabilities,
+  ResolveReasoning<TModel>
 > {
   override readonly kind = 'text' as const
   override readonly name = 'groq' as const
+  override readonly inputModalities = GROQ_MODEL_INPUT_MODALITIES[this.model]
 
   constructor(config: GroqTextConfig, model: TModel) {
-    super(model, 'groq', new OpenAI(withGroqDefaults(config)))
+    super(model, 'groq', new OpenAI(withGroqDefaults(config)), config)
   }
 
-  protected override makeStructuredOutputCompatible(
+  protected override modelReasoning(model: string) {
+    return GROQ_MODEL_REASONING[model]
+  }
+
+  protected override extractRejectedToolCall(
+    rawEvent: unknown,
+    fallbackMessage: string,
+  ):
+    | {
+        toolName: string
+        arguments: string
+        input?: unknown
+        error: string
+      }
+    | undefined {
+    if (
+      !isRecord(rawEvent) ||
+      rawEvent.code !== 'tool_use_failed' ||
+      typeof rawEvent.failed_generation !== 'string'
+    ) {
+      return undefined
+    }
+
+    let failedGeneration: unknown
+    try {
+      failedGeneration = JSON.parse(rawEvent.failed_generation)
+    } catch {
+      return undefined
+    }
+    if (
+      !isRecord(failedGeneration) ||
+      typeof failedGeneration.name !== 'string' ||
+      failedGeneration.name.trim().length === 0
+    ) {
+      return undefined
+    }
+
+    const rawArguments = failedGeneration.arguments
+    let argumentsJson: string
+    let input: unknown
+    if (typeof rawArguments === 'string') {
+      argumentsJson = rawArguments
+      try {
+        const parsed: unknown = JSON.parse(rawArguments)
+        if (isRecord(parsed)) input = parsed
+      } catch {
+        // The provider-rejected call remains non-executable with its raw input.
+      }
+    } else if (isRecord(rawArguments)) {
+      argumentsJson = JSON.stringify(rawArguments)
+      input = rawArguments
+    } else {
+      return undefined
+    }
+
+    return {
+      toolName: failedGeneration.name,
+      arguments: argumentsJson,
+      ...(input !== undefined && { input }),
+      error:
+        typeof rawEvent.message === 'string' && rawEvent.message.length > 0
+          ? rawEvent.message
+          : fallbackMessage,
+    }
+  }
+
+  protected override makeStructuredOutputCompatibleWithMap(
     schema: Record<string, any>,
     originalRequired?: Array<string>,
-  ): Record<string, any> {
-    return makeGroqStructuredOutputCompatible(schema, originalRequired)
+  ) {
+    return makeGroqStructuredOutputCompatibleWithMap(schema, originalRequired)
   }
 
   protected override async *processStreamChunks(
@@ -95,7 +177,7 @@ export class GroqTextAdapter<
   protected override extractReasoning(
     chunk: OpenAI.Chat.Completions.ChatCompletionChunk,
   ): { text: string } | undefined {
-    const delta = chunk.choices[0]?.delta as
+    const delta = chunk.choices?.[0]?.delta as
       | { reasoning?: unknown; reasoning_content?: unknown }
       | undefined
     const raw = delta?.reasoning ?? delta?.reasoning_content
@@ -115,6 +197,14 @@ export class GroqTextAdapter<
   override supportsCombinedToolsAndSchema(): boolean {
     return false
   }
+
+  protected override modelPrefersJsonObject(model: string): boolean {
+    return groqModelPrefersJsonObject(model)
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /**
@@ -142,7 +232,7 @@ async function* promoteGroqUsage(
  *
  * @example
  * ```typescript
- * const adapter = createGroqText('llama-3.3-70b-versatile', "gsk_...");
+ * const adapter = createGroqText('openai/gpt-oss-120b', "gsk_...");
  * ```
  */
 export function createGroqText<
@@ -160,7 +250,7 @@ export function createGroqText<
  *
  * @example
  * ```typescript
- * const adapter = groqText('llama-3.3-70b-versatile');
+ * const adapter = groqText('openai/gpt-oss-120b');
  * ```
  */
 export function groqText<TModel extends (typeof GROQ_CHAT_MODELS)[number]>(

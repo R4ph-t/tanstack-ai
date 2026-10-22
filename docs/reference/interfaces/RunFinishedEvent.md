@@ -3,57 +3,88 @@ id: RunFinishedEvent
 title: RunFinishedEvent
 ---
 
-# Interface: RunFinishedEvent
-
-Defined in: [packages/ai/src/types.ts:1109](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1109)
+Defined in: packages/ai/src/types.ts:1601
 
 Emitted when a run completes successfully.
 
-@ag-ui/core provides: `threadId`, `runId`, `result?`
-TanStack AI adds: `model?`, `finishReason?`, `usage?`
+@ag-ui/core provides: `threadId`, `runId`, `result?`, `outcome?`
+Spec `usage[]` is provider/model token counts. TanStack leftovers live in
+`metadata.tanstack`.
 
 ## Extends
 
-- `RunFinishedEvent`
-
-## Indexable
-
-```ts
-[k: string]: unknown
-```
+- `Pick`\<`AGUIRunFinishedEvent`, `"threadId"` \| `"runId"` \| `"result"` \| `"outcome"` \| `"timestamp"` \| `"rawEvent"`\>
 
 ## Properties
 
 ### finishReason?
 
 ```ts
-optional finishReason: "length" | "stop" | "content_filter" | "tool_calls" | null;
+optional finishReason?: "length" | "stop" | "content_filter" | "tool_calls" | null;
 ```
 
-Defined in: [packages/ai/src/types.ts:1113](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1113)
+Defined in: packages/ai/src/types.ts:1612
 
-Why the generation stopped
+Restored on the client from `metadata.tanstack`.
+
+***
+
+### metadata?
+
+```ts
+optional metadata?: object & Record<string, any>;
+```
+
+Defined in: packages/ai/src/types.ts:1613
+
+#### Type Declaration
+
+##### tanstack?
+
+```ts
+optional tanstack?: TanStackRunMetadata;
+```
 
 ***
 
 ### model?
 
 ```ts
-optional model: string;
+optional model?: string;
 ```
 
-Defined in: [packages/ai/src/types.ts:1111](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1111)
+Defined in: packages/ai/src/types.ts:1608
 
-Model identifier for multi-model support
+Restored on the client from `metadata.tanstack`.
+
+***
+
+### responseId?
+
+```ts
+optional responseId?: string;
+```
+
+Defined in: packages/ai/src/types.ts:1610
+
+Provider generation ID. Restored from `metadata.tanstack`.
+
+***
+
+### type
+
+```ts
+type: RUN_FINISHED;
+```
+
+Defined in: packages/ai/src/types.ts:1605
 
 ***
 
 ### usage?
 
 ```ts
-optional usage: TokenUsage<ProviderUsageDetails>;
+optional usage?: TokenUsage<ProviderUsageDetails> | TokenUsage[];
 ```
 
-Defined in: [packages/ai/src/types.ts:1115](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1115)
-
-Token usage statistics with optional detailed breakdowns and provider-reported cost.
+Defined in: packages/ai/src/types.ts:1606

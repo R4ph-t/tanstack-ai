@@ -10,6 +10,8 @@ import {
 } from '../utilities/sampling-keys'
 import { firstNumber } from '../utilities/numbers'
 import { errorMessage, errorTypeName } from '../utilities/errors'
+import { rebuildTokenUsage } from '../utilities/ag-ui-usage'
+import { tanstackMetadata } from '../utilities/merge-metadata'
 import { usageAttributes } from './usage-attributes'
 import type {
   AttributeValue,
@@ -28,25 +30,20 @@ import type {
   GenerationMiddleware,
   GenerationMiddlewareContext,
 } from '../activities/middleware/types'
+import type { TokenUsage } from '../types'
 
 /**
  * Scope (role) of an OTel span emitted by this middleware.
  *
  * - `chat` — the root span for a single `chat()` call
- * - `iteration` — one per agent-loop iteration (one model call)
+ * - `iteration` — one per provider model call (agent-loop `beforeModel`
+ *   turn, or the separate `structuredOutput` finalization when
+ *   `outputSchema` skips the agent loop — see #1054)
  * - `tool` — one per tool execution inside an iteration
  * - `generation` — the single span for a media activity call
  *   (`generateImage`, `generateVideo`, `generateSpeech`, …)
  */
 export type OtelSpanScope = 'chat' | 'iteration' | 'tool' | 'generation'
-
-/**
- * Alias retained for backwards compatibility. Prefer {@link OtelSpanScope}.
- *
- * @deprecated Use `OtelSpanScope` instead — the name shadows OTel's built-in
- * `SpanKind` which is also imported by integrations of this middleware.
- */
-export type OtelSpanKind = OtelSpanScope
 
 /**
  * Span metadata passed to `spanNameFormatter`, `attributeEnricher`,
@@ -82,7 +79,14 @@ const OPERATION_NAME: Record<GenerationActivity, string> = {
   video: 'video_generation',
   audio: 'audio_generation',
   tts: 'text_to_speech',
+  voice: 'voice_generation',
   transcription: 'transcription',
+  embedding: 'embeddings',
+  rerank: 'rerank',
+  evaluate: 'evaluate',
+  summarize: 'summarize',
+  world: 'world_generation',
+  liveVideo: 'live_video_generation',
 }
 
 export interface OtelMiddlewareOptions {
@@ -96,7 +100,9 @@ export interface OtelMiddlewareOptions {
   meter?: Meter
   /**
    * When `true`, prompt and completion content is attached to iteration spans
-   * as `gen_ai.*.message` / `gen_ai.choice` events. Defaults to `false` so
+   * as `gen_ai.*.message` / `gen_ai.choice` events. Media spans get the
+   * prompt, input media and output (URLs or transcript text) as
+   * `gen_ai.input.messages` / `gen_ai.output.messages`. Defaults to `false` so
    * that PII never lands on a span by accident.
    */
   captureContent?: boolean
@@ -109,7 +115,8 @@ export interface OtelMiddlewareOptions {
   redact?: (text: string) => string
   /**
    * Maximum characters kept in the per-iteration assistant text buffer used
-   * to emit `gen_ai.choice` events. Extra characters are truncated with a
+   * to emit `gen_ai.choice` events, and in each text part of a media span's
+   * input and output. Extra characters are truncated with a
    * trailing `"…"` marker. Defaults to 100 000. Set to `0` to disable the
    * cap. Exporters typically truncate long attribute values anyway.
    */
@@ -138,12 +145,37 @@ interface RequestState {
    * from the (base-shaped) finish info, which doesn't carry it.
    */
   lastFinishReason: string | null
+  rootUsageAttributes: Record<string, number> | null
+  rootUsageApplied: boolean
 }
 
 const stateByCtx = new WeakMap<ChatMiddlewareContext, RequestState>()
 
 const DEFAULT_MAX_CONTENT_LENGTH = 100_000
 const REDACTION_FAILED_SENTINEL = '[redaction_failed]'
+
+function accumulateUsageAttributes(
+  current: Record<string, number> | null,
+  usage: TokenUsage,
+): Record<string, number> {
+  const accumulated = current ?? {}
+  for (const [key, value] of Object.entries(usageAttributes(usage))) {
+    if (typeof value === 'number') {
+      accumulated[key] = (accumulated[key] ?? 0) + value
+    }
+  }
+  return accumulated
+}
+
+function applyRootUsage(state: RequestState, fallbackUsage?: TokenUsage): void {
+  if (state.rootUsageApplied) return
+
+  const attributes =
+    state.rootUsageAttributes ??
+    (fallbackUsage ? usageAttributes(fallbackUsage) : null)
+  if (attributes) state.rootSpan.setAttributes(attributes)
+  state.rootUsageApplied = true
+}
 
 function serializeContent(content: unknown): string {
   if (typeof content === 'string') return content
@@ -182,6 +214,111 @@ function serializeContent(content: unknown): string {
     }
   }
   return parts.join(' ')
+}
+
+type InputPart =
+  | { type: 'text'; content: string }
+  | { type: 'uri'; modality: string; uri: string; mime_type?: string }
+  | { type: 'file'; modality: string; file_id: string; mime_type?: string }
+
+/**
+ * Structured form of `ContentPart[]` for `gen_ai.input.messages`, using the
+ * OTel GenAI semconv part shapes. URL and file-handle media keep their
+ * reference; inline bytes (and `data:` URLs) stay a `[type]` placeholder so
+ * they never blow attribute size limits. `redact` runs on text parts only.
+ */
+function serializeParts(
+  content: Array<unknown>,
+  redact: (text: string) => string,
+): Array<InputPart> {
+  const parts: Array<InputPart> = []
+  for (const part of content) {
+    if (!part || typeof part !== 'object') continue
+    const p = part as {
+      type?: string
+      text?: string
+      content?: string
+      source?: { type?: string; value?: string; mimeType?: string }
+    }
+    if (p.type === 'text') {
+      parts.push({
+        type: 'text',
+        content: redact((p.text ?? p.content ?? '').toString()),
+      })
+      continue
+    }
+    const modality = p.type ?? 'unknown'
+    const { type, value, mimeType } = p.source ?? {}
+    const mime = mimeType ? { mime_type: mimeType } : {}
+    if (type === 'url' && value && !value.startsWith('data:')) {
+      parts.push({ type: 'uri', modality, uri: value, ...mime })
+    } else if (type === 'file' && value) {
+      parts.push({ type: 'file', modality, file_id: value, ...mime })
+    } else {
+      parts.push({ type: 'text', content: `[${modality}]` })
+    }
+  }
+  return parts
+}
+
+/** A media reference as a content part, so `serializeParts` can map it. */
+function mediaPart(modality: string, url: unknown): unknown {
+  return {
+    type: modality,
+    source: typeof url === 'string' ? { type: 'url', value: url } : undefined,
+  }
+}
+
+/**
+ * Content parts for a media call's inputs, read from `artifactInputs`: the
+ * prompt (a string or `MediaPrompt` parts), TTS `text`, and transcription
+ * `audio`. Audio is a reference only when it is an http(s) URL; a base64
+ * string, `File` or `Blob` becomes a placeholder.
+ */
+function mediaInputParts(inputs: unknown): Array<unknown> {
+  if (!inputs || typeof inputs !== 'object') return []
+  const { prompt, text, audio } = inputs as Record<string, unknown>
+  const parts: Array<unknown> = []
+  for (const value of [prompt, text]) {
+    if (typeof value === 'string') parts.push({ type: 'text', content: value })
+    else if (Array.isArray(value)) parts.push(...value)
+  }
+  if (audio !== undefined) {
+    const url =
+      typeof audio === 'string' && /^https?:\/\//.test(audio) ? audio : null
+    parts.push(mediaPart('audio', url))
+  }
+  return parts
+}
+
+/**
+ * Content parts for a media call's result: generated image, audio or video
+ * URLs, and transcript text. Base64 output becomes a placeholder.
+ */
+function mediaOutputParts(
+  activity: GenerationActivity,
+  result: unknown,
+): Array<unknown> {
+  if (!result || typeof result !== 'object') return []
+  const r = result as Record<string, unknown>
+  const parts: Array<unknown> = []
+  if (Array.isArray(r.images)) {
+    for (const image of r.images) {
+      parts.push(mediaPart('image', (image as { url?: unknown } | null)?.url))
+    }
+  }
+  // `TTSResult.audio` is a base64 string; `AudioGenerationResult.audio` is a
+  // `{ url } | { b64Json }` source.
+  if (r.audio !== undefined) {
+    parts.push(mediaPart('audio', (r.audio as { url?: unknown } | null)?.url))
+  }
+  // Only video puts its asset on a top-level `url`. A world `url` is a viewer
+  // page, not media.
+  if (activity === 'video' && typeof r.url === 'string') {
+    parts.push(mediaPart('video', r.url))
+  }
+  if (typeof r.text === 'string') parts.push({ type: 'text', content: r.text })
+  return parts
 }
 
 function messageEventName(role: string): string {
@@ -303,6 +440,29 @@ export function otelMiddleware(
     })
   }
 
+  // Media prompts and transcripts are single strings, so cap each text part
+  // with `maxContentLength` the same way the chat completion buffer is capped.
+  const redactMediaText = (text: string): string =>
+    redactContent(
+      maxContentLength > 0 && text.length > maxContentLength
+        ? text.slice(0, maxContentLength) + '…'
+        : text,
+    )
+
+  const setMediaMessages = (
+    span: Span,
+    direction: 'input' | 'output',
+    parts: Array<unknown>,
+  ): void => {
+    const content = serializeParts(parts, redactMediaText)
+    if (content.length === 0) return
+    const json = JSON.stringify([
+      { role: direction === 'input' ? 'user' : 'assistant', content },
+    ])
+    span.setAttribute(`gen_ai.${direction}.messages`, json)
+    span.setAttribute(`langfuse.observation.${direction}`, json)
+  }
+
   const startMediaSpan = (ctx: GenerationMiddlewareContext): void => {
     safeCall('otel.onStart', () => {
       const operationName = OPERATION_NAME[ctx.activity]
@@ -328,6 +488,22 @@ export function otelMiddleware(
       )
       if (enriched) span.setAttributes(enriched)
       mediaSpans.set(ctx, span)
+
+      if (captureContent) {
+        setMediaMessages(span, 'input', mediaInputParts(ctx.artifactInputs))
+        // Observe the result through a transform: the terminal hooks never
+        // see it. Returns `undefined`, so the result is left unchanged.
+        ctx.resultTransforms.push((result) => {
+          safeCall('otel.captureOutput', () =>
+            setMediaMessages(
+              span,
+              'output',
+              mediaOutputParts(ctx.activity, result),
+            ),
+          )
+          return undefined
+        })
+      }
     })
   }
 
@@ -395,12 +571,23 @@ export function otelMiddleware(
           assistantTextBufferTruncated: false,
           startTime: Date.now(),
           lastFinishReason: null,
+          rootUsageAttributes: null,
+          rootUsageApplied: false,
         })
       })
     },
 
     onConfig(ctx, config) {
-      if (ctx.phase !== 'beforeModel') return
+      // Open an iteration span for every provider model call:
+      // - `beforeModel`: agent-loop chatStream turns
+      // - `structuredOutput`: separate structured-output finalization
+      //   (no-tools + outputSchema skips the agent loop, so without this
+      //   phase there is no generation span and captureContent is a silent
+      //   no-op — see #1054).
+      // Native-combined mode never fires `structuredOutput`, so a run that
+      // already opened spans via `beforeModel` is not double-counted.
+      if (ctx.phase !== 'beforeModel' && ctx.phase !== 'structuredOutput')
+        return
       safeCall('otel.onConfig', () => {
         const state = stateByCtx.get(ctx)
         if (!state) return
@@ -410,20 +597,26 @@ export function otelMiddleware(
         // on it. Close it here, just before opening the next iteration.
         closeIterationSpan(state, ctx)
 
+        // Number spans by the order of model calls this middleware has seen,
+        // not by `ctx.iteration`. After an agent-loop turn, structured-output
+        // finalization reuses the engine's last iteration index; using our
+        // own counter keeps finalization as a distinct leaf (#N+1).
+        const iteration = state.iterationCount
+
         const info: OtelSpanInfo<'iteration'> = {
           kind: 'iteration',
           ctx,
-          iteration: ctx.iteration,
+          iteration,
         }
         const name =
           safeCall('otel.spanNameFormatter', () => spanNameFormatter?.(info)) ??
-          `chat ${ctx.model} #${ctx.iteration}`
+          `chat ${ctx.model} #${iteration}`
 
         const baseAttrs: Record<string, AttributeValue> = {
           'gen_ai.system': ctx.provider,
           'gen_ai.operation.name': 'chat',
           'gen_ai.request.model': ctx.model,
-          'tanstack.ai.iteration': ctx.iteration,
+          'tanstack.ai.iteration': iteration,
         }
         // Sampling options now live in provider-native `modelOptions`, and
         // providers spell them differently (e.g. `max_output_tokens`,
@@ -527,7 +720,12 @@ export function otelMiddleware(
           // Also emit the current GenAI-semconv attribute form
           // (`gen_ai.input.messages`) — backends like PostHog read prompt
           // content from this attribute, not from span events.
-          const inputMessages: Array<{ role: string; content: string }> = []
+          // Multimodal messages keep their parts structured so image / audio /
+          // video / document references survive into the trace (#1525).
+          const inputMessages: Array<{
+            role: string
+            content: string | Array<InputPart>
+          }> = []
           for (const sys of systemPromptContents) {
             inputMessages.push({
               role: 'system',
@@ -535,6 +733,12 @@ export function otelMiddleware(
             })
           }
           for (const m of config.messages) {
+            if (Array.isArray(m.content)) {
+              const parts = serializeParts(m.content, redactContent)
+              if (parts.length === 0) continue
+              inputMessages.push({ role: m.role, content: parts })
+              continue
+            }
             const body = serializeContent(m.content)
             if (body.length === 0) continue
             inputMessages.push({
@@ -583,26 +787,32 @@ export function otelMiddleware(
         }
 
         if (chunk.type !== 'RUN_FINISHED') return
+        const tanstack = tanstackMetadata(chunk)
+        const extra = chunk as {
+          finishReason?: string | null
+          model?: string
+        }
+        const finishReason = extra.finishReason ?? tanstack?.finishReason
+        const model = extra.model ?? tanstack?.model
         // Capture for the root-span finish_reasons attribute set in onFinish,
         // which receives base-shaped info without a finishReason field.
-        if (chunk.finishReason) state.lastFinishReason = chunk.finishReason
+        if (finishReason) state.lastFinishReason = finishReason
         const span = state.currentIterationSpan
         if (!span) return
 
-        if (chunk.finishReason) {
-          span.setAttribute('gen_ai.response.finish_reasons', [
-            chunk.finishReason,
-          ])
+        if (finishReason) {
+          span.setAttribute('gen_ai.response.finish_reasons', [finishReason])
         }
-        if (chunk.model) span.setAttribute('gen_ai.response.model', chunk.model)
+        if (model) span.setAttribute('gen_ai.response.model', model)
 
         // Set usage attributes on the iteration span directly from the chunk
         // so they're available before `onUsage` fires. Histogram recording is
         // deliberately NOT done here — the chat runner always invokes
         // `runOnUsage` when `chunk.usage` is present, and `onUsage` is the
         // canonical place for the metric. Recording in both would double-count.
-        if (chunk.usage) {
-          span.setAttributes(usageAttributes(chunk.usage))
+        const tokenUsage = rebuildTokenUsage(chunk.usage, tanstack?.usage)
+        if (tokenUsage) {
+          span.setAttributes(usageAttributes(tokenUsage))
         }
 
         if (captureContent && state.assistantTextBuffer.length > 0) {
@@ -650,6 +860,11 @@ export function otelMiddleware(
         const state = stateByCtx.get(chatCtx)
         if (!state) return
 
+        state.rootUsageAttributes = accumulateUsageAttributes(
+          state.rootUsageAttributes,
+          usage,
+        )
+
         // Always record the token histogram — metrics don't depend on having
         // an iteration span, and skipping here would drop metric data if an
         // adapter emits `onUsage` outside the iteration window.
@@ -676,6 +891,9 @@ export function otelMiddleware(
 
     onBeforeToolCall(ctx, hookCtx) {
       safeCall('otel.onBeforeToolCall', () => {
+        // A client tool runs in the client, not here, so it gets no
+        // execute_tool span. Middleware sees its input before dispatch.
+        if (hookCtx.tool && !hookCtx.tool.execute) return
         const state = stateByCtx.get(ctx)
         if (!state) return
         const parent = state.currentIterationSpan ?? state.rootSpan
@@ -889,6 +1107,7 @@ export function otelMiddleware(
           })
         }
 
+        applyRootUsage(state)
         safeCall('otel.onSpanEnd', () =>
           onSpanEnd?.({ kind: 'chat', ctx: chatCtx }, state.rootSpan),
         )
@@ -970,6 +1189,7 @@ export function otelMiddleware(
           })
         }
 
+        applyRootUsage(state)
         safeCall('otel.onSpanEnd', () =>
           onSpanEnd?.({ kind: 'chat', ctx: chatCtx }, state.rootSpan),
         )
@@ -1027,9 +1247,6 @@ export function otelMiddleware(
           })
         }
 
-        if (info.usage) {
-          state.rootSpan.setAttributes(usageAttributes(info.usage))
-        }
         if (state.lastFinishReason) {
           state.rootSpan.setAttribute('gen_ai.response.finish_reasons', [
             state.lastFinishReason,
@@ -1040,6 +1257,7 @@ export function otelMiddleware(
           state.iterationCount,
         )
 
+        applyRootUsage(state, info.usage)
         safeCall('otel.onSpanEnd', () =>
           onSpanEnd?.({ kind: 'chat', ctx: chatCtx }, state.rootSpan),
         )

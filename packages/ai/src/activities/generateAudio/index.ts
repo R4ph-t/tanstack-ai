@@ -9,12 +9,20 @@ import { aiEventClient } from '@tanstack/ai-event-client'
 import { streamGenerationResult } from '../stream-generation-result.js'
 import { resolveDebugOption } from '../../logger/resolve'
 import {
+  applyGenerationResultTransforms,
   createGenerationContext,
+  runGenerationAbort,
   runGenerationError,
   runGenerationFinish,
   runGenerationStart,
   runGenerationUsage,
 } from '../middleware/run'
+import {
+  abortReasonMessage,
+  createActivityAbortControls,
+  isActivityAbortError,
+  raceWithAbort,
+} from '../../utilities/activity-abort'
 import type { InternalLogger } from '../../logger/internal-logger'
 import type { DebugOption } from '../../logger/types'
 import type { GenerationMiddleware } from '../middleware/types'
@@ -84,6 +92,22 @@ export interface AudioActivityOptions<
    * `GenerationMiddleware` contract for a custom backend.
    */
   middleware?: Array<GenerationMiddleware>
+  /** Stable conversation/thread id. It is the AG-UI thread id and the persistence key. */
+  threadId: string
+  /** Stable run id for correlating this run when persisted. */
+  runId?: string
+  /**
+   * Maximum duration of this activity invocation in milliseconds.
+   * No SDK-wide default — choose a value suitable for the provider and job.
+   * Composed with {@link abortSignal}; the first abort wins.
+   */
+  timeout?: number
+  /**
+   * Caller cancellation signal (request disconnects, job/runtime cancellation).
+   * Composed with {@link timeout} into an effective signal forwarded to the
+   * adapter. Request-specific — not stored on global provider client config.
+   */
+  abortSignal?: AbortSignal
 }
 
 // ===========================
@@ -121,7 +145,8 @@ function createId(prefix: string): string {
  * const result = await generateAudio({
  *   adapter: falAudio('fal-ai/diffrhythm'),
  *   prompt: 'An upbeat electronic track with synths',
- *   duration: 10
+ *   duration: 10,
+ *   threadId,
  * })
  *
  * console.log(result.audio.url) // URL to generated audio
@@ -134,8 +159,11 @@ export function generateAudio<
   options: AudioActivityOptions<TAdapter, TStream>,
 ): AudioActivityResult<TStream> {
   if (options.stream) {
-    return streamGenerationResult(() =>
-      runGenerateAudio(options),
+    return streamGenerationResult(
+      // Only `runId` comes from the resolved wire identity. `threadId` is
+      // the caller's own id.
+      (resolved) => runGenerateAudio({ ...options, runId: resolved.runId }),
+      options,
     ) as AudioActivityResult<TStream>
   }
   return runGenerateAudio(options) as AudioActivityResult<TStream>
@@ -154,12 +182,20 @@ async function runGenerateAudio<
     stream: _stream,
     debug: _debug,
     middleware,
+    threadId,
+    runId,
+    timeout,
+    abortSignal: callerAbortSignal,
     ...rest
   } = options
   const model = adapter.model
   const requestId = createId('audio')
   const startTime = Date.now()
   const logger: InternalLogger = resolveDebugOption(options.debug)
+  const abortControls = createActivityAbortControls({
+    timeout,
+    abortSignal: callerAbortSignal,
+  })
   const providerName =
     (adapter as { name?: string; provider?: string }).provider ??
     (adapter as { name?: string }).name ??
@@ -171,6 +207,9 @@ async function runGenerateAudio<
     provider: adapter.name,
     model,
     modelOptions: rest.modelOptions,
+    threadId,
+    runId,
+    artifactInputs: { prompt: rest.prompt, duration: rest.duration },
     createId,
   })
 
@@ -192,7 +231,17 @@ async function runGenerateAudio<
   })
 
   try {
-    const result = await adapter.generateAudio({ ...rest, model, logger })
+    const rawResult = await raceWithAbort(
+      adapter.generateAudio({
+        ...rest,
+        model,
+        logger,
+        ...(abortControls.signal ? { abortSignal: abortControls.signal } : {}),
+      }),
+      abortControls.signal,
+    )
+    abortControls.clear()
+    const result = await applyGenerationResultTransforms(mwCtx, rawResult)
     const elapsedMs = Date.now() - startTime
 
     aiEventClient.emit('audio:request:completed', {
@@ -228,6 +277,7 @@ async function runGenerateAudio<
 
     return result
   } catch (error) {
+    abortControls.clear()
     const elapsedMs = Date.now() - startTime
     const err = error as Error
     aiEventClient.emit('audio:request:error', {
@@ -239,10 +289,17 @@ async function runGenerateAudio<
       modelOptions: rest.modelOptions as Record<string, unknown> | undefined,
       timestamp: Date.now(),
     })
-    await runGenerationError(middleware, mwCtx, {
-      error,
-      duration: elapsedMs,
-    })
+    if (isActivityAbortError(error, abortControls.signal)) {
+      await runGenerationAbort(middleware, mwCtx, {
+        reason: abortReasonMessage(error, abortControls.signal),
+        duration: elapsedMs,
+      })
+    } else {
+      await runGenerationError(middleware, mwCtx, {
+        error,
+        duration: elapsedMs,
+      })
+    }
     logger.errors('generateAudio activity failed', {
       error,
       source: 'generateAudio',

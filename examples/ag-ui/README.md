@@ -8,7 +8,7 @@ This example shows that any backend can serve `@tanstack/ai-react` clients as lo
 
 | Layer         | Stack                                                                    |
 | ------------- | ------------------------------------------------------------------------ |
-| Client        | React, Vite, `@tanstack/ai-react`, `@tanstack/ai-react-ui`               |
+| Client        | React, Vite, `@tanstack/ai-react`, `@tanstack/ai-react/ui`               |
 | Go server     | `net/http`, hand-rolled AG-UI SSE, OpenAI/Anthropic streaming on `:8001` |
 | Rust server   | Axum, hand-rolled AG-UI SSE, OpenAI/Anthropic streaming on `:8002`       |
 | PHP server    | Built-in PHP server + curl, hand-rolled AG-UI SSE on `:8003`             |
@@ -97,7 +97,6 @@ TEXT_MESSAGE_START
 TEXT_MESSAGE_CONTENT (streamed)
 TEXT_MESSAGE_END
 RUN_FINISHED
-data: [DONE]
 ```
 
 ## Project layout
@@ -118,5 +117,5 @@ examples/ag-ui/
 ## Related docs
 
 - [AG-UI compliance migration](../../docs/migration/ag-ui-compliance.md)
-- [Connection adapters](../../docs/chat/connection-adapters.md)
+- [Transports](../../docs/transports/overview.md)
 - [Chat architecture](../../packages/ai/docs/chat-architecture.md)

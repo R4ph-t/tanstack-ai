@@ -3,13 +3,11 @@ id: CapabilityProvider
 title: CapabilityProvider
 ---
 
-# Type Alias: CapabilityProvider()\<TValue\>
-
 ```ts
 type CapabilityProvider<TValue> = (ctx, value) => void;
 ```
 
-Defined in: [packages/ai/src/activities/chat/middleware/capabilities.ts:23](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/middleware/capabilities.ts#L23)
+Defined in: packages/ai/src/activities/chat/middleware/capabilities.ts:23
 
 Writes a capability value onto a context.
 

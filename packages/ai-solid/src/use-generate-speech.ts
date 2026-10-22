@@ -1,4 +1,9 @@
 import { useGeneration } from './use-generation'
+import { reconstructSpeechResult } from '@tanstack/ai-client'
+import type {
+  UseGenerationOptions,
+  UseGenerationReturn,
+} from './use-generation'
 import type { StreamChunk, TTSResult } from '@tanstack/ai'
 import type {
   AIDevtoolsDisplayOptions,
@@ -15,13 +20,19 @@ import type { Accessor } from 'solid-js'
  *
  * @template TOutput - The transformed output type (defaults to TTSResult)
  */
-export interface UseGenerateSpeechOptions<TOutput = TTSResult> {
+export interface UseGenerateSpeechOptions<TOutput = TTSResult> extends Pick<
+  UseGenerationOptions<SpeechGenerateInput, TTSResult, TOutput>,
+  | 'persistence'
+  | 'threadId'
+  | 'hydrateGeneration'
+  | 'joinRun'
+  | 'byok'
+  | 'byokProvider'
+> {
   /** Connect-based adapter for streaming transport (SSE, HTTP stream, custom) */
   connection?: ConnectConnectionAdapter
   /** Direct async function for speech generation */
   fetcher?: GenerationFetcher<SpeechGenerateInput, TTSResult>
-  /** Unique identifier for this generation instance */
-  id?: string
   /** Additional body parameters to send with connect-based adapter requests */
   body?: Record<string, any>
   /** Display options for TanStack AI Devtools. */
@@ -47,7 +58,10 @@ export interface UseGenerateSpeechOptions<TOutput = TTSResult> {
  *
  * @template TOutput - The transformed output type (defaults to TTSResult)
  */
-export interface UseGenerateSpeechReturn<TOutput = TTSResult> {
+export interface UseGenerateSpeechReturn<TOutput = TTSResult> extends Omit<
+  UseGenerationReturn<TOutput>,
+  'generate'
+> {
   /** Trigger speech generation */
   generate: (input: SpeechGenerateInput) => Promise<void>
   /** The TTS result containing audio data, or null */
@@ -58,10 +72,6 @@ export interface UseGenerateSpeechReturn<TOutput = TTSResult> {
   error: Accessor<Error | undefined>
   /** Current state of the generation */
   status: Accessor<GenerationClientState>
-  /** Abort the current generation */
-  stop: () => void
-  /** Clear result, error, and return to idle */
-  reset: () => void
 }
 
 /**
@@ -74,6 +84,7 @@ export interface UseGenerateSpeechReturn<TOutput = TTSResult> {
  *
  * function SpeechGenerator() {
  *   const { generate, result, isLoading } = useGenerateSpeech({
+ *     threadId: 'welcome-speech',
  *     connection: fetchServerSentEvents('/api/generate/speech'),
  *   })
  *
@@ -103,19 +114,15 @@ export function useGenerateSpeech<TTransformed = void>(
     hookName: 'useGenerateSpeech',
     outputKind: 'audio' as const,
   }
-  const { generate, result, isLoading, error, status, stop, reset } =
-    useGeneration<SpeechGenerateInput, TTSResult, TTransformed>({
-      ...options,
-      devtools,
-    })
+  const generation = useGeneration<
+    SpeechGenerateInput,
+    TTSResult,
+    TTransformed
+  >({
+    ...options,
+    devtools,
+    reconstructResult: reconstructSpeechResult,
+  })
 
-  return {
-    generate: generate as (input: SpeechGenerateInput) => Promise<void>,
-    result,
-    isLoading,
-    error,
-    status,
-    stop,
-    reset,
-  }
+  return generation
 }

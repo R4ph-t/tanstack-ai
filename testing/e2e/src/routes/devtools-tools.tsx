@@ -37,9 +37,9 @@ const tools = clientTools(inventoryLookupTool)
 function DevtoolsToolsRoute() {
   const { testId, aimockPort } = Route.useSearch()
   const chat = useChat({
-    id: 'devtools-tools:primary',
+    threadId: 'devtools-tools:primary',
     connection: fetchServerSentEvents('/api/chat'),
-    body: { provider: 'openai', feature: 'chat', testId, aimockPort },
+    forwardedProps: { provider: 'openai', feature: 'chat', testId, aimockPort },
     tools,
     devtools: { name: 'Tool Runner' },
   })

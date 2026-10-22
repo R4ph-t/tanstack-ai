@@ -3,13 +3,11 @@ id: MCPConnectionPolicy
 title: MCPConnectionPolicy
 ---
 
-# Type Alias: MCPConnectionPolicy
-
 ```ts
 type MCPConnectionPolicy = "close" | "keep-alive";
 ```
 
-Defined in: [packages/ai/src/activities/chat/mcp/types.ts:50](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/mcp/types.ts#L50)
+Defined in: packages/ai/src/activities/chat/mcp/types.ts:50
 
 Controls what happens to MCP connections when the chat run ends.
 

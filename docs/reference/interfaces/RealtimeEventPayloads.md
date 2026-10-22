@@ -3,9 +3,7 @@ id: RealtimeEventPayloads
 title: RealtimeEventPayloads
 ---
 
-# Interface: RealtimeEventPayloads
-
-Defined in: [packages/ai/src/realtime/types.ts:258](https://github.com/TanStack/ai/blob/main/packages/ai/src/realtime/types.ts#L258)
+Defined in: packages/ai/src/realtime/types.ts:258
 
 Event payloads for realtime events
 
@@ -17,7 +15,7 @@ Event payloads for realtime events
 audio_chunk: object;
 ```
 
-Defined in: [packages/ai/src/realtime/types.ts:266](https://github.com/TanStack/ai/blob/main/packages/ai/src/realtime/types.ts#L266)
+Defined in: packages/ai/src/realtime/types.ts:266
 
 #### data
 
@@ -39,7 +37,7 @@ sampleRate: number;
 error: object;
 ```
 
-Defined in: [packages/ai/src/realtime/types.ts:270](https://github.com/TanStack/ai/blob/main/packages/ai/src/realtime/types.ts#L270)
+Defined in: packages/ai/src/realtime/types.ts:270
 
 #### error
 
@@ -55,12 +53,12 @@ error: Error;
 go_away: object;
 ```
 
-Defined in: [packages/ai/src/realtime/types.ts:271](https://github.com/TanStack/ai/blob/main/packages/ai/src/realtime/types.ts#L271)
+Defined in: packages/ai/src/realtime/types.ts:271
 
 #### timeLeft?
 
 ```ts
-optional timeLeft: string;
+optional timeLeft?: string;
 ```
 
 ***
@@ -71,12 +69,12 @@ optional timeLeft: string;
 interrupted: object;
 ```
 
-Defined in: [packages/ai/src/realtime/types.ts:269](https://github.com/TanStack/ai/blob/main/packages/ai/src/realtime/types.ts#L269)
+Defined in: packages/ai/src/realtime/types.ts:269
 
 #### messageId?
 
 ```ts
-optional messageId: string;
+optional messageId?: string;
 ```
 
 ***
@@ -87,7 +85,7 @@ optional messageId: string;
 message_complete: object;
 ```
 
-Defined in: [packages/ai/src/realtime/types.ts:268](https://github.com/TanStack/ai/blob/main/packages/ai/src/realtime/types.ts#L268)
+Defined in: packages/ai/src/realtime/types.ts:268
 
 #### message
 
@@ -103,7 +101,7 @@ message: RealtimeMessage;
 mode_change: object;
 ```
 
-Defined in: [packages/ai/src/realtime/types.ts:260](https://github.com/TanStack/ai/blob/main/packages/ai/src/realtime/types.ts#L260)
+Defined in: packages/ai/src/realtime/types.ts:260
 
 #### mode
 
@@ -119,7 +117,7 @@ mode: RealtimeMode;
 status_change: object;
 ```
 
-Defined in: [packages/ai/src/realtime/types.ts:259](https://github.com/TanStack/ai/blob/main/packages/ai/src/realtime/types.ts#L259)
+Defined in: packages/ai/src/realtime/types.ts:259
 
 #### status
 
@@ -135,7 +133,7 @@ status: RealtimeStatus;
 tool_call: object;
 ```
 
-Defined in: [packages/ai/src/realtime/types.ts:267](https://github.com/TanStack/ai/blob/main/packages/ai/src/realtime/types.ts#L267)
+Defined in: packages/ai/src/realtime/types.ts:267
 
 #### input
 
@@ -163,7 +161,7 @@ toolName: string;
 transcript: object;
 ```
 
-Defined in: [packages/ai/src/realtime/types.ts:261](https://github.com/TanStack/ai/blob/main/packages/ai/src/realtime/types.ts#L261)
+Defined in: packages/ai/src/realtime/types.ts:261
 
 #### isFinal
 
@@ -174,7 +172,7 @@ isFinal: boolean;
 #### role
 
 ```ts
-role: "user" | "assistant";
+role: "assistant" | "user";
 ```
 
 #### transcript
@@ -191,4 +189,4 @@ transcript: string;
 usage: UsageInfo;
 ```
 
-Defined in: [packages/ai/src/realtime/types.ts:272](https://github.com/TanStack/ai/blob/main/packages/ai/src/realtime/types.ts#L272)
+Defined in: packages/ai/src/realtime/types.ts:272

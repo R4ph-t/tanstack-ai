@@ -1,3 +1,23 @@
+<div align="center">
+  <picture>
+    <source
+      media="(prefers-color-scheme: dark)"
+      srcset="https://tanstack.com/api/readme/ai.png?theme=dark"
+    />
+    <source
+      media="(prefers-color-scheme: light)"
+      srcset="https://tanstack.com/api/readme/ai.png"
+    />
+    <img
+      src="https://tanstack.com/api/readme/ai.png"
+      alt="TanStack AI"
+      width="900"
+    />
+  </picture>
+</div>
+
+<br />
+
 # @tanstack/ai-isolate-cloudflare
 
 Cloudflare Workers driver for TanStack AI Code Mode.
@@ -55,6 +75,7 @@ const result = await chat({
   systemPrompts: ['You are a helpful assistant.', systemPrompt],
   tools: [tool],
   messages: [{ role: 'user', content: 'Compare weather in Tokyo and Paris' }],
+  threadId: 'thread-1',
 })
 ```
 

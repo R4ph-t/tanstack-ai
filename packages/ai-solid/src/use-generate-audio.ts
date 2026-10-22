@@ -1,4 +1,9 @@
 import { useGeneration } from './use-generation'
+import { reconstructAudioResult } from '@tanstack/ai-client'
+import type {
+  UseGenerationOptions,
+  UseGenerationReturn,
+} from './use-generation'
 import type { AudioGenerationResult, StreamChunk } from '@tanstack/ai'
 import type {
   AIDevtoolsDisplayOptions,
@@ -15,13 +20,21 @@ import type { Accessor } from 'solid-js'
  *
  * @template TOutput - The transformed output type (defaults to AudioGenerationResult)
  */
-export interface UseGenerateAudioOptions<TOutput = AudioGenerationResult> {
+export interface UseGenerateAudioOptions<
+  TOutput = AudioGenerationResult,
+> extends Pick<
+  UseGenerationOptions<AudioGenerateInput, AudioGenerationResult, TOutput>,
+  | 'persistence'
+  | 'threadId'
+  | 'hydrateGeneration'
+  | 'joinRun'
+  | 'byok'
+  | 'byokProvider'
+> {
   /** Connect-based adapter for streaming transport (SSE, HTTP stream, custom) */
   connection?: ConnectConnectionAdapter
   /** Direct async function for audio generation */
   fetcher?: GenerationFetcher<AudioGenerateInput, AudioGenerationResult>
-  /** Unique identifier for this generation instance */
-  id?: string
   /** Additional body parameters to send with connect-based adapter requests */
   body?: Record<string, any>
   /** Display options for TanStack AI Devtools. */
@@ -47,7 +60,9 @@ export interface UseGenerateAudioOptions<TOutput = AudioGenerationResult> {
  *
  * @template TOutput - The transformed output type (defaults to AudioGenerationResult)
  */
-export interface UseGenerateAudioReturn<TOutput = AudioGenerationResult> {
+export interface UseGenerateAudioReturn<
+  TOutput = AudioGenerationResult,
+> extends Omit<UseGenerationReturn<TOutput>, 'generate'> {
   /** Trigger audio generation */
   generate: (input: AudioGenerateInput) => Promise<void>
   /** The generation result containing audio, or null */
@@ -58,10 +73,6 @@ export interface UseGenerateAudioReturn<TOutput = AudioGenerationResult> {
   error: Accessor<Error | undefined>
   /** Current state of the generation */
   status: Accessor<GenerationClientState>
-  /** Abort the current generation */
-  stop: () => void
-  /** Clear result, error, and return to idle */
-  reset: () => void
 }
 
 /**
@@ -74,6 +85,7 @@ export interface UseGenerateAudioReturn<TOutput = AudioGenerationResult> {
  *
  * function AudioGenerator() {
  *   const { generate, result, isLoading } = useGenerateAudio({
+ *     threadId: 'theme-audio',
  *     connection: fetchServerSentEvents('/api/generate/audio'),
  *   })
  *
@@ -101,19 +113,15 @@ export function useGenerateAudio<TTransformed = void>(
     hookName: 'useGenerateAudio',
     outputKind: 'audio' as const,
   }
-  const { generate, result, isLoading, error, status, stop, reset } =
-    useGeneration<AudioGenerateInput, AudioGenerationResult, TTransformed>({
-      ...options,
-      devtools,
-    })
+  const generation = useGeneration<
+    AudioGenerateInput,
+    AudioGenerationResult,
+    TTransformed
+  >({
+    ...options,
+    devtools,
+    reconstructResult: reconstructAudioResult,
+  })
 
-  return {
-    generate: generate as (input: AudioGenerateInput) => Promise<void>,
-    result,
-    isLoading,
-    error,
-    status,
-    stop,
-    reset,
-  }
+  return generation
 }

@@ -13,16 +13,17 @@ import {
 import { toReactive } from './internal/to-reactive'
 import type {
   AnyClientTool,
+  InterruptDefinition,
   InferSchemaType,
   ModelMessage,
+  RunAgentResumeItem,
   SchemaInput,
   StreamChunk,
 } from '@tanstack/ai'
 import type {
-  ChatClientState,
-  ConnectionStatus,
+  ResolvableChatInterrupt,
+  ChatResumeState,
   InferredClientContext,
-  QueuedMessage,
   SendMessageOptions,
   StructuredOutputPart,
 } from '@tanstack/ai-client'
@@ -34,19 +35,16 @@ import type {
   UIMessage,
 } from './types'
 
-let nextId = 0
-
 export function injectChat<
   const TTools extends ReadonlyArray<AnyClientTool> = any,
   TSchema extends SchemaInput | undefined = undefined,
   TContext = InferredClientContext<TTools>,
+  const TInterrupts extends ReadonlyArray<
+    InterruptDefinition<any, any, any, any>
+  > = readonly [],
 >(
-  options: InjectChatOptions<
-    TTools,
-    TSchema,
-    TContext
-  > = {} as InjectChatOptions<TTools, TSchema, TContext>,
-): InjectChatResult<TTools, TSchema> {
+  options: InjectChatOptions<TTools, TSchema, TContext, TInterrupts>,
+): InjectChatResult<TTools, TSchema, TInterrupts> {
   assertInInjectionContext(injectChat)
 
   type Partial = DeepPartial<InferSchemaType<NonNullable<TSchema>>>
@@ -54,22 +52,8 @@ export function injectChat<
 
   const destroyRef = inject(DestroyRef)
   const injector = inject(Injector)
-  const clientId = options.id || `injectChat-${nextId++}`
-
-  const messages = signal<Array<UIMessage<TTools>>>(
-    options.initialMessages || [],
-  )
-  const isLoading = signal(false)
-  const error = signal<Error | undefined>(undefined)
-  const status = signal<ChatClientState>('ready')
-  const isSubscribed = signal(false)
-  const connectionStatus = signal<ConnectionStatus>('disconnected')
-  const sessionGenerating = signal(false)
-  const queue = signal<Array<QueuedMessage>>([])
 
   // Reactive option sources. Plain values become constant computeds.
-  const bodySource =
-    options.body !== undefined ? toReactive(options.body) : undefined
   const forwardedPropsSource =
     options.forwardedProps !== undefined
       ? toReactive(options.forwardedProps)
@@ -78,26 +62,36 @@ export function injectChat<
     options.context !== undefined ? toReactive(options.context) : undefined
   const liveSource =
     options.live !== undefined ? toReactive(options.live) : undefined
+  const toolsSource =
+    options.tools !== undefined ? toReactive(options.tools) : undefined
 
   const transport = options.connection
     ? { connection: options.connection }
     : { fetcher: options.fetcher }
 
-  const client = new ChatClient<TTools, TContext>({
+  const client = new ChatClient<TTools, TContext, TInterrupts>({
     devtoolsBridgeFactory: createChatDevtoolsBridge,
     ...transport,
-    id: clientId,
     ...(options.initialMessages !== undefined && {
       initialMessages: options.initialMessages,
     }),
-    ...(options.persistence !== undefined && {
-      persistence: options.persistence,
+    threadId: options.threadId,
+    ...(options.persistence === true
+      ? {
+          persistence: true,
+          ...(options.history !== undefined && {
+            history: options.history,
+          }),
+        }
+      : { persistence: options.persistence }),
+    ...(options.initialResumeSnapshot !== undefined && {
+      initialResumeSnapshot: options.initialResumeSnapshot,
     }),
-    ...(bodySource !== undefined && { body: bodySource() }),
-    ...(options.threadId !== undefined && { threadId: options.threadId }),
     ...(forwardedPropsSource !== undefined && {
       forwardedProps: forwardedPropsSource(),
     }),
+    ...(options.byok !== undefined && { byok: options.byok }),
+    byokProvider: () => options.byokProvider?.(),
     ...(contextSource !== undefined && { context: contextSource() }),
     devtools: {
       ...options.devtools,
@@ -109,34 +103,43 @@ export function injectChat<
     onChunk: (chunk: StreamChunk) => options.onChunk?.(chunk),
     onFinish: (message) => options.onFinish?.(message),
     onError: (err) => options.onError?.(err),
-    tools: options.tools,
+    onInterruptStateChange: (nextInterruptState, context) => {
+      options.onInterruptStateChange?.(nextInterruptState, context)
+    },
+    tools: toolsSource?.(),
+    ...(options.interrupts !== undefined && {
+      interrupts: options.interrupts,
+    }),
     onCustomEvent: (eventType, data, context) =>
       options.onCustomEvent?.(eventType, data, context),
     ...(options.streamProcessor !== undefined && {
       streamProcessor: options.streamProcessor,
     }),
-    onMessagesChange: (m: Array<UIMessage<TTools>>) => messages.set(m),
-    onLoadingChange: (v: boolean) => isLoading.set(v),
-    onStatusChange: (v: ChatClientState) => status.set(v),
-    onErrorChange: (v: Error | undefined) => error.set(v),
-    onSubscriptionChange: (v: boolean) => isSubscribed.set(v),
-    onConnectionStatusChange: (v: ConnectionStatus) => connectionStatus.set(v),
-    onSessionGeneratingChange: (v: boolean) => sessionGenerating.set(v),
     ...(options.queue !== undefined && { queue: options.queue }),
-    onQueueChange: (nextQueue: Array<QueuedMessage>) => queue.set(nextQueue),
   })
 
-  messages.set(client.getMessages())
+  const snapshot = signal(client.getSnapshot())
+  const messages = computed(() => snapshot().messages)
+  const interruptState = computed(() => snapshot().interruptState)
+  const unsubscribeSnapshot = client.subscribeSnapshot(() =>
+    snapshot.set(client.getSnapshot()),
+  )
 
-  // Sync reactive body / forwardedProps / context to the client.
-  if (bodySource || forwardedPropsSource || contextSource) {
+  // START TAILING HERE, not in the constructor. A client is idle until something
+  // attaches it, so a client that gets built and thrown away never opens a
+  // connection — an unreachable stream would hold one of the browser's ~6
+  // connections per origin until the page reloaded. `inject*` runs in an injection
+  // context tied to the consumer's lifetime, and `destroyRef.onDestroy` below is the
+  // matching `detach`.
+  client.attach()
+
+  // Sync reactive forwardedProps / context to the client.
+  if (forwardedPropsSource || contextSource) {
     effect(
       () => {
-        const newBody = bodySource?.()
         const newForwardedProps = forwardedPropsSource?.()
         const newContext = contextSource?.()
         client.updateOptions({
-          ...(newBody !== undefined && { body: newBody }),
           ...(newForwardedProps !== undefined && {
             forwardedProps: newForwardedProps,
           }),
@@ -145,6 +148,11 @@ export function injectChat<
       },
       { injector },
     )
+  }
+
+  // Sync reactive tools to the client.
+  if (toolsSource) {
+    effect(() => client.updateOptions({ tools: toolsSource() }), { injector })
   }
 
   // Subscribe / unsubscribe based on reactive `live`.
@@ -161,9 +169,20 @@ export function injectChat<
     )
   }
 
-  afterNextRender(() => client.mountDevtools(), { injector })
+  afterNextRender(
+    () => {
+      client.mountDevtools()
+      // Delivery-durability resume is transparent: the resumable SSE
+      // connection adapter reattaches via the browser's native Last-Event-ID
+      // on reconnect. No client-side auto-resume wiring is needed.
+    },
+    { injector },
+  )
 
   destroyRef.onDestroy(() => {
+    unsubscribeSnapshot()
+    // Release the connection first: the counterpart of the `attach` above.
+    client.detach()
     if (liveSource?.()) {
       client.unsubscribe()
     } else {
@@ -221,9 +240,12 @@ export function injectChat<
   const reload = async () => {
     await client.reload()
   }
+  const loadOlderMessages = async () => {
+    await client.loadOlderMessages()
+  }
   const stop = () => client.stop()
   const clear = () => client.clear()
-  const setMessages = (m: Array<UIMessage<TTools>>) =>
+  const setMessages = (m: ReadonlyArray<UIMessage<TTools>>) =>
     client.setMessagesManually(m)
   const addToolResult = async (result: {
     toolCallId: string
@@ -234,33 +256,59 @@ export function injectChat<
   }) => {
     await client.addToolResult(result)
   }
-  const addToolApprovalResponse = async (response: {
-    id: string
-    approved: boolean
-  }) => {
-    await client.addToolApprovalResponse(response)
+  const interrupts = computed(() => interruptState().interrupts)
+  const interruptErrors = computed(() => interruptState().interruptErrors)
+  const resuming = computed(() => interruptState().resuming)
+  const resolveInterrupts = (
+    resolution:
+      | boolean
+      | ((
+          interrupt: ResolvableChatInterrupt<TTools, TInterrupts>,
+        ) => undefined),
+  ) => {
+    if (typeof resolution === 'boolean') {
+      client.resolveInterrupts(resolution)
+    } else {
+      client.resolveInterrupts(resolution)
+    }
   }
+  const cancelInterrupts = () => client.cancelInterrupts()
+  const retryInterrupts = () => client.retryInterrupts()
+  const resumeInterruptsUnsafe = (
+    resumeItems: Array<RunAgentResumeItem>,
+    state?: ChatResumeState,
+  ) => client.resumeInterruptsUnsafe(resumeItems, state)
 
   // oxlint-disable-next-line eslint-js/no-restricted-syntax -- return shape diverges from conditional InjectChatResult<TTools, TSchema>; TS can't structurally narrow the TSchema-gated partial/final signals
   return {
-    messages: messages.asReadonly(),
+    messages,
     sendMessage,
-    queue: queue.asReadonly(),
+    queue: computed(() => snapshot().queue),
     cancelQueued,
     append,
     reload,
     stop,
-    isLoading: isLoading.asReadonly(),
-    error: error.asReadonly(),
-    status: status.asReadonly(),
-    isSubscribed: isSubscribed.asReadonly(),
-    connectionStatus: connectionStatus.asReadonly(),
-    sessionGenerating: sessionGenerating.asReadonly(),
+    isLoading: computed(() => snapshot().isLoading),
+    hasOlderMessages: computed(() => snapshot().hasOlderMessages),
+    loadOlderMessages,
+    error: computed(() => snapshot().error),
+    status: computed(() => snapshot().status),
+    isSubscribed: computed(() => snapshot().isSubscribed),
+    connectionStatus: computed(() => snapshot().connectionStatus),
+    sessionGenerating: computed(() => snapshot().sessionGenerating),
+    isHydrating: computed(() => snapshot().isHydrating),
     setMessages,
     clear,
     addToolResult,
-    addToolApprovalResponse,
+    runId: computed(() => snapshot().runId),
+    interrupts,
+    interruptErrors,
+    resuming,
+    resolveInterrupts,
+    cancelInterrupts,
+    retryInterrupts,
+    resumeInterruptsUnsafe,
     partial,
     final,
-  } as unknown as InjectChatResult<TTools, TSchema>
+  } as unknown as InjectChatResult<TTools, TSchema, TInterrupts>
 }

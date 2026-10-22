@@ -3,20 +3,19 @@ id: maxIterations
 title: maxIterations
 ---
 
-# Function: maxIterations()
-
 ```ts
 function maxIterations(max): AgentLoopStrategy;
 ```
 
-Defined in: [packages/ai/src/activities/chat/agent-loop-strategies.ts:25](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/agent-loop-strategies.ts#L25)
+Defined in: packages/ai/src/activities/chat/agent-loop-strategies.ts:26
 
 Creates a strategy that continues for a maximum number of **model turns**
 (iterations), not tool calls.
 
-One iteration can still emit many parallel tool calls. Prefer
-[maxToolCalls](maxToolCalls.md) (and optionally `maxToolCallsPerTurn` on `chat()`)
-when you need a tool-call budget.
+One iteration can still emit many parallel tool calls. For a tool-call
+budget, use middleware with `onBeforeToolCall` (per-turn cap) and
+`onShouldContinue` (cumulative run budget) — see the docs recipe under
+Agentic Cycle.
 
 ## Parameters
 
@@ -36,8 +35,8 @@ AgentLoopStrategy that stops after max iterations
 
 ```typescript
 const stream = chat({
-  adapter: openaiText(),
-  model: "gpt-4o",
+  adapter: openaiText("gpt-6.1-sol"),
+  threadId: "thread-1",
   messages: [...],
   tools: [weatherTool],
   agentLoopStrategy: maxIterations(3), // Max 3 model turns

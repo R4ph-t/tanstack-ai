@@ -6,6 +6,7 @@ import {
   BadgeCheck,
   Braces,
   Code2,
+  Database,
   FileAudio,
   FileText,
   Guitar,
@@ -17,11 +18,15 @@ import {
   MessageSquare,
   Mic,
   Music,
+  Network,
+  PauseCircle,
   Plug,
   RefreshCw,
+  Scissors,
   Server,
   Sparkles,
   Video,
+  Wifi,
   X,
 } from 'lucide-react'
 
@@ -177,6 +182,19 @@ export default function Header() {
           </Link>
 
           <Link
+            to="/generations/persistent-generation"
+            onClick={() => setIsOpen(false)}
+            className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-800 transition-colors mb-1"
+            activeProps={{
+              className:
+                'flex items-center gap-3 p-3 rounded-lg bg-cyan-600 hover:bg-cyan-700 transition-colors mb-1',
+            }}
+          >
+            <Database size={20} />
+            <span className="font-medium">Persistent Generation</span>
+          </Link>
+
+          <Link
             to="/generations/structured-output"
             onClick={() => setIsOpen(false)}
             className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-800 transition-colors mb-1"
@@ -187,6 +205,32 @@ export default function Header() {
           >
             <Braces size={20} />
             <span className="font-medium">Structured Output</span>
+          </Link>
+
+          <Link
+            to="/generations/openrouter-combined"
+            onClick={() => setIsOpen(false)}
+            className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-800 transition-colors mb-1"
+            activeProps={{
+              className:
+                'flex items-center gap-3 p-3 rounded-lg bg-cyan-600 hover:bg-cyan-700 transition-colors mb-1',
+            }}
+          >
+            <Layers size={20} />
+            <span className="font-medium">OpenRouter Combined</span>
+          </Link>
+
+          <Link
+            to="/repo-report"
+            onClick={() => setIsOpen(false)}
+            className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-800 transition-colors mb-1"
+            activeProps={{
+              className:
+                'flex items-center gap-3 p-3 rounded-lg bg-cyan-600 hover:bg-cyan-700 transition-colors mb-1',
+            }}
+          >
+            <FileText size={20} />
+            <span className="font-medium">Repo report</span>
           </Link>
 
           <Link
@@ -207,6 +251,19 @@ export default function Header() {
           <p className="text-xs text-gray-500 uppercase tracking-wider px-3 pt-2 pb-1">
             Examples
           </p>
+
+          <Link
+            to="/compaction"
+            onClick={() => setIsOpen(false)}
+            className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-800 transition-colors mb-1"
+            activeProps={{
+              className:
+                'flex items-center gap-3 p-3 rounded-lg bg-cyan-600 hover:bg-cyan-700 transition-colors mb-1',
+            }}
+          >
+            <Scissors size={20} />
+            <span className="font-medium">Compaction</span>
+          </Link>
 
           <Link
             to="/example/guitars"
@@ -310,6 +367,97 @@ export default function Header() {
           >
             <RefreshCw size={20} />
             <span className="font-medium">Resumable Streams</span>
+          </Link>
+
+          <Link
+            to="/websocket-chat"
+            onClick={() => setIsOpen(false)}
+            className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-800 transition-colors mb-2"
+            activeProps={{
+              className:
+                'flex items-center gap-3 p-3 rounded-lg bg-cyan-600 hover:bg-cyan-700 transition-colors mb-2',
+            }}
+          >
+            <Wifi size={20} />
+            <span className="font-medium">WebSocket Chat</span>
+          </Link>
+
+          <Link
+            to="/subagent-brief"
+            onClick={() => setIsOpen(false)}
+            className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-800 transition-colors mb-2"
+            activeProps={{
+              className:
+                'flex items-center gap-3 p-3 rounded-lg bg-cyan-600 hover:bg-cyan-700 transition-colors mb-2',
+            }}
+          >
+            <Network size={20} />
+            <span className="font-medium">Subagent Brief</span>
+          </Link>
+
+          <Link
+            to="/persistent-chat"
+            onClick={() => setIsOpen(false)}
+            className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-800 transition-colors mb-2"
+            activeProps={{
+              className:
+                'flex items-center gap-3 p-3 rounded-lg bg-cyan-600 hover:bg-cyan-700 transition-colors mb-2',
+            }}
+          >
+            <Database size={20} />
+            <span className="font-medium">Persistent Chat</span>
+          </Link>
+
+          <Link
+            to="/durable-persistence"
+            onClick={() => setIsOpen(false)}
+            className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-800 transition-colors mb-2"
+            activeProps={{
+              className:
+                'flex items-center gap-3 p-3 rounded-lg bg-cyan-600 hover:bg-cyan-700 transition-colors mb-2',
+            }}
+          >
+            <RefreshCw size={20} />
+            <span className="font-medium">Durable Persistence</span>
+          </Link>
+
+          <Link
+            to="/app-studio"
+            onClick={() => setIsOpen(false)}
+            className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-800 transition-colors mb-2"
+            activeProps={{
+              className:
+                'flex items-center gap-3 p-3 rounded-lg bg-cyan-600 hover:bg-cyan-700 transition-colors mb-2',
+            }}
+          >
+            <Layers size={20} />
+            <span className="font-medium">App Studio</span>
+          </Link>
+
+          <Link
+            to="/interrupts"
+            onClick={() => setIsOpen(false)}
+            className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-800 transition-colors mb-2"
+            activeProps={{
+              className:
+                'flex items-center gap-3 p-3 rounded-lg bg-cyan-600 hover:bg-cyan-700 transition-colors mb-2',
+            }}
+          >
+            <PauseCircle size={20} />
+            <span className="font-medium">Interrupts Lab</span>
+          </Link>
+
+          <Link
+            to="/generic-interrupts"
+            onClick={() => setIsOpen(false)}
+            className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-800 transition-colors mb-2"
+            activeProps={{
+              className:
+                'flex items-center gap-3 p-3 rounded-lg bg-cyan-600 hover:bg-cyan-700 transition-colors mb-2',
+            }}
+          >
+            <Sparkles size={20} />
+            <span className="font-medium">Generic Interrupts</span>
           </Link>
 
           <Link

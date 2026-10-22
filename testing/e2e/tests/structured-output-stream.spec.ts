@@ -7,6 +7,23 @@ import {
 } from './helpers'
 import { providersFor } from './test-matrix'
 
+test('OpenAI Responses structured output reports EOF without response.completed', async ({
+  request,
+}) => {
+  const response = await request.post(
+    '/api/openai-completed-response-text?scenario=structured-missing-terminal',
+  )
+
+  expect(response.ok()).toBe(true)
+  const result = await response.json()
+  expect(result.text).toBe('{"answer":"partial"}')
+  expect(result.events).toContain('TEXT_MESSAGE_CONTENT')
+  expect(result.events.at(-1)).toBe('RUN_ERROR')
+  expect(result.errorCode).toBe('incomplete-stream')
+  expect(result.completed).toBe(false)
+  expect(result.events).not.toContain('RUN_FINISHED')
+})
+
 for (const provider of providersFor('structured-output-stream')) {
   test.describe(`${provider} — structured-output-stream`, () => {
     test('streams structured JSON deltas in a single request', async ({
@@ -68,6 +85,35 @@ for (const provider of providersFor('structured-output-stream')) {
       expect(Number(countAttr)).toBeGreaterThan(1)
     })
 
+    test('reasoning before the JSON does not add a text part', async ({
+      page,
+      testId,
+      aimockPort,
+    }) => {
+      test.skip(
+        provider !== 'openai',
+        'Pins the Responses path that streams reasoning under its own message id (#1632)',
+      )
+      await page.goto(
+        featureUrl(provider, 'structured-output-stream', testId, aimockPort),
+      )
+
+      await sendMessage(
+        page,
+        '[structured-stream-reasoning] recommend a guitar as json',
+      )
+      await waitForResponse(page)
+
+      const assistantMessage = page.getByTestId('assistant-message').last()
+      await expect(assistantMessage.getByTestId('thinking-block')).toHaveCount(
+        1,
+      )
+      await expect(
+        assistantMessage.getByTestId('structured-output-part'),
+      ).toHaveCount(1)
+      await expect(assistantMessage.getByTestId('text-part')).toHaveCount(0)
+    })
+
     test('aborting mid-stream stops the run cleanly', async ({
       page,
       testId,
@@ -103,5 +149,68 @@ for (const provider of providersFor('structured-output-stream')) {
         0,
       )
     })
+
+    test('invalid JSON does not emit structured-output.complete', async ({
+      page,
+      testId,
+      aimockPort,
+    }) => {
+      test.skip(
+        provider !== 'gemini',
+        'Pins the Gemini native parse-error path added with structuredOutputStream',
+      )
+      await page.goto(
+        featureUrl(provider, 'structured-output-stream', testId, aimockPort),
+      )
+
+      await sendMessage(
+        page,
+        '[structured-stream-invalid] recommend a guitar as json',
+      )
+
+      await expect(page.getByTestId('loading-indicator')).not.toBeVisible({
+        timeout: 15_000,
+      })
+      await expect(page.getByTestId('structured-output-complete')).toHaveCount(
+        0,
+      )
+    })
   })
+}
+
+for (const malformed of [false, true]) {
+  for (const reasoning of ['positive', 'zero', 'missing']) {
+    test(`OpenRouter structured usage: malformed=${malformed}, reasoning=${reasoning}`, async ({
+      request,
+    }) => {
+      const response = await request.post(
+        `/api/openrouter-structured-usage?malformed=${malformed}&reasoning=${reasoning}`,
+      )
+      expect(response.ok()).toBe(true)
+      const { result, events, usageReports, requests } = await response.json()
+      expect(requests).toBe(1)
+      const terminal = events.at(-1)
+      expect(terminal.type).toBe(malformed ? 'RUN_ERROR' : 'RUN_FINISHED')
+      expect(
+        events.filter((event: { usage?: unknown }) => event.usage),
+      ).toHaveLength(1)
+      expect(terminal.usage).toMatchObject({
+        promptTokens: 10,
+        completionTokens: 50,
+        totalTokens: 60,
+        cost: 0.002,
+      })
+      expect(terminal.usage.completionTokensDetails?.reasoningTokens).toBe(
+        reasoning === 'missing' ? undefined : reasoning === 'zero' ? 0 : 42,
+      )
+      expect(usageReports).toHaveLength(malformed ? 0 : 1)
+      if (malformed) {
+        expect(terminal.code).toBe('parse-error')
+        expect(result.error).toContain('Failed to parse structured output')
+      } else {
+        expect(result.value).toEqual({ answer: 'ok' })
+        expect(usageReports[0]).toEqual(terminal.usage)
+      }
+    })
+  }
 }

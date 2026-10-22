@@ -1,15 +1,33 @@
-import { EventType } from '@tanstack/ai'
+import {
+  CONTEXT_OVERFLOW_CODE,
+  EventType,
+  fileReferenceFor,
+  isFileSource,
+} from '@tanstack/ai'
 import { BaseTextAdapter } from '@tanstack/ai/adapters'
 import { parse as parsePartialJSON } from 'partial-json'
 import {
   createGeminiClient,
   generateId,
   getGeminiApiKeyFromEnv,
+  isGeminiContextOverflow,
 } from '../../utils/client'
+import {
+  getGeminiProviderToolKind,
+  getGeminiProviderToolMetadata,
+} from '../../tools/gemini-provider-tool'
+import { assertUniqueToolNames } from '@tanstack/ai/adapter-internals'
+import { interactionsThinking } from '../../text/reasoning'
+import { GEMINI_MODEL_REASONING } from '../../model-meta'
+import {
+  prepareGeminiMessagesForReplay,
+  withGeminiSource,
+} from '../../adapters/text'
 import type { InternalLogger } from '@tanstack/ai/adapter-internals'
 import type {
   GeminiChatModelToolCapabilitiesByName,
   GeminiModelInputModalitiesByName,
+  GeminiModelReasoningByName,
   GeminiModels,
 } from '../../model-meta'
 import type {
@@ -21,7 +39,7 @@ import type {
   ContentPart,
   Modality,
   ModelMessage,
-  StreamChunk,
+  AdapterYieldChunk,
   TextOptions,
   Tool,
 } from '@tanstack/ai'
@@ -99,15 +117,24 @@ type ToolCallState = {
 // ===========================
 
 /**
- * Resolve provider options for a specific model. The Interactions API's
- * request shape is the same across all chat-capable Gemini models — the
- * SDK doesn't expose a per-model param union — so this currently falls
- * through to the flat `GeminiTextInteractionsProviderOptions` for every
- * model. The alias exists for parity with `GeminiTextAdapter`, so a
- * per-model map can be slotted in later without changing the adapter
- * signature.
+ * Resolve provider options for a specific model. Thinking is not here:
+ * `chat({ reasoning })` sets `thinking_level` and `thinking_summaries`.
  */
-type ResolveProviderOptions = GeminiTextInteractionsProviderOptions
+type ResolveProviderOptions = Omit<
+  GeminiTextInteractionsProviderOptions,
+  'generation_config'
+> & {
+  generation_config?: Omit<
+    NonNullable<GeminiTextInteractionsProviderOptions['generation_config']>,
+    'thinking_level' | 'thinking_summaries'
+  >
+}
+
+/** The reasoning levels of a model, for `chat({ reasoning })`. `never`: none. */
+type ResolveReasoning<TModel extends string> =
+  TModel extends keyof GeminiModelReasoningByName
+    ? GeminiModelReasoningByName[TModel]
+    : never
 
 /**
  * Resolve input modalities for a specific model. Reuses the chat-model
@@ -122,9 +149,9 @@ type ResolveInputModalities<TModel extends string> =
 
 /**
  * Resolve tool capabilities for a specific model. Reuses the chat-model
- * capability map: `google_maps` / `google_search_retrieval` /
- * `mcp_server` are rejected at runtime by `convertToolsToInteractionsFormat`,
- * but per-model gating happens here at compile time.
+ * capability map: `google_maps` / `google_search_retrieval` are rejected at
+ * runtime by `convertToolsToInteractionsFormat`, but per-model gating happens
+ * here at compile time.
  */
 type ResolveToolCapabilities<TModel extends string> =
   TModel extends keyof GeminiChatModelToolCapabilitiesByName
@@ -153,8 +180,11 @@ type ResolveToolCapabilities<TModel extends string> =
  * corresponding per-tool variants) carrying the raw Interactions delta;
  * see {@link GeminiInteractionsCustomEvent}. `computer_use` is accepted
  * in the request but the Interactions API does not currently stream
- * per-delta CUSTOM events for it. `google_search_retrieval`,
- * `google_maps`, and `mcp_server` are not supported on this adapter.
+ * per-delta CUSTOM events for it. The `google_search_retrieval` and
+ * `google_maps` provider-tool factories are not supported on this adapter and
+ * throw a targeted error. There is no Gemini `mcp_server` factory, so a tool
+ * merely *named* `mcp_server` is an ordinary function and is sent as a function
+ * declaration like any other.
  *
  * @experimental Interactions API is in Beta per Google; shapes may change.
  * @see https://ai.google.dev/gemini-api/docs/interactions
@@ -171,10 +201,17 @@ export class GeminiTextInteractionsAdapter<
   TProviderOptions,
   TInputModalities,
   GeminiMessageMetadataByModality,
-  TToolCapabilities
+  TToolCapabilities,
+  unknown,
+  never,
+  ResolveReasoning<TModel>
 > {
   override readonly kind = 'text' as const
   override readonly name = 'gemini-text-interactions' as const
+  override readonly api = 'google-interactions'
+  override readonly provider: string
+  // Consumes Gemini Files API references (geminiFiles()) as content `uri`s.
+  override readonly supportsFileSources = true
 
   private readonly client: GoogleGenAI
   // Tracks the most recent server-assigned interaction id per threadId
@@ -195,14 +232,34 @@ export class GeminiTextInteractionsAdapter<
 
   constructor(config: GeminiTextInteractionsConfig, model: TModel) {
     super({}, model)
+    this.provider =
+      config.vertexai === true || config.enterprise === true
+        ? 'google-vertex'
+        : 'google'
     this.client = createGeminiClient(config)
   }
 
   async *chatStream(
     options: TextOptions<GeminiTextInteractionsProviderOptions>,
-  ): AsyncIterable<StreamChunk> {
+  ): AsyncIterable<AdapterYieldChunk> {
+    const source = {
+      provider: this.provider,
+      api: this.api,
+      model: options.model,
+    }
+    const prepared = {
+      ...options,
+      messages: prepareGeminiMessagesForReplay(options.messages, source),
+    }
+    for await (const chunk of this.chatStreamRequest(prepared))
+      yield withGeminiSource(chunk, source)
+  }
+
+  private async *chatStreamRequest(
+    options: TextOptions<GeminiTextInteractionsProviderOptions>,
+  ): AsyncIterable<AdapterYieldChunk> {
     const runId = options.runId ?? generateId(this.name)
-    const threadId = options.threadId ?? generateId(this.name)
+    const threadId = options.threadId
     const timestamp = Date.now()
     const { logger } = options
 
@@ -254,7 +311,7 @@ export class GeminiTextInteractionsAdapter<
       const stream = (await this.client.interactions.create(
         { ...request, stream: true } as GeminiInteractionsRequestBody &
           Parameters<typeof this.client.interactions.create>[0],
-        { signal: options.abortController?.signal },
+        { signal: abortSignalFromOptions(options) },
       )) as AsyncIterable<InteractionSSEEvent>
 
       for await (const chunk of translateInteractionEvents(
@@ -331,13 +388,17 @@ export class GeminiTextInteractionsAdapter<
         error,
         source: 'gemini-text-interactions.chatStream',
       })
+      const code = isGeminiContextOverflow(error)
+        ? CONTEXT_OVERFLOW_CODE
+        : undefined
       yield {
         type: EventType.RUN_ERROR,
         runId,
         model: options.model,
         timestamp,
         message,
-        error: { message },
+        ...(code && { code }),
+        error: { message, ...(code && { code }) },
       }
     } finally {
       // Abandonment cleanup — consumer `.return()` (upstream `break` /
@@ -368,10 +429,15 @@ export class GeminiTextInteractionsAdapter<
     // conversation history on a fresh interaction".
     const effectivePreviousInteractionId =
       chatOptions.modelOptions?.previous_interaction_id ??
-      (threadId ? this.interactionIdByThread.get(threadId) : undefined)
+      this.interactionIdByThread.get(threadId)
 
     const baseRequest = buildInteractionsRequest({
       ...chatOptions,
+      messages: prepareGeminiMessagesForReplay(chatOptions.messages, {
+        provider: this.provider,
+        api: this.api,
+        model: chatOptions.model,
+      }),
       modelOptions: {
         ...chatOptions.modelOptions,
         previous_interaction_id: effectivePreviousInteractionId,
@@ -402,7 +468,7 @@ export class GeminiTextInteractionsAdapter<
       )
       const result = (await this.client.interactions.create(
         request as Parameters<typeof this.client.interactions.create>[0],
-        { signal: chatOptions.abortController?.signal },
+        { signal: abortSignalFromOptions(chatOptions) },
       )) as Interaction
 
       const rawText = extractTextFromInteraction(result)
@@ -417,12 +483,15 @@ export class GeminiTextInteractionsAdapter<
       try {
         parsed = JSON.parse(rawText)
       } catch {
-        throw new Error(
-          `Failed to parse structured output as JSON. Content: ${rawText.slice(0, 200)}${rawText.length > 200 ? '...' : ''}`,
-        )
+        throw new Error(jsonContentParseError(rawText, 'structured output'))
       }
 
-      return { data: parsed, rawText }
+      return {
+        data: parsed,
+        rawText,
+        ...(result.id && { responseId: result.id }),
+        ...(result.model && { model: result.model }),
+      }
     } catch (error) {
       logger.errors('gemini-text-interactions.structuredOutput fatal', {
         error,
@@ -437,6 +506,187 @@ export class GeminiTextInteractionsAdapter<
         { cause: error },
       )
     }
+  }
+
+  async *structuredOutputStream(
+    options: StructuredOutputOptions<GeminiTextInteractionsProviderOptions>,
+  ): AsyncIterable<AdapterYieldChunk> {
+    const source = {
+      provider: this.provider,
+      api: this.api,
+      model: options.chatOptions.model,
+    }
+    for await (const chunk of this.structuredOutputRequestStream({
+      ...options,
+      chatOptions: {
+        ...options.chatOptions,
+        messages: prepareGeminiMessagesForReplay(
+          options.chatOptions.messages,
+          source,
+        ),
+      },
+    }))
+      yield withGeminiSource(chunk, source)
+  }
+
+  private async *structuredOutputRequestStream(
+    options: StructuredOutputOptions<GeminiTextInteractionsProviderOptions>,
+  ): AsyncIterable<AdapterYieldChunk> {
+    const { chatOptions, outputSchema } = options
+    const runId = chatOptions.runId ?? generateId(this.name)
+    const threadId = chatOptions.threadId
+    const timestamp = Date.now()
+    const effectivePreviousInteractionId =
+      chatOptions.modelOptions?.previous_interaction_id ??
+      this.interactionIdByThread.get(threadId)
+    const baseRequest = buildInteractionsRequest({
+      ...chatOptions,
+      modelOptions: {
+        ...chatOptions.modelOptions,
+        previous_interaction_id: effectivePreviousInteractionId,
+      },
+    })
+    const request: GeminiInteractionsRequestBody = {
+      ...baseRequest,
+      stream: true,
+      response_format: {
+        type: 'text',
+        mime_type: 'application/json',
+        schema: outputSchema,
+      },
+    }
+
+    try {
+      chatOptions.logger.request(
+        `activity=structuredOutputStream provider=gemini-text-interactions model=${this.model} messages=${chatOptions.messages.length}`,
+        { provider: this.name, model: this.model, request },
+      )
+      const stream = (await this.client.interactions.create(
+        request as GeminiInteractionsRequestBody &
+          Parameters<typeof this.client.interactions.create>[0],
+        { signal: abortSignalFromOptions(chatOptions) },
+      )) as AsyncIterable<InteractionSSEEvent>
+
+      let rawText = ''
+      let finished:
+        | Extract<AdapterYieldChunk, { type: typeof EventType.RUN_FINISHED }>
+        | undefined
+      let failed = false
+      for await (const chunk of translateInteractionEvents(
+        stream,
+        chatOptions.model,
+        runId,
+        threadId,
+        chatOptions.parentRunId,
+        timestamp,
+        this.name,
+        chatOptions.logger,
+      )) {
+        if (chunk.type === EventType.TEXT_MESSAGE_CONTENT)
+          rawText += chunk.delta
+        if (
+          chunk.type === EventType.CUSTOM &&
+          chunk.name === 'gemini.interactionId'
+        ) {
+          const value =
+            chunk.value as GeminiInteractionsCustomEventValue<'gemini.interactionId'>
+          this.interactionIdByThread.set(threadId, value.interactionId)
+        }
+        if (chunk.type === EventType.RUN_ERROR) failed = true
+        if (chunk.type === EventType.RUN_FINISHED) finished = chunk
+        else yield chunk
+      }
+
+      if (failed) return
+      if (!finished) {
+        yield interactionsStructuredStreamError(
+          chatOptions,
+          runId,
+          'Gemini Interactions structured-output stream ended without a terminal event',
+          'truncated-stream',
+        )
+        return
+      }
+      if (!rawText) {
+        yield interactionsStructuredStreamError(
+          chatOptions,
+          runId,
+          'Gemini Interactions structured-output stream contained no content',
+          'empty-response',
+        )
+        return
+      }
+      let object: unknown
+      try {
+        object = JSON.parse(rawText)
+      } catch {
+        yield interactionsStructuredStreamError(
+          chatOptions,
+          runId,
+          jsonContentParseError(
+            rawText,
+            'Gemini Interactions structured-output stream',
+          ),
+          'parse-error',
+        )
+        return
+      }
+      yield {
+        type: EventType.CUSTOM,
+        name: 'structured-output.complete',
+        value: { object, raw: rawText },
+        model: chatOptions.model,
+        timestamp: Date.now(),
+      }
+      yield { ...finished, timestamp: Date.now() }
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'An unknown error occurred during structured output streaming.'
+      chatOptions.logger.errors(
+        'gemini-text-interactions.structuredOutputStream fatal',
+        { error, source: 'gemini-text-interactions.structuredOutputStream' },
+      )
+      yield interactionsStructuredStreamError(
+        chatOptions,
+        runId,
+        message,
+        'provider-error',
+      )
+    }
+  }
+}
+
+function abortSignalFromOptions(
+  options: Pick<
+    TextOptions<GeminiTextInteractionsProviderOptions>,
+    'request' | 'abortController'
+  >,
+) {
+  return options.request?.signal ?? options.abortController?.signal
+}
+
+function jsonContentParseError(rawText: string, label: string) {
+  const snippet = rawText.slice(0, 200)
+  const ellipsis = rawText.length > 200 ? '...' : ''
+  return `Failed to parse ${label} as JSON. Content: ${snippet}${ellipsis}`
+}
+
+function interactionsStructuredStreamError(
+  options: TextOptions<GeminiTextInteractionsProviderOptions>,
+  runId: string,
+  message: string,
+  code: string,
+): Extract<AdapterYieldChunk, { type: typeof EventType.RUN_ERROR }> {
+  return {
+    type: EventType.RUN_ERROR,
+    runId,
+    model: options.model,
+    timestamp: Date.now(),
+    message,
+    code,
+    error: { message, code },
   }
 }
 
@@ -478,6 +728,10 @@ function buildInteractionsRequest(
 
   const generationConfig: Interactions.GenerationConfig = {
     ...modelOpts?.generation_config,
+    ...interactionsThinking(
+      options.reasoning,
+      GEMINI_MODEL_REASONING[options.model],
+    ),
   }
 
   const hasGenerationConfig = Object.keys(generationConfig).length > 0
@@ -666,6 +920,22 @@ function parsePartialToolArguments(
   }
 }
 
+// The raw `args` and parsed `input` of a TOOL_CALL_END. The streamed argument
+// text wins over the initial `step.arguments` snapshot. Malformed JSON sends
+// no `input`, so core reports the error from the raw `args`.
+function toolCallEndArguments(
+  streamed: string | undefined,
+  state: ToolCallState,
+): { args: string; input?: unknown } {
+  const args = streamed?.trim() ? streamed : JSON.stringify(state.args)
+  try {
+    const parsed: unknown = JSON.parse(args)
+    return { args, input: parsed && typeof parsed === 'object' ? parsed : {} }
+  } catch {
+    return { args }
+  }
+}
+
 // `satisfies` pins these arrays to the SDK's narrow mime-type unions: if
 // Google removes a format the build breaks, and if they add one ours keeps
 // working (we just won't accept the new one until added here).
@@ -728,6 +998,13 @@ function contentPartToBlock(part: ContentPart): ContentBlock {
   if (part.type === 'text') {
     return { type: 'text', text: part.content }
   }
+  // A Gemini Files API handle maps to the `uri` field (isData stays false),
+  // same as a public URL. `fileReferenceFor` checks the issuer against
+  // 'gemini', the name geminiFiles() stamps on its handles, not this
+  // adapter's own name.
+  const sourceValue = isFileSource(part.source)
+    ? fileReferenceFor(part.source, 'gemini')
+    : part.source.value
   const isData = part.source.type === 'data'
   switch (part.type) {
     case 'image': {
@@ -737,8 +1014,8 @@ function contentPartToBlock(part: ContentPart): ContentBlock {
         'image',
       )
       return isData
-        ? { type: 'image', data: part.source.value, mime_type }
-        : { type: 'image', uri: part.source.value, mime_type }
+        ? { type: 'image', data: sourceValue, mime_type }
+        : { type: 'image', uri: sourceValue, mime_type }
     }
     case 'audio': {
       const mime_type = validateMime(
@@ -747,8 +1024,8 @@ function contentPartToBlock(part: ContentPart): ContentBlock {
         'audio',
       )
       return isData
-        ? { type: 'audio', data: part.source.value, mime_type }
-        : { type: 'audio', uri: part.source.value, mime_type }
+        ? { type: 'audio', data: sourceValue, mime_type }
+        : { type: 'audio', uri: sourceValue, mime_type }
     }
     case 'video': {
       const mime_type = validateMime(
@@ -757,8 +1034,8 @@ function contentPartToBlock(part: ContentPart): ContentBlock {
         'video',
       )
       return isData
-        ? { type: 'video', data: part.source.value, mime_type }
-        : { type: 'video', uri: part.source.value, mime_type }
+        ? { type: 'video', data: sourceValue, mime_type }
+        : { type: 'video', uri: sourceValue, mime_type }
     }
     case 'document': {
       const mime_type = validateMime(
@@ -767,8 +1044,8 @@ function contentPartToBlock(part: ContentPart): ContentBlock {
         'document',
       )
       return isData
-        ? { type: 'document', data: part.source.value, mime_type }
-        : { type: 'document', uri: part.source.value, mime_type }
+        ? { type: 'document', data: sourceValue, mime_type }
+        : { type: 'document', uri: sourceValue, mime_type }
     }
   }
 }
@@ -781,20 +1058,29 @@ function convertToolsToInteractionsFormat<TTool extends Tool>(
   tools: Array<TTool> | undefined,
 ): Array<InteractionsTool> | undefined {
   if (!tools || tools.length === 0) return undefined
+  assertUniqueToolNames(tools)
 
   const result: Array<InteractionsTool> = []
 
   for (const tool of tools) {
-    switch (tool.name) {
+    switch (getGeminiProviderToolKind(tool)) {
       case 'google_search': {
-        const metadata = (tool.metadata ?? {}) as {
-          search_types?: Array<'web_search' | 'image_search'>
+        const metadata = (getGeminiProviderToolMetadata(tool) ?? {}) as {
+          searchTypes?: {
+            webSearch?: unknown
+            imageSearch?: unknown
+          }
+        }
+        const searchTypes: Array<'web_search' | 'image_search'> = []
+        if (metadata.searchTypes?.webSearch !== undefined) {
+          searchTypes.push('web_search')
+        }
+        if (metadata.searchTypes?.imageSearch !== undefined) {
+          searchTypes.push('image_search')
         }
         result.push({
           type: 'google_search',
-          ...(metadata.search_types
-            ? { search_types: metadata.search_types }
-            : {}),
+          ...(searchTypes.length > 0 ? { search_types: searchTypes } : {}),
         })
         break
       }
@@ -807,7 +1093,7 @@ function convertToolsToInteractionsFormat<TTool extends Tool>(
         break
       }
       case 'file_search': {
-        const metadata = (tool.metadata ?? {}) as {
+        const metadata = (getGeminiProviderToolMetadata(tool) ?? {}) as {
           fileSearchStoreNames?: Array<string>
           topK?: number
           metadataFilter?: string
@@ -825,7 +1111,7 @@ function convertToolsToInteractionsFormat<TTool extends Tool>(
         break
       }
       case 'computer_use': {
-        const metadata = (tool.metadata ?? {}) as {
+        const metadata = (getGeminiProviderToolMetadata(tool) ?? {}) as {
           environment?: string
           excludedPredefinedFunctions?: Array<string>
         }
@@ -856,11 +1142,7 @@ function convertToolsToInteractionsFormat<TTool extends Tool>(
         throw new Error(
           '`google_maps` is not yet supported on the Gemini Interactions API. Use `geminiText()` for Google Maps grounding.',
         )
-      case 'mcp_server':
-        throw new Error(
-          '`mcp_server` is not yet supported on the `geminiTextInteractions()` adapter.',
-        )
-      default: {
+      case undefined: {
         if (!tool.description) {
           throw new Error(
             `Tool ${tool.name} requires a description for the Gemini Interactions adapter`,
@@ -918,17 +1200,16 @@ async function* translateInteractionEvents(
   timestamp: number,
   adapterName: string,
   logger: InternalLogger,
-): AsyncIterable<StreamChunk> {
+): AsyncIterable<AdapterYieldChunk> {
   const messageId = generateId(adapterName)
   let hasEmittedRunStarted = false
   let hasEmittedTextMessageStart = false
   let textAccumulated = ''
   let interactionId: string | undefined
+  let reportedModel: string | undefined
   let sawFunctionCall = false
   const toolCalls = new Map<string, ToolCallState>()
   let nextToolIndex = 0
-  let thinkingStepId: string | null = null
-  let thinkingAccumulated = ''
   let reasoningMessageId: string | null = null
   let hasClosedReasoning = false
   // SDK 2.x routes events by step `index`, not by content id. We need to
@@ -943,7 +1224,7 @@ async function* translateInteractionEvents(
   // fragment isn't yet syntactically complete.
   const argStringByToolCallId = new Map<string, string>()
 
-  const closeReasoningIfNeeded = function* (): Generator<StreamChunk> {
+  const closeReasoningIfNeeded = function* (): Generator<AdapterYieldChunk> {
     if (reasoningMessageId && !hasClosedReasoning) {
       hasClosedReasoning = true
       yield {
@@ -962,9 +1243,39 @@ async function* translateInteractionEvents(
       // interleaves text → thought → text on some models) opens a
       // fresh reasoning block instead of re-using an already-ended
       // messageId, which would violate AG-UI ordering.
-      thinkingStepId = null
       reasoningMessageId = null
       hasClosedReasoning = false
+    }
+  }
+
+  // Ends a tool call. With no streamed argument text, the initial
+  // `step.arguments` snapshot goes out as the only TOOL_CALL_ARGS delta, so
+  // the deltas always add up to the final arguments.
+  const endToolCall = function* (
+    toolCallId: string,
+    state: ToolCallState,
+  ): Generator<AdapterYieldChunk> {
+    const end = toolCallEndArguments(
+      argStringByToolCallId.get(toolCallId),
+      state,
+    )
+    if (!argStringByToolCallId.get(toolCallId)?.trim() && end.args !== '{}') {
+      yield {
+        type: EventType.TOOL_CALL_ARGS,
+        toolCallId,
+        model,
+        timestamp,
+        delta: end.args,
+        args: end.args,
+      }
+    }
+    yield {
+      type: EventType.TOOL_CALL_END,
+      toolCallId,
+      toolCallName: state.name,
+      model,
+      timestamp,
+      ...end,
     }
   }
 
@@ -973,19 +1284,12 @@ async function* translateInteractionEvents(
   // (`error` SSE event + premature EOF) so the StreamProcessor never
   // sees orphan TEXT_MESSAGE_START / TOOL_CALL_START / REASONING_*
   // events on RUN_ERROR.
-  const closeOpenState = function* (): Generator<StreamChunk> {
+  const closeOpenState = function* (): Generator<AdapterYieldChunk> {
     yield* closeReasoningIfNeeded()
     for (const [toolCallId, state] of toolCalls) {
       if (state.ended) continue
       state.ended = true
-      yield {
-        type: EventType.TOOL_CALL_END,
-        toolCallId,
-        toolName: state.name,
-        model,
-        timestamp,
-        input: state.args,
-      }
+      yield* endToolCall(toolCallId, state)
     }
     if (hasEmittedTextMessageStart) {
       hasEmittedTextMessageStart = false
@@ -998,11 +1302,17 @@ async function* translateInteractionEvents(
     }
   }
 
-  const emitRunStartedIfNeeded = function* (): Generator<StreamChunk> {
+  const emitRunStartedIfNeeded = function* (): Generator<AdapterYieldChunk> {
     if (!hasEmittedRunStarted) {
       hasEmittedRunStarted = true
       yield {
         type: EventType.RUN_STARTED,
+        metadata: {
+          tanstack: {
+            ...(interactionId && { responseId: interactionId }),
+            ...(reportedModel && { model: reportedModel }),
+          },
+        },
         runId,
         threadId,
         model,
@@ -1017,6 +1327,7 @@ async function* translateInteractionEvents(
     switch (event.event_type) {
       case 'interaction.created': {
         interactionId = event.interaction.id
+        if (event.interaction.model) reportedModel = event.interaction.model
         yield* emitRunStartedIfNeeded()
         break
       }
@@ -1033,8 +1344,9 @@ async function* translateInteractionEvents(
             indexToToolCallId.set(index, toolCallId)
             // `step.arguments` is required on FunctionCallStep but may
             // be an empty `{}` placeholder when streaming, where the
-            // real args arrive as `arguments_delta` events. Treat both
-            // uniformly: stash whatever we got, stringify once.
+            // real args arrive as `arguments_delta` events. Keep this
+            // initial snapshot apart from the streamed text: it is sent
+            // only when no argument delta arrives (see `endToolCall`).
             const initialArgs = step.arguments
             const state: ToolCallState = {
               name: step.name,
@@ -1044,17 +1356,10 @@ async function* translateInteractionEvents(
               ended: false,
             }
             toolCalls.set(toolCallId, state)
-            argStringByToolCallId.set(
-              toolCallId,
-              Object.keys(initialArgs).length > 0
-                ? JSON.stringify(initialArgs)
-                : '',
-            )
             yield {
               type: EventType.TOOL_CALL_START,
               toolCallId,
               toolCallName: state.name,
-              toolName: state.name,
               // Bind the tool call to the same assistant message id the
               // eventual TEXT_MESSAGE_START uses so the message id stays
               // stable when a function_call arrives before any text (#477).
@@ -1063,17 +1368,6 @@ async function* translateInteractionEvents(
               timestamp,
               index: state.index,
             }
-            if (Object.keys(initialArgs).length > 0) {
-              const argsJson = JSON.stringify(initialArgs)
-              yield {
-                type: EventType.TOOL_CALL_ARGS,
-                toolCallId,
-                model,
-                timestamp,
-                delta: argsJson,
-                args: argsJson,
-              }
-            }
             break
           }
           case 'thought': {
@@ -1081,8 +1375,7 @@ async function* translateInteractionEvents(
             // `step.delta { thought_summary }` events. If the server
             // ships a non-empty `summary` array up-front (rare, unary
             // responses), surface it immediately.
-            if (thinkingStepId === null || reasoningMessageId === null) {
-              thinkingStepId = generateId(adapterName)
+            if (reasoningMessageId === null) {
               reasoningMessageId = generateId(adapterName)
               yield {
                 type: EventType.REASONING_START,
@@ -1097,33 +1390,15 @@ async function* translateInteractionEvents(
                 model,
                 timestamp,
               }
-              yield {
-                type: EventType.STEP_STARTED,
-                stepName: thinkingStepId,
-                stepId: thinkingStepId,
-                model,
-                timestamp,
-                stepType: 'thinking',
-              }
             }
             for (const part of step.summary ?? []) {
               if (part.type !== 'text' || !part.text) continue
-              thinkingAccumulated += part.text
               yield {
                 type: EventType.REASONING_MESSAGE_CONTENT,
                 messageId: reasoningMessageId,
                 delta: part.text,
                 model,
                 timestamp,
-              }
-              yield {
-                type: EventType.STEP_FINISHED,
-                stepName: thinkingStepId,
-                stepId: thinkingStepId,
-                model,
-                timestamp,
-                delta: part.text,
-                content: thinkingAccumulated,
               }
             }
             break
@@ -1305,8 +1580,9 @@ async function* translateInteractionEvents(
               break
             }
             const state = toolCalls.get(toolCallId)
-            if (!state) break
-            const fragment = delta.arguments ?? ''
+            // A delta with no arguments keeps the initial snapshot.
+            if (!state || typeof delta.arguments !== 'string') break
+            const fragment = delta.arguments
             const buffer =
               (argStringByToolCallId.get(toolCallId) ?? '') + fragment
             argStringByToolCallId.set(toolCallId, buffer)
@@ -1332,8 +1608,7 @@ async function* translateInteractionEvents(
             const thoughtText =
               delta.content && 'text' in delta.content ? delta.content.text : ''
             if (!thoughtText) break
-            if (thinkingStepId === null || reasoningMessageId === null) {
-              thinkingStepId = generateId(adapterName)
+            if (reasoningMessageId === null) {
               reasoningMessageId = generateId(adapterName)
               yield {
                 type: EventType.REASONING_START,
@@ -1348,31 +1623,13 @@ async function* translateInteractionEvents(
                 model,
                 timestamp,
               }
-              yield {
-                type: EventType.STEP_STARTED,
-                stepName: thinkingStepId,
-                stepId: thinkingStepId,
-                model,
-                timestamp,
-                stepType: 'thinking',
-              }
             }
-            thinkingAccumulated += thoughtText
             yield {
               type: EventType.REASONING_MESSAGE_CONTENT,
               messageId: reasoningMessageId,
               delta: thoughtText,
               model,
               timestamp,
-            }
-            yield {
-              type: EventType.STEP_FINISHED,
-              stepName: thinkingStepId,
-              stepId: thinkingStepId,
-              model,
-              timestamp,
-              delta: thoughtText,
-              content: thinkingAccumulated,
             }
             break
           }
@@ -1419,14 +1676,7 @@ async function* translateInteractionEvents(
           const state = toolCalls.get(toolCallId)
           if (state && !state.ended) {
             state.ended = true
-            yield {
-              type: EventType.TOOL_CALL_END,
-              toolCallId,
-              toolName: state.name,
-              model,
-              timestamp,
-              input: state.args,
-            }
+            yield* endToolCall(toolCallId, state)
           }
           indexToToolCallId.delete(event.index)
         }
@@ -1438,6 +1688,7 @@ async function* translateInteractionEvents(
       }
 
       case 'interaction.completed': {
+        if (event.interaction.model) reportedModel = event.interaction.model
         if (event.interaction.id) {
           interactionId = event.interaction.id
         }
@@ -1482,6 +1733,12 @@ async function* translateInteractionEvents(
 
         yield {
           type: EventType.RUN_FINISHED,
+          metadata: {
+            tanstack: {
+              ...(interactionId && { responseId: interactionId }),
+              ...(reportedModel && { model: reportedModel }),
+            },
+          },
           runId,
           threadId,
           model,
@@ -1572,14 +1829,16 @@ function extractTextFromInteraction(interaction: Interaction): string {
 function sanitizeToolParameters(schema: unknown): unknown {
   if (!schema || typeof schema !== 'object') return schema
   if (Array.isArray(schema)) return schema.map(sanitizeToolParameters)
-  const out: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(schema)) {
-    if (key === 'required' && Array.isArray(value) && value.length === 0) {
-      continue
-    }
-    out[key] = sanitizeToolParameters(value)
-  }
-  return out
+  // `Object.fromEntries` keeps an own key named `__proto__`. An assignment
+  // `out['__proto__'] = x` would set the prototype instead.
+  return Object.fromEntries(
+    Object.entries(schema)
+      .filter(
+        ([key, value]) =>
+          key !== 'required' || !Array.isArray(value) || value.length > 0,
+      )
+      .map(([key, value]) => [key, sanitizeToolParameters(value)]),
+  )
 }
 
 // Re-export the stream type so consumers can import it alongside the

@@ -1,51 +1,25 @@
 import type { GeminiImageModels } from '../model-meta'
 import type {
-  ImagePromptLanguage,
-  PersonGeneration,
-  SafetyFilterLevel,
+  ContentUnion,
+  ImageConfig,
+  SafetySetting,
+  ThinkingConfig,
 } from '@google/genai'
 
 // Re-export SDK types so users can use them directly
-export type { ImagePromptLanguage, PersonGeneration, SafetyFilterLevel }
+export type { ContentUnion, ImageConfig, SafetySetting, ThinkingConfig }
 
 /**
- * Gemini Imagen aspect ratio options
- * Controls the aspect ratio of generated images
+ * Provider options for Gemini native image models (Nano Banana and friends).
+ *
+ * These models are served by the Interactions API.
+ * Sampling knobs (`temperature`, `topK`, …) and chat-only plumbing
+ * (`tools`, `responseSchema`, …) are deliberately left out.
+ *
+ * Image output is always requested. There is no `responseModalities` field:
+ * a caller override would silently disable image output.
  */
-export type GeminiAspectRatio =
-  | '1:1'
-  | '3:4'
-  | '4:3'
-  | '9:16'
-  | '16:9'
-  | '9:21'
-  | '21:9'
-
-/**
- * Provider options for Gemini image generation
- * These options match the @google/genai GenerateImagesConfig interface
- * and can be spread directly into the API request.
- */
-export interface GeminiImageProviderOptions {
-  /**
-   * The aspect ratio of generated images
-   * @default '1:1'
-   */
-  aspectRatio?: GeminiAspectRatio
-
-  /**
-   * Controls whether people can appear in generated images
-   * Use PersonGeneration enum values: DONT_ALLOW, ALLOW_ADULT, ALLOW_ALL
-   * @default 'ALLOW_ADULT'
-   */
-  personGeneration?: PersonGeneration
-
-  /**
-   * Safety filter level for content filtering
-   * Use SafetyFilterLevel enum values
-   */
-  safetyFilterLevel?: SafetyFilterLevel
-
+export interface GeminiNativeImageProviderOptions {
   /**
    * Optional seed for reproducible image generation
    * When the same seed is used with the same prompt and settings,
@@ -54,244 +28,166 @@ export interface GeminiImageProviderOptions {
   seed?: number
 
   /**
-   * Whether to add a SynthID watermark to generated images
-   * SynthID helps identify AI-generated content
-   * @default true
+   * Per-category safety thresholds applied to the request
+   * Each entry pairs a HarmCategory with a HarmBlockThreshold
    */
-  addWatermark?: boolean
+  safetySettings?: Array<SafetySetting>
 
   /**
-   * Language of the prompt
-   * Use ImagePromptLanguage enum values
+   * Controls the model's internal reasoning before it emits an image.
+   * `thinkingLevel` maps to the Interactions `thinking_level`.
+   * `thinkingBudget` is rejected: the Interactions image API has no budget.
    */
-  language?: ImagePromptLanguage
+  thinkingConfig?: ThinkingConfig
 
   /**
-   * Negative prompt - what to avoid in the generated image
-   * Not all models support negative prompts
+   * Native image output controls. Merged over the values derived from the
+   * portable `size` option, so fields set here win per field while the rest
+   * of `size` is preserved.
+   *
+   * Only `aspectRatio` and `imageSize` are accepted on the Gemini Developer
+   * API. Other SDK `ImageConfig` keys throw on this surface.
    */
-  negativePrompt?: string
+  imageConfig?: GeminiNativeImageConfig
 
   /**
-   * Output MIME type for the generated image
-   * @default 'image/png'
+   * System-level instructions that steer the model for the whole request,
+   * e.g. a house art direction applied on top of the per-call prompt
    */
-  outputMimeType?: 'image/png' | 'image/jpeg' | 'image/webp'
+  systemInstruction?: ContentUnion
 
   /**
-   * Compression quality for JPEG outputs (0-100)
-   * Higher values mean better quality but larger file sizes
-   * @default 75
+   * Continue an edit from a previous native image result. Pass that result's
+   * `id`. The new prompt is the edit; the previous image is not sent again.
+   * Interactions are stored server-side (1 day on the free tier, 55 days on
+   * paid). `store: false` cannot be chained.
    */
-  outputCompressionQuality?: number
+  previous_interaction_id?: string
 
   /**
-   * Controls how much the model adheres to the text prompt
-   * Large values increase output and prompt alignment,
-   * but may compromise image quality
+   * Whether Gemini stores this interaction so a later call can chain it.
+   * Omit to use the API default (`true`).
    */
-  guidanceScale?: number
-
-  /**
-   * Whether to use the prompt rewriting logic
-   */
-  enhancePrompt?: boolean
-
-  /**
-   * Whether to report the safety scores of each generated image
-   * and the positive prompt in the response
-   */
-  includeSafetyAttributes?: boolean
-
-  /**
-   * Whether to include the Responsible AI filter reason
-   * if the image is filtered out of the response
-   */
-  includeRaiReason?: boolean
-
-  /**
-   * Cloud Storage URI used to store the generated images
-   */
-  outputGcsUri?: string
-
-  /**
-   * User specified labels to track billing usage
-   */
-  labels?: Record<string, string>
+  store?: boolean
 }
 
 /**
- * Model-specific provider options mapping
- * Currently all Imagen models use the same options structure
+ * Model-specific provider options mapping. Every Gemini image model goes
+ * through the Interactions API and takes the same option set.
  */
 export type GeminiImageModelProviderOptionsByName = {
-  [K in GeminiImageModels]: GeminiImageProviderOptions
+  [K in GeminiImageModels]: GeminiNativeImageProviderOptions
 }
 
 /**
- * Supported size strings for Gemini Imagen models
- * These map to aspect ratios internally
+ * The ten aspect ratios every Gemini native image model accepts.
+ *
+ * Note `9:21` is deliberately absent: it exists only on Vertex / Cloud and is
+ * rejected by the Gemini API (`generateContent`), which is the surface this
+ * adapter targets.
+ *
+ * @see https://ai.google.dev/gemini-api/docs/image-generation
  */
-export type GeminiImageSize =
-  | '1024x1024'
-  | '512x512'
-  | '1024x768'
-  | '1536x1024'
-  | '1792x1024'
-  | '1920x1080'
-  | '768x1024'
-  | '1024x1536'
-  | '1024x1792'
-  | '1080x1920'
-
-/**
- * Aspect ratios supported by Gemini native image models (via generateContent API).
- * Matches the SDK's ImageConfig.aspectRatio values.
- */
-export type GeminiNativeImageAspectRatio =
+export type GeminiStandardImageAspectRatio =
   | '1:1'
   | '2:3'
   | '3:2'
   | '3:4'
   | '4:3'
+  | '4:5'
+  | '5:4'
   | '9:16'
   | '16:9'
   | '21:9'
 
 /**
- * Resolution tiers for Gemini native image models.
- * Matches the SDK's ImageConfig.imageSize values.
+ * The ten standard ratios plus the four extreme banner/strip ratios that only
+ * the Gemini 3.1 Flash Image models accept — 14 values, matching the
+ * `generateContent` `ImageConfig.aspectRatio` field union.
+ *
+ * @see https://ai.google.dev/api/generate-content
  */
-export type GeminiNativeImageResolution = '1K' | '2K' | '4K'
+export type GeminiExtendedImageAspectRatio =
+  | GeminiStandardImageAspectRatio
+  | '1:4'
+  | '4:1'
+  | '1:8'
+  | '8:1'
 
 /**
- * Template literal size type for Gemini native image models: "16:9_4K", "1:1_2K", etc.
+ * Sizes for `gemini-3.1-flash-image`: all 14 aspect ratios at 512 / 1K / 2K / 4K. `512` is the wire token for the
+ * 0.5K tier — not `512px`, and the `K` is case-sensitive (`1k` is rejected).
+ */
+export type Gemini31FlashImageSize =
+  `${GeminiExtendedImageAspectRatio}_${'512' | '1K' | '2K' | '4K'}`
+
+/**
+ * Sizes for `gemini-3.1-flash-lite-image`: all 14 aspect ratios, 1K only.
+ * 2K and 4K are unsupported on this model.
+ *
+ * The four banner ratios (`1:4`, `4:1`, `1:8`, `8:1`) come from the Cloud
+ * model page. The Gemini API page states a count of 14 but does not list them.
+ *
+ * @see https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-1-flash-lite-image
+ * @see https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite-image
+ */
+export type Gemini31FlashLiteImageSize = `${GeminiExtendedImageAspectRatio}_1K`
+
+/**
+ * Sizes for `gemini-nano-banana-2.1`: all 14 aspect ratios at 1K / 2K / 4K.
+ * The API rejects the 512 tier on this model.
+ *
+ * @see https://ai.google.dev/gemini-api/docs/models/gemini-nano-banana-2.1
+ */
+export type GeminiNanoBanana21ImageSize =
+  `${GeminiExtendedImageAspectRatio}_${'1K' | '2K' | '4K'}`
+
+/**
+ * Sizes for `gemini-3-pro-image`: the ten standard aspect ratios at 1K / 2K /
+ * 4K. Pro has no 512 tier and none of the
+ * extreme banner ratios on the Gemini API.
+ */
+export type Gemini3ProImageSize =
+  `${GeminiStandardImageAspectRatio}_${'1K' | '2K' | '4K'}`
+
+/**
+ * `imageConfig` fields sent as Interactions `response_format`.
+ * Other `@google/genai` `ImageConfig` keys (`personGeneration`,
+ * `outputMimeType`, and more) throw on this surface.
+ */
+export type GeminiNativeImageConfig = {
+  aspectRatio?: GeminiExtendedImageAspectRatio
+  imageSize?: '512' | '1K' | '2K' | '4K'
+}
+
+/**
+ * Any size accepted by any Gemini native image model. Prefer the per-model
+ * narrowing in {@link GeminiImageModelSizeByName} — this union is the widest
+ * possible set and accepts combinations no single model supports.
  */
 export type GeminiNativeImageSize =
-  `${GeminiNativeImageAspectRatio}_${GeminiNativeImageResolution}`
+  | GeminiNanoBanana21ImageSize
+  | Gemini31FlashImageSize
+  | Gemini31FlashLiteImageSize
+  | Gemini3ProImageSize
 
 /**
- * Gemini native image models that use the generateContent API path.
- * These models support template literal sizes (aspectRatio_resolution).
- */
-export type GeminiNativeImageModels =
-  | 'gemini-3.1-flash-image-preview'
-  | 'gemini-3.1-flash-lite-image'
-  | 'gemini-3-pro-image-preview'
-  | 'gemini-2.5-flash-image'
-
-/**
- * Model-specific size options mapping.
- * Gemini native image models use template literal sizes, Imagen models use pixel sizes.
+ * Model-specific size options mapping. Each model gets its own ratio ×
+ * resolution set (they genuinely differ).
  */
 export type GeminiImageModelSizeByName = {
-  [K in GeminiNativeImageModels]: GeminiNativeImageSize
-} & {
-  [K in Exclude<GeminiImageModels, GeminiNativeImageModels>]: GeminiImageSize
+  'gemini-nano-banana-2.1': GeminiNanoBanana21ImageSize
+  'gemini-3.1-flash-image': Gemini31FlashImageSize
+  'gemini-3.1-flash-lite-image': Gemini31FlashLiteImageSize
+  'gemini-3-pro-image': Gemini3ProImageSize
 }
 
 /**
- * Per-model prompt input modalities. Gemini-native image models accept image
- * parts in the multimodal prompt (image-conditioned generation via
- * generateContent); Imagen models are strictly text-to-image, so their
- * `prompt` is constrained to text at compile time.
+ * Per-model prompt input modalities. Every Gemini image model accepts image
+ * parts in the multimodal prompt (image-conditioned generation).
  */
 export type GeminiImageModelInputModalitiesByName = {
-  [K in GeminiNativeImageModels]: readonly ['image']
-} & {
-  [K in Exclude<GeminiImageModels, GeminiNativeImageModels>]: readonly []
-}
-
-/**
- * Valid sizes for Gemini Imagen models
- * Gemini uses aspect ratios, but we map common WIDTHxHEIGHT formats to aspect ratios
- * These are approximate mappings based on common image dimensions
- */
-export const GEMINI_SIZE_TO_ASPECT_RATIO: Record<string, GeminiAspectRatio> = {
-  // Square
-  '1024x1024': '1:1',
-  '512x512': '1:1',
-  // Landscape
-  '1024x768': '4:3',
-  '1536x1024': '4:3',
-  '1792x1024': '16:9',
-  '1920x1080': '16:9',
-  // Portrait
-  '768x1024': '3:4',
-  '1024x1536': '3:4', // Inverted
-  '1024x1792': '9:16',
-  '1080x1920': '9:16',
-}
-
-/**
- * Maps a WIDTHxHEIGHT size string to a Gemini aspect ratio
- * Returns undefined if the size cannot be mapped
- */
-export function sizeToAspectRatio(
-  size: string | undefined,
-): GeminiAspectRatio | undefined {
-  if (!size) return undefined
-  return GEMINI_SIZE_TO_ASPECT_RATIO[size]
-}
-
-/**
- * Validates that the provided size can be mapped to an aspect ratio
- * Throws an error if the size is invalid
- */
-export function validateImageSize(
-  model: string,
-  size: string | undefined,
-): void {
-  if (!size) return
-
-  const aspectRatio = sizeToAspectRatio(size)
-  if (!aspectRatio) {
-    const validSizes = Object.keys(GEMINI_SIZE_TO_ASPECT_RATIO)
-    throw new Error(
-      `Invalid size "${size}" for model "${model}". ` +
-        `Gemini Imagen uses aspect ratios. Valid sizes that map to aspect ratios: ${validSizes.join(', ')}. ` +
-        `Alternatively, use providerOptions.aspectRatio directly with values: 1:1, 3:4, 4:3, 9:16, 16:9, 9:21, 21:9`,
-    )
-  }
-}
-
-/**
- * Per-model caps on images per request.
- * The Imagen 4 family all support up to 4 images per request via the Gemini
- * API (the rumored 8-image tier is Vertex-only and isn't reachable through
- * @google/genai today). Unknown models fall through to the shared cap
- * defined below.
- *
- * @see https://ai.google.dev/gemini-api/docs/imagen
- */
-const IMAGEN_MAX_IMAGES_BY_MODEL: Record<string, number> = {
-  'imagen-4.0-generate-001': 4,
-  'imagen-4.0-ultra-generate-001': 4,
-  'imagen-4.0-fast-generate-001': 4,
-}
-
-const DEFAULT_IMAGEN_MAX_IMAGES = 4
-
-/**
- * Validates the number of images requested against the model's known cap.
- * Uses a per-model table where available and falls back to the shared
- * default otherwise — no more "some support up to 8" comments that don't
- * match the error message.
- */
-export function validateNumberOfImages(
-  model: string,
-  numberOfImages: number | undefined,
-): void {
-  if (numberOfImages === undefined) return
-
-  const maxImages =
-    IMAGEN_MAX_IMAGES_BY_MODEL[model] ?? DEFAULT_IMAGEN_MAX_IMAGES
-  if (numberOfImages < 1 || numberOfImages > maxImages) {
-    throw new Error(
-      `Invalid numberOfImages "${numberOfImages}" for model "${model}". ` +
-        `Must be between 1 and ${maxImages}.`,
-    )
-  }
+  [K in GeminiImageModels]: readonly ['image']
 }
 
 /**
@@ -309,13 +205,21 @@ export function validatePrompt(options: {
 
 /**
  * Parses a Gemini native image size string into its components.
- * Format: "aspectRatio_resolution" e.g. "16:9_4K" → { aspectRatio: "16:9", resolution: "4K" }
+ *
+ * Format: `"aspectRatio_resolution"`, e.g. `"16:9_4K"` →
+ * `{ aspectRatio: "16:9", resolution: "4K" }`.
+ *
+ * The resolution suffix is optional: a bare aspect ratio (`"16:9"` →
+ * `{ aspectRatio: "16:9" }`) leaves `imageSize` out of the request.
  */
 export function parseNativeImageSize(
   size: string,
-): { aspectRatio: string; resolution: string } | undefined {
-  const match = size.match(/^(\d+:\d+)_(.+)$/)
+): { aspectRatio: string; resolution?: string } | undefined {
+  const match = size.match(/^(\d+:\d+)(?:_(.+))?$/)
   const [, aspectRatio, resolution] = match ?? []
-  if (aspectRatio === undefined || resolution === undefined) return undefined
-  return { aspectRatio, resolution }
+  if (aspectRatio === undefined) return undefined
+  return {
+    aspectRatio,
+    ...(resolution !== undefined && { resolution }),
+  }
 }

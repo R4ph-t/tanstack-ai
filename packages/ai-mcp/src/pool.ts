@@ -1,10 +1,17 @@
 import { createMCPClient } from './client'
 import { DuplicateToolNameError, MCPConnectionError } from './errors'
 import type { MCPClient } from './client'
-import type { MCPClientOptions, ServerDescriptor, ToolsOptions } from './types'
+import type {
+  MCPClientOptions,
+  McpServerTool,
+  ServerDescriptor,
+  ToolsOptions,
+} from './types'
+import type {
+  ClientOptions,
+  ReadResourceResult,
+} from '@modelcontextprotocol/client'
 import type { TransportConfig } from './transport'
-import type { ServerTool } from '@tanstack/ai'
-import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js'
 
 export type MCPClientsConfig = Record<string, MCPClientOptions>
 
@@ -20,7 +27,7 @@ export interface MCPClients<
    * All servers' tools, flattened and auto-prefixed by config key.
    * `options` (including `lazy`) is forwarded to every client's `tools()`.
    */
-  tools: (options?: ToolsOptions) => Promise<Array<ServerTool>>
+  tools: (options?: ToolsOptions) => Promise<Array<McpServerTool>>
   /**
    * Reads an MCP resource by URI, routing to the owning client. A `ui://`
    * resource read must hit the server that owns it; since the pool does not
@@ -42,6 +49,11 @@ export interface MCPClients<
     {
       transport: TransportConfig | undefined
       prefix: string | undefined
+      clientOptions?: ClientOptions
+      toolFilter?: MCPClientOptions['toolFilter']
+      needsApproval?: MCPClientOptions['needsApproval']
+      toolName?: MCPClientOptions['toolName']
+      requestOptions?: MCPClientOptions['requestOptions']
     }
   >
   /** Close every client. */
@@ -69,7 +81,7 @@ export async function createMCPClients<
       // default prefix = config key; `prefix: ''` disables; explicit string wins
       const prefix = opts.prefix === undefined ? name : opts.prefix || undefined
       const client = await createMCPClient({ ...opts, prefix })
-      return [name, client] as const
+      return [name, client] as readonly [string, MCPClient<ServerDescriptor>]
     }),
   )
 
@@ -111,7 +123,7 @@ export async function createMCPClients<
 
   const pool: MCPClients<TServers> = {
     clients,
-    async tools(options?: ToolsOptions): Promise<Array<ServerTool>> {
+    async tools(options?: ToolsOptions): Promise<Array<McpServerTool>> {
       // Settle (like the connect path) so a single failing server is reported
       // by config key instead of rejecting with an unattributed SDK error.
       const entries = Object.entries(clients)
@@ -147,6 +159,11 @@ export async function createMCPClients<
       {
         transport: TransportConfig | undefined
         prefix: string | undefined
+        clientOptions?: ClientOptions
+        toolFilter?: MCPClientOptions['toolFilter']
+        needsApproval?: MCPClientOptions['needsApproval']
+        toolName?: MCPClientOptions['toolName']
+        requestOptions?: MCPClientOptions['requestOptions']
       }
     > {
       // Keyed by config key (serverId / default prefix). Read each underlying

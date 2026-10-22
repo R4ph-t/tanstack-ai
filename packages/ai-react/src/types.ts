@@ -1,14 +1,20 @@
 import type {
   AnyClientTool,
+  InterruptDefinition,
   InferSchemaType,
   ModelMessage,
+  RunAgentResumeItem,
   SchemaInput,
 } from '@tanstack/ai/client'
 import type {
   AIDevtoolsDisplayOptions,
+  BoundInterrupts,
   ChatClientOptions,
   ChatClientState,
+  ResolvableChatInterrupt,
+  ChatInterruptState,
   ChatRequestBody,
+  ChatResumeState,
   ClientContextOptionFromTools,
   ConnectionStatus,
   DistributedOmit,
@@ -21,6 +27,8 @@ import type {
   SendMessageOptions,
   UIMessage,
   WhenBusy,
+  SubagentClientAgent,
+  SubagentHandles,
 } from '@tanstack/ai-client'
 
 // Re-export types from ai-client
@@ -71,15 +79,18 @@ export type DeepPartial<T> =
  * inference on the client — server-side validation still runs against the
  * schema you pass to `chat({ outputSchema })` on the server route.
  *
- * Note: Connection and body changes will recreate the ChatClient instance.
+ * Note: Connection changes will recreate the ChatClient instance.
  * To update these options, remount the component or use a key prop.
  */
 export type UseChatOptions<
   TTools extends ReadonlyArray<AnyClientTool> = any,
   TSchema extends SchemaInput | undefined = undefined,
   TContext = InferredClientContext<TTools>,
+  TInterrupts extends ReadonlyArray<InterruptDefinition<any, any, any, any>> =
+    readonly [],
+  TSubagents extends ReadonlyArray<SubagentClientAgent> | undefined = undefined,
 > = DistributedOmit<
-  ChatClientOptions<TTools, TContext>,
+  ChatClientOptions<TTools, TContext, TInterrupts>,
   | 'onMessagesChange'
   | 'onLoadingChange'
   | 'onErrorChange'
@@ -87,9 +98,13 @@ export type UseChatOptions<
   | 'onSubscriptionChange'
   | 'onConnectionStatusChange'
   | 'onSessionGeneratingChange'
+  | 'onHydratingChange'
   | 'onQueueChange'
+  | 'onResumeStateChange'
+  | 'onRunIdChange'
   | 'context'
   | 'devtools'
+  | 'subagents'
 > & {
   /** Display options for TanStack AI Devtools. */
   devtools?: AIDevtoolsDisplayOptions
@@ -105,6 +120,12 @@ export type UseChatOptions<
    * against the schema passed to `chat({ outputSchema })` on the server route.
    */
   outputSchema?: TSchema
+  /**
+   * Agents from `defineAgent`. This types `messages` parts and `subagents`.
+   * The hook does not call `run` and does not send the agents to the server.
+   * Pass the same array you give to `chat({ subagents: { agents } })`.
+   */
+  subagents?: TSubagents
 } & ClientContextOptionFromTools<TTools, TContext>
 
 /**
@@ -115,9 +136,14 @@ export type UseChatOptions<
 export type UseChatReturn<
   TTools extends ReadonlyArray<AnyClientTool> = any,
   TSchema extends SchemaInput | undefined = undefined,
+  TInterrupts extends ReadonlyArray<InterruptDefinition<any, any, any, any>> =
+    readonly [],
+  TSubagents extends ReadonlyArray<SubagentClientAgent> | undefined = undefined,
 > = BaseUseChatReturn<
   TTools,
-  TSchema extends SchemaInput ? InferSchemaType<TSchema> : unknown
+  TSchema extends SchemaInput ? InferSchemaType<TSchema> : unknown,
+  TInterrupts,
+  TSubagents
 > &
   (TSchema extends SchemaInput
     ? {
@@ -140,20 +166,33 @@ export type UseChatReturn<
 interface BaseUseChatReturn<
   TTools extends ReadonlyArray<AnyClientTool> = any,
   TData = unknown,
+  TInterrupts extends ReadonlyArray<InterruptDefinition<any, any, any, any>> =
+    readonly [],
+  TSubagents extends ReadonlyArray<SubagentClientAgent> | undefined = undefined,
 > {
   /**
    * Current messages in the conversation. When `outputSchema` is supplied,
    * `messages[i].parts.find(p => p.type === 'structured-output')` is typed
    * with the schema's inferred shape — `data: T`, `partial: DeepPartial<T>`.
+   * When `subagents` is supplied, a `type: 'subagent'` part narrows on
+   * `subagent.name`, and that child's `messages` use the agent's tools.
    */
-  messages: Array<UIMessage<TTools, TData>>
+  messages: ReadonlyArray<UIMessage<TTools, TData, TSubagents>>
+
+  /**
+   * Live child-agent invocations, nested cards included. Each entry is the
+   * same object as the matching `part.subagent`, including `stop()`.
+   * When `subagents` is supplied, `name` is one of those agent names.
+   */
+  subagents: Array<SubagentHandles<TSubagents>>
 
   /**
    * Send a message and get a response.
    * Can be a simple string or multimodal content with images, audio, etc.
    * By default, sends while busy are queued until the run settles successfully
    * (`queue: 'drop'` restores the old drop-while-busy behavior).
-   * Pass `{ whenBusy }` to override the policy for a single send.
+   * Pass `{ whenBusy }` to override the policy for a single send, or
+   * `{ body }` to merge per-call JSON into this request's `forwardedProps`.
    */
   sendMessage: (
     content: string | MultimodalContent,
@@ -164,7 +203,7 @@ interface BaseUseChatReturn<
    * Pending messages queued while the client is busy (streaming, claiming a
    * send, or draining). Separate from `messages` until they drain.
    */
-  queue: Array<QueuedMessage>
+  queue: ReadonlyArray<QueuedMessage>
 
   /**
    * Cancel a queued message before it drains. No-op if already sent.
@@ -188,12 +227,34 @@ interface BaseUseChatReturn<
   }) => Promise<void>
 
   /**
-   * Respond to a tool approval request
+   * The id of the run this client has in flight — one it started or rejoined —
+   * or `null` when there is none (including while a run sits paused on an
+   * interrupt, waiting on approval).
+   *
+   * A run is one turn of the conversation, so this changes from turn to turn. A
+   * whole tool loop stays inside one run, while resuming after an interrupt
+   * continues the turn under a new id — so one user message can produce several
+   * run ids. Use it to talk to your own server about that run (cancel it, poll
+   * it, correlate a log line).
    */
-  addToolApprovalResponse: (response: {
-    id: string // approval.id, not toolCallId
-    approved: boolean
-  }) => Promise<void>
+  runId: string | null
+  interrupts: BoundInterrupts<TTools, TInterrupts>
+  interruptErrors: ChatInterruptState<TTools, TInterrupts>['interruptErrors']
+  resuming: boolean
+  resolveInterrupts: {
+    (approved: boolean): void
+    (
+      resolver: (
+        interrupt: ResolvableChatInterrupt<TTools, TInterrupts>,
+      ) => undefined,
+    ): void
+  }
+  cancelInterrupts: () => void
+  retryInterrupts: () => void
+  resumeInterruptsUnsafe: (
+    resume: Array<RunAgentResumeItem>,
+    state?: ChatResumeState,
+  ) => Promise<boolean>
 
   /**
    * Reload the last assistant message
@@ -209,6 +270,16 @@ interface BaseUseChatReturn<
    * Whether a response is currently being generated
    */
   isLoading: boolean
+
+  /**
+   * True when the last hydrate or older-page response said more messages exist.
+   */
+  hasOlderMessages: boolean
+
+  /**
+   * Fetch the next older window and put it in front of the painted messages.
+   */
+  loadOlderMessages: () => Promise<void>
 
   /**
    * Current error, if any
@@ -239,9 +310,17 @@ interface BaseUseChatReturn<
   sessionGenerating: boolean
 
   /**
+   * Whether the chat is being rebuilt from persistence (the server hydrate, or
+   * an async storage adapter). While it is true, show a loading state instead
+   * of an empty chat. It turns false when the transcript is in place and any
+   * in-flight run is re-joined. From then on `isLoading` covers the stream.
+   */
+  isHydrating: boolean
+
+  /**
    * Set messages manually
    */
-  setMessages: (messages: Array<UIMessage<TTools, TData>>) => void
+  setMessages: (messages: ReadonlyArray<UIMessage<TTools, TData>>) => void
 
   /**
    * Clear all messages

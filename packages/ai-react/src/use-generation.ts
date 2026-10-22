@@ -1,15 +1,25 @@
 import { GenerationClient } from '@tanstack/ai-client'
 import { createGenerationDevtoolsBridge } from '@tanstack/ai-client/devtools'
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+} from 'react'
 import type { StreamChunk } from '@tanstack/ai'
 import type {
+  AIDevtoolsClientMetadata,
   AIDevtoolsDisplayOptions,
   ConnectConnectionAdapter,
   GenerationClientOptions,
   GenerationClientState,
   GenerationFetcher,
+  GenerationRestoredResult,
   InferGenerationOutputFromReturn,
 } from '@tanstack/ai-client'
+import type { ByokClient } from '@tanstack/ai-client/byok'
+import type { ProviderId } from '@tanstack/ai/byok'
 
 /**
  * Options for the useGeneration hook.
@@ -25,12 +35,50 @@ export interface UseGenerationOptions<TInput, TResult, TOutput = TResult> {
   connection?: ConnectConnectionAdapter
   /** Direct async function for one-shot generation (no streaming protocol needed) */
   fetcher?: GenerationFetcher<TInput, TResult>
-  /** Unique identifier for this generation instance */
-  id?: string
   /** Additional body parameters to send with connect-based adapter requests */
   body?: Record<string, any>
+  /** Optional BYOK keyring. Keys go in `x-byok-*` headers, never the body. */
+  byok?: ByokClient
+  /** Optional provider id. If it returns a slug, only that key is sent. If no slug resolves (`byokProvider`, then `body.provider`), generate throws. */
+  byokProvider?: () => ProviderId | undefined
   /** Display options for TanStack AI Devtools. */
   devtools?: AIDevtoolsDisplayOptions
+  /**
+   * How this generation persists across reloads.
+   * - Omit / `false`: ephemeral, in-memory only.
+   * - `true`: server-driven — on mount the client hydrates the last generation
+   *   for its `threadId` from the server (needs a connection with a
+   *   `hydrateGeneration` handler) and repaints it; it never auto-starts a run.
+   */
+  persistence?: boolean
+  /**
+   * The **scope** this generation belongs to: a stable, app-chosen name for the
+   * slot successive runs fill — not a link to a chat conversation.
+   *
+   * The hook starts empty and produces many runs over its life; each gets its
+   * own `runId`, but all belong to one scope. Persistence keys on this, so
+   * derive it from your own domain and keep it identical across reloads (e.g.
+   * `` `video-${videoId}-start-frame` ``). It is also sent as the AG-UI thread
+   * id on the wire, which the protocol requires.
+   *
+   * Required. A generated id would change on every reload, so persistence
+   * would restore nothing.
+   */
+  threadId: string
+  /**
+   * Server-driven hydration handler for `persistence: true` when the
+   * connection doesn't carry one (e.g. alongside `fetcher`, or a `stream()` /
+   * `rpcStream()` adapter built without handlers) — typically a one-line
+   * server-function call. The connection's own handler takes precedence.
+   */
+  hydrateGeneration?: ConnectConnectionAdapter['hydrateGeneration']
+  /**
+   * Re-attach handler that replays a run still generating to completion on
+   * mount, when the connection doesn't carry one. Without it, a restored
+   * `running` snapshot surfaces as an (interrupted) error. The connection's
+   * own handler takes precedence.
+   */
+  joinRun?: ConnectConnectionAdapter['joinRun']
   /**
    * Callback when a result is received. Can optionally return a transformed value.
    *
@@ -45,16 +93,26 @@ export interface UseGenerationOptions<TInput, TResult, TOutput = TResult> {
   onProgress?: (progress: number, message?: string) => void
   /** Callback for each stream chunk (connect-based adapter mode only) */
   onChunk?: (chunk: StreamChunk) => void
+  /**
+   * @internal Rebuild a typed result from a restored snapshot, injected by each
+   * specialized hook (image / speech / audio / transcription / summarize).
+   * Forwarded to the client so a server-hydrate restore repaints `result`.
+   */
+  reconstructResult?: (restored: GenerationRestoredResult) => TResult | null
 }
 
 /**
  * Return type for the useGeneration hook.
  *
  * @template TOutput - The output type (after optional transform)
+ * @template TInput - The input type accepted by `generate` (defaults to any object)
  */
-export interface UseGenerationReturn<TOutput> {
+export interface UseGenerationReturn<
+  TOutput,
+  TInput extends Record<string, any> = Record<string, any>,
+> {
   /** Trigger a generation request */
-  generate: (input: Record<string, any>) => Promise<void>
+  generate: (input: TInput) => Promise<void>
   /** The generation result, or null if not yet generated */
   result: TOutput | null
   /** Whether a generation is currently in progress */
@@ -67,6 +125,13 @@ export interface UseGenerationReturn<TOutput> {
   stop: () => void
   /** Clear result, error, and return to idle */
   reset: () => void
+  /**
+   * The id of the generation job currently running, or `null` when nothing is in
+   * flight. Each call to `generate` is one job with its own id. Pass it to your
+   * own endpoint to cancel or poll the provider job — `stop()` only aborts the
+   * local stream, it does not stop work already running on the provider.
+   */
+  runId: string | null
 }
 
 /**
@@ -102,18 +167,39 @@ export function useGeneration<
   options: Omit<UseGenerationOptions<TInput, TResult>, 'onResult'> & {
     onResult?: (result: TResult) => TTransformed
   },
-): UseGenerationReturn<InferGenerationOutputFromReturn<TResult, TTransformed>> {
+): UseGenerationReturn<
+  InferGenerationOutputFromReturn<TResult, TTransformed>,
+  TInput
+> {
+  return useGenerationWithDevtoolsIdentity<TInput, TResult, TTransformed>(
+    options,
+    { hookName: 'useGeneration' },
+  )
+}
+
+interface GenerationDevtoolsIdentity {
+  hookName: AIDevtoolsClientMetadata['hookName']
+  outputKind?: AIDevtoolsClientMetadata['outputKind']
+}
+
+/** @internal */
+export function useGenerationWithDevtoolsIdentity<
+  TInput extends Record<string, any>,
+  TResult,
+  TTransformed = void,
+>(
+  options: Omit<UseGenerationOptions<TInput, TResult>, 'onResult'> & {
+    onResult?: (result: TResult) => TTransformed
+  },
+  devtoolsIdentity: GenerationDevtoolsIdentity,
+): UseGenerationReturn<
+  InferGenerationOutputFromReturn<TResult, TTransformed>,
+  TInput
+> {
   type TOutput = InferGenerationOutputFromReturn<TResult, TTransformed>
-  const hookId = useId()
-  const clientId = options.id || hookId
-
-  const [result, setResult] = useState<TOutput | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<Error | undefined>(undefined)
-  const [status, setStatus] = useState<GenerationClientState>('idle')
-
   const optionsRef = useRef(options)
   optionsRef.current = options
+  const disposedRef = useRef(false)
 
   const client = useMemo(() => {
     const opts = optionsRef.current
@@ -123,13 +209,26 @@ export function useGeneration<
     // wrap optional ones in non-returning bodies so `?.()`'s
     // implicit `undefined` doesn't pollute the function return type.
     const clientOptions: GenerationClientOptions<TInput, TResult, TOutput> = {
-      id: clientId,
+      persistence: opts.persistence,
+      threadId: opts.threadId,
       body: opts.body,
+      ...(opts.hydrateGeneration !== undefined && {
+        hydrateGeneration: opts.hydrateGeneration,
+      }),
+      ...(opts.joinRun !== undefined && { joinRun: opts.joinRun }),
+      ...(opts.byok !== undefined && { byok: opts.byok }),
+      byokProvider: () => optionsRef.current.byokProvider?.(),
+      ...(opts.reconstructResult
+        ? { reconstructResult: opts.reconstructResult }
+        : {}),
       devtoolsBridgeFactory: createGenerationDevtoolsBridge,
       devtools: {
-        hookName: 'useGeneration',
-        framework: 'react',
         ...opts.devtools,
+        framework: 'react',
+        hookName: devtoolsIdentity.hookName,
+        ...(devtoolsIdentity.outputKind !== undefined && {
+          outputKind: devtoolsIdentity.outputKind,
+        }),
       },
       // The transform's raw return type (`TTransformed`) and the stored output
       // (`TOutput`, with null/void/undefined stripped) are identical at runtime;
@@ -138,18 +237,14 @@ export function useGeneration<
         result: TResult,
       ) => TOutput | null | void,
       onError: (e: Error) => {
-        optionsRef.current.onError?.(e)
+        if (!disposedRef.current) optionsRef.current.onError?.(e)
       },
       onProgress: (p: number, m?: string) => {
-        optionsRef.current.onProgress?.(p, m)
+        if (!disposedRef.current) optionsRef.current.onProgress?.(p, m)
       },
       onChunk: (c: StreamChunk) => {
-        optionsRef.current.onChunk?.(c)
+        if (!disposedRef.current) optionsRef.current.onChunk?.(c)
       },
-      onResultChange: setResult,
-      onLoadingChange: setIsLoading,
-      onErrorChange: setError,
-      onStatusChange: setStatus,
     }
 
     if (opts.connection) {
@@ -169,7 +264,13 @@ export function useGeneration<
     throw new Error(
       'useGeneration requires either a connection or fetcher option',
     )
-  }, [clientId])
+  }, [options.threadId])
+
+  const snapshot = useSyncExternalStore(
+    client.subscribe,
+    client.getSnapshot,
+    client.getSnapshot,
+  )
 
   // Sync body changes without recreating client
   useEffect(() => {
@@ -179,11 +280,15 @@ export function useGeneration<
     })
   }, [client, options.body])
 
-  // Cleanup on unmount
+  // Mount devtools and clean up on unmount. Generation runs are never
+  // auto-started on mount — persisted state is only displayed. Mounting
+  // revives the client after a StrictMode dispose → remount replay.
   useEffect(() => {
+    disposedRef.current = false
     client.mountDevtools()
 
     return () => {
+      disposedRef.current = true
       client.dispose()
     }
   }, [client])
@@ -204,12 +309,13 @@ export function useGeneration<
   }, [client])
 
   return {
-    generate: generate as (input: Record<string, any>) => Promise<void>,
-    result,
-    isLoading,
-    error,
-    status,
+    generate,
+    result: snapshot.result,
+    isLoading: snapshot.isLoading,
+    error: snapshot.error,
+    status: snapshot.status,
     stop,
     reset,
+    runId: snapshot.runId,
   }
 }

@@ -40,6 +40,7 @@ describe('ChatStreamSummarizeAdapter — maxLength reaches the wrapped adapter u
     )
 
     await adapter.summarize({
+      threadId: 'thread-1',
       model: 'gpt-4o-mini',
       text: 'hi',
       maxLength: 128,
@@ -64,6 +65,7 @@ describe('ChatStreamSummarizeAdapter — maxLength reaches the wrapped adapter u
     )
 
     await adapter.summarize({
+      threadId: 'thread-1',
       model: 'claude-sonnet-4-5',
       text: 'hi',
       maxLength: 200,
@@ -72,6 +74,27 @@ describe('ChatStreamSummarizeAdapter — maxLength reaches the wrapped adapter u
 
     const opts = lastModelOptions()
     expect(opts?.['max_tokens']).toBe(200)
+    expect(opts?.['maxTokens']).toBeUndefined()
+  })
+
+  it('Groq adapter receives maxLength as max_completion_tokens', async () => {
+    const { textAdapter, lastModelOptions } = createRecordingTextAdapter()
+    const adapter = new ChatStreamSummarizeAdapter(
+      textAdapter,
+      'openai/gpt-oss-120b',
+      'groq',
+    )
+
+    await adapter.summarize({
+      threadId: 'thread-1',
+      model: 'openai/gpt-oss-120b',
+      text: 'hi',
+      maxLength: 256,
+      logger,
+    })
+
+    const opts = lastModelOptions()
+    expect(opts?.['max_completion_tokens']).toBe(256)
     expect(opts?.['maxTokens']).toBeUndefined()
   })
 
@@ -84,6 +107,7 @@ describe('ChatStreamSummarizeAdapter — maxLength reaches the wrapped adapter u
     )
 
     await adapter.summarize({
+      threadId: 'thread-1',
       model: 'mistral',
       text: 'hi',
       maxLength: 64,
@@ -109,6 +133,7 @@ describe('ChatStreamSummarizeAdapter — maxLength reaches the wrapped adapter u
     )
 
     await adapter.summarize({
+      threadId: 'thread-1',
       model: 'gpt-4o-mini',
       text: 'hi',
       maxLength: 128,
@@ -139,6 +164,7 @@ describe('ChatStreamSummarizeAdapter — maxLength reaches the wrapped adapter u
     })
 
     await adapter.summarize({
+      threadId: 'thread-1',
       model: 'some-model',
       text: 'hi',
       maxLength: 128,
@@ -153,4 +179,40 @@ describe('ChatStreamSummarizeAdapter — maxLength reaches the wrapped adapter u
     // The drop must be surfaced, not silent.
     expect(warnings.some((w) => w.includes('maxLength=128'))).toBe(true)
   })
+
+  for (const stream of [false, true]) {
+    it.each([undefined, 0, 41])(
+      `preserves a custom token limit %s (stream=${stream})`,
+      async (limit) => {
+        const { textAdapter, lastModelOptions } = createRecordingTextAdapter()
+        const adapter = new ChatStreamSummarizeAdapter(
+          { ...textAdapter, maxTokensKey: 'custom_output_cap' },
+          'some-model',
+        )
+        const modelOptions =
+          limit === undefined ? {} : { custom_output_cap: limit }
+        const options = {
+          model: 'some-model',
+          text: 'hi',
+          maxLength: 73,
+          modelOptions,
+          logger,
+          threadId: 'thread-1',
+        }
+
+        if (stream) {
+          for await (const _chunk of adapter.summarizeStream(options)) {
+            // Drain the stream to record the forwarded options.
+          }
+        } else {
+          await adapter.summarize(options)
+        }
+
+        expect(lastModelOptions()?.custom_output_cap).toBe(limit ?? 73)
+        expect(modelOptions).toEqual(
+          limit === undefined ? {} : { custom_output_cap: limit },
+        )
+      },
+    )
+  }
 })

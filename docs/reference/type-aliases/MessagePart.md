@@ -3,8 +3,6 @@ id: MessagePart
 title: MessagePart
 ---
 
-# Type Alias: MessagePart\<TData\>
-
 ```ts
 type MessagePart<TData> = 
   | TextPart
@@ -15,11 +13,13 @@ type MessagePart<TData> =
   | ToolCallPart
   | ToolResultPart
   | ThinkingPart
+  | ActivityPart
   | StructuredOutputPart<TData>
-  | UIResourcePart;
+  | UIResourcePart
+  | SubagentPart;
 ```
 
-Defined in: [packages/ai/src/types.ts:468](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L468)
+Defined in: packages/ai/src/types.ts:674
 
 ## Type Parameters
 

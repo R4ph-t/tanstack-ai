@@ -3,9 +3,7 @@ id: NormalizedSystemPrompt
 title: NormalizedSystemPrompt
 ---
 
-# Interface: NormalizedSystemPrompt\<TMetadata\>
-
-Defined in: [packages/ai/src/system-prompts.ts:52](https://github.com/TanStack/ai/blob/main/packages/ai/src/system-prompts.ts#L52)
+Defined in: packages/ai/src/system-prompts.ts:52
 
 Normalised shape adapters see after the chat layer turns string entries
 into `{ content }` objects. Adapters call `normalizeSystemPrompts` once at
@@ -26,14 +24,14 @@ to handle one shape.
 content: string;
 ```
 
-Defined in: [packages/ai/src/system-prompts.ts:53](https://github.com/TanStack/ai/blob/main/packages/ai/src/system-prompts.ts#L53)
+Defined in: packages/ai/src/system-prompts.ts:53
 
 ***
 
 ### metadata?
 
 ```ts
-optional metadata: TMetadata;
+optional metadata?: TMetadata;
 ```
 
-Defined in: [packages/ai/src/system-prompts.ts:54](https://github.com/TanStack/ai/blob/main/packages/ai/src/system-prompts.ts#L54)
+Defined in: packages/ai/src/system-prompts.ts:54

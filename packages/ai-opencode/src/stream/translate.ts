@@ -1,5 +1,5 @@
 import { EventType, buildBaseUsage } from '@tanstack/ai'
-import type { StreamChunk, TokenUsage } from '@tanstack/ai'
+import type { AdapterYieldChunk, TokenUsage } from '@tanstack/ai'
 import type {
   OpencodeAssistantMessage,
   OpencodeEvent,
@@ -112,7 +112,7 @@ function messageError(
 export async function* translateOpencodeStream(
   events: AsyncIterable<OpencodeStreamEvent>,
   ctx: TranslateContext,
-): AsyncIterable<StreamChunk> {
+): AsyncIterable<AdapterYieldChunk> {
   const { model, runId, threadId, genId } = ctx
   const now = () => Date.now()
 
@@ -123,13 +123,20 @@ export async function* translateOpencodeStream(
   const openedToolCalls = new Set<string>()
   /** Tool call ids that already emitted a TOOL_CALL_RESULT. */
   const resolvedToolCalls = new Set<string>()
+  /** Message roles from message.updated events, keyed by message id. */
+  const messageRoles = new Map<string, 'user' | 'assistant'>()
+  /** Parts held until their parent message role arrives. */
+  const pendingParts = new Map<
+    string,
+    Array<{ part: OpencodePart; delta?: string }>
+  >()
 
   /** Accumulated text per text-part id, for delta derivation. */
   const textAccumulators = new Map<string, string>()
   let openTextId: string | null = null
   let openReasoningId: string | null = null
 
-  function* startRun(): Generator<StreamChunk> {
+  function* startRun(): Generator<AdapterYieldChunk> {
     if (runStarted) return
     runStarted = true
     yield {
@@ -142,7 +149,7 @@ export async function* translateOpencodeStream(
     }
   }
 
-  function* closeText(): Generator<StreamChunk> {
+  function* closeText(): Generator<AdapterYieldChunk> {
     if (openTextId !== null) {
       yield {
         type: EventType.TEXT_MESSAGE_END,
@@ -154,7 +161,7 @@ export async function* translateOpencodeStream(
     }
   }
 
-  function* closeReasoning(): Generator<StreamChunk> {
+  function* closeReasoning(): Generator<AdapterYieldChunk> {
     if (openReasoningId !== null) {
       yield {
         type: EventType.REASONING_MESSAGE_END,
@@ -172,7 +179,7 @@ export async function* translateOpencodeStream(
     }
   }
 
-  function* synthesizeUnresolvedResults(): Generator<StreamChunk> {
+  function* synthesizeUnresolvedResults(): Generator<AdapterYieldChunk> {
     for (const toolCallId of unresolvedToolCalls) {
       yield {
         type: EventType.TOOL_CALL_RESULT,
@@ -189,7 +196,7 @@ export async function* translateOpencodeStream(
   function* handleTextPart(
     part: Extract<OpencodePart, { type: 'text' }>,
     delta: string | undefined,
-  ): Generator<StreamChunk> {
+  ): Generator<AdapterYieldChunk> {
     yield* closeReasoning()
 
     const prev = textAccumulators.get(part.id) ?? ''
@@ -228,7 +235,7 @@ export async function* translateOpencodeStream(
   function* handleReasoningPart(
     part: Extract<OpencodePart, { type: 'reasoning' }>,
     delta: string | undefined,
-  ): Generator<StreamChunk> {
+  ): Generator<AdapterYieldChunk> {
     yield* closeText()
 
     const prev = textAccumulators.get(part.id) ?? ''
@@ -271,7 +278,7 @@ export async function* translateOpencodeStream(
 
   function* openToolCall(
     part: Extract<OpencodePart, { type: 'tool' }>,
-  ): Generator<StreamChunk> {
+  ): Generator<AdapterYieldChunk> {
     if (openedToolCalls.has(part.callID)) return
     openedToolCalls.add(part.callID)
     const toolCallName = resolveToolName(part.tool, ctx.bridgedToolNames)
@@ -281,7 +288,6 @@ export async function* translateOpencodeStream(
       type: EventType.TOOL_CALL_START,
       toolCallId: part.callID,
       toolCallName,
-      toolName: toolCallName,
       model,
       timestamp: now(),
     }
@@ -297,7 +303,6 @@ export async function* translateOpencodeStream(
       type: EventType.TOOL_CALL_END,
       toolCallId: part.callID,
       toolCallName,
-      toolName: toolCallName,
       model,
       timestamp: now(),
       input,
@@ -307,7 +312,9 @@ export async function* translateOpencodeStream(
 
   function* handleToolPart(
     part: Extract<OpencodePart, { type: 'tool' }>,
-  ): Generator<StreamChunk> {
+  ): Generator<AdapterYieldChunk> {
+    if (part.state.status === 'pending') return
+
     yield* closeText()
     yield* closeReasoning()
     yield* openToolCall(part)
@@ -330,18 +337,55 @@ export async function* translateOpencodeStream(
     }
   }
 
-  function* handleEvent(event: OpencodeEvent): Generator<StreamChunk> {
-    if (event.type === 'message.part.updated') {
+  function* handlePart(
+    part: OpencodePart,
+    delta: string | undefined,
+  ): Generator<AdapterYieldChunk> {
+    if (isTextPart(part)) {
+      yield* handleTextPart(part, delta)
+    } else if (isReasoningPart(part)) {
+      yield* handleReasoningPart(part, delta)
+    } else if (isToolPart(part)) {
+      yield* handleToolPart(part)
+    }
+    // Other part kinds (file, step-start/finish, snapshot, ...) carry no
+    // state the chunk stream needs.
+  }
+
+  function* setMessageRole(
+    messageId: string,
+    role: 'user' | 'assistant',
+  ): Generator<AdapterYieldChunk> {
+    messageRoles.set(messageId, role)
+    const parts = pendingParts.get(messageId)
+    if (parts === undefined) return
+    pendingParts.delete(messageId)
+    if (role === 'user') return
+    for (const { part, delta } of parts) yield* handlePart(part, delta)
+  }
+
+  function* handleEvent(event: OpencodeEvent): Generator<AdapterYieldChunk> {
+    if (event.type === 'message.updated') {
+      yield* setMessageRole(
+        event.properties.info.id,
+        event.properties.info.role,
+      )
+    } else if (event.type === 'message.part.updated') {
       const { part, delta } = event.properties
-      if (isTextPart(part)) {
-        yield* handleTextPart(part, delta)
-      } else if (isReasoningPart(part)) {
-        yield* handleReasoningPart(part, delta)
-      } else if (isToolPart(part)) {
-        yield* handleToolPart(part)
+      const role = messageRoles.get(part.messageID)
+      if (role === undefined) {
+        const parts = pendingParts.get(part.messageID) ?? []
+        // A text or reasoning part carries its full text, so keep only its
+        // latest update. Keeping each update holds every snapshot in memory.
+        const index = isToolPart(part)
+          ? -1
+          : parts.findIndex((pending) => pending.part.id === part.id)
+        if (index === -1) parts.push({ part, delta })
+        else parts[index] = { part }
+        pendingParts.set(part.messageID, parts)
+      } else if (role === 'assistant') {
+        yield* handlePart(part, delta)
       }
-      // Other part kinds (file, step-start/finish, snapshot, ...) carry no
-      // state the chunk stream needs.
     } else if (event.type === 'todo.updated') {
       yield {
         type: EventType.CUSTOM,
@@ -351,12 +395,18 @@ export async function* translateOpencodeStream(
         value: { todos: event.properties.todos },
       }
     }
-    // session.idle / session.status / message.updated are redundant with the
-    // terminal `done` event and are ignored.
+    // session.idle / session.error are redundant with the terminal `done`
+    // event and are ignored.
   }
 
-  function* finish(message: OpencodeAssistantMessage): Generator<StreamChunk> {
+  function* finish(
+    message: OpencodeAssistantMessage,
+  ): Generator<AdapterYieldChunk> {
     yield* startRun()
+    // The final message is the assistant reply, so flush any parts that beat
+    // its message.updated. OpenCode sends message.updated when it creates a
+    // message, so parts of any other message still waiting here are dropped.
+    yield* setMessageRole(message.id, 'assistant')
     yield* closeText()
     yield* closeReasoning()
     yield* synthesizeUnresolvedResults()

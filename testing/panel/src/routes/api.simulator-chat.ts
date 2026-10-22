@@ -5,7 +5,7 @@ import {
   maxIterations,
   toServerSentEventsResponse,
 } from '@tanstack/ai'
-import type { ModelMessage, StreamChunk } from '@tanstack/ai'
+import type { ModelMessage, AdapterYieldChunk } from '@tanstack/ai'
 
 import {
   clientServerTool,
@@ -88,7 +88,7 @@ function createSimulatorAdapter() {
   async function* streamText(
     text: string,
     delayMs: number,
-  ): AsyncIterable<StreamChunk> {
+  ): AsyncIterable<AdapterYieldChunk> {
     const timestamp = Date.now()
     const messageId = `sim-msg-${timestamp}`
 
@@ -129,7 +129,7 @@ function createSimulatorAdapter() {
 
     async *chatStream(options: {
       messages: Array<ModelMessage>
-    }): AsyncIterable<StreamChunk> {
+    }): AsyncIterable<AdapterYieldChunk> {
       const messages = options.messages
       const lastMessage = messages[messages.length - 1]
 
@@ -213,7 +213,6 @@ function createSimulatorAdapter() {
             type: EventType.TOOL_CALL_START,
             toolCallId,
             toolCallName: tc.name,
-            toolName: tc.name,
             model: MODEL,
             timestamp,
             index: i,
@@ -239,7 +238,6 @@ function createSimulatorAdapter() {
             type: EventType.TOOL_CALL_END,
             toolCallId,
             toolCallName: tc.name,
-            toolName: tc.name,
             model: MODEL,
             timestamp: Date.now(),
           }
@@ -275,6 +273,7 @@ export const Route = createFileRoute('/api/simulator-chat')({
           const adapter = createSimulatorAdapter()
 
           const stream = chat({
+            threadId: body.threadId,
             adapter: adapter as any,
             tools: [
               // Server tools with implementations

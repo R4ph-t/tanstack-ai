@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { toolDefinition } from '@tanstack/ai'
+import { resolveDebugOption } from '@tanstack/ai/adapter-internals'
 import {
   createEventAwareBindings,
   toolsToBindings,
@@ -45,6 +46,7 @@ const executeTypescriptOutputSchema = z.object({
       message: z.string(),
       name: z.string().optional(),
       line: z.number().optional(),
+      stack: z.string().optional(),
     })
     .optional()
     .describe('Error details if execution failed'),
@@ -93,10 +95,13 @@ export function createCodeModeTool(
     tools,
     timeout = 30000,
     memoryLimit = 128,
-    getSkillBindings,
+    getSnippetBindings,
     onSecretParameter,
     transpile = stripTypeScript,
+    debug,
   } = config
+
+  const logger = resolveDebugOption(debug)
 
   // Validate tools
   if (tools.length === 0) {
@@ -106,13 +111,14 @@ export function createCodeModeTool(
   // Transform tools to bindings with external_ prefix (static bindings)
   const staticBindings = toolsToBindings(tools, 'external_')
 
-  // Shared across static + dynamic (skill) binding scans so a given
+  // Shared across static + dynamic (snippet) binding scans so a given
   // (toolName, paramPath) pair surfaces at most once per code-mode instance.
   const secretDedupCache = new Set<string>()
 
   warnIfBindingsExposeSecrets(Object.values(staticBindings), {
     handler: onSecretParameter,
     dedupCache: secretDedupCache,
+    logger,
   })
 
   // Create the tool definition
@@ -130,18 +136,59 @@ export function createCodeModeTool(
       toolContext?: ToolExecutionContext,
     ): Promise<CodeModeToolResult> => {
       const { typescriptCode } = input
+      const startedAt = Date.now()
 
       // Get emitCustomEvent from context or use no-op
       const emitCustomEvent = toolContext?.emitCustomEvent || (() => {})
 
-      if (!typescriptCode || typeof typescriptCode !== 'string') {
-        return {
-          success: false,
-          error: {
-            message: 'typescriptCode must be a non-empty string',
-            name: 'ValidationError',
-          },
+      const finish = (
+        result: CodeModeToolResult,
+        phase: string,
+      ): CodeModeToolResult => {
+        const durationMs = Date.now() - startedAt
+        const payload = {
+          timestamp: Date.now(),
+          durationMs,
+          phase,
+          success: result.success,
+          logCount: result.logs?.length ?? 0,
+          error: result.error
+            ? {
+                name: result.error.name,
+                message: result.error.message,
+                ...(result.error.stack !== undefined && {
+                  stack: result.error.stack,
+                }),
+                ...(result.error.line !== undefined && {
+                  line: result.error.line,
+                }),
+              }
+            : undefined,
         }
+        emitCustomEvent('code_mode:execution_finished', payload)
+        if (!result.success) {
+          logger.errors('code-mode execute_typescript failed', payload)
+        } else {
+          logger.tools('code-mode execute_typescript ok', {
+            durationMs,
+            phase,
+            logCount: payload.logCount,
+          })
+        }
+        return result
+      }
+
+      if (!typescriptCode || typeof typescriptCode !== 'string') {
+        return finish(
+          {
+            success: false,
+            error: {
+              message: 'typescriptCode must be a non-empty string',
+              name: 'ValidationError',
+            },
+          },
+          'validate-input',
+        )
       }
 
       // Create a fresh sandbox context for this execution
@@ -161,42 +208,67 @@ export function createCodeModeTool(
           strippedCode = await transpile(typescriptCode)
         } catch (error) {
           // Type/syntax error from the transpiler
-          return {
-            success: false,
-            error: {
-              message: error instanceof Error ? error.message : String(error),
-              name: 'TypeScriptError',
+          return finish(
+            {
+              success: false,
+              error: {
+                message: error instanceof Error ? error.message : String(error),
+                name: 'TypeScriptError',
+                ...(error instanceof Error &&
+                  error.stack !== undefined && { stack: error.stack }),
+              },
             },
-          }
+            'transpile',
+          )
         }
 
-        // Step 2: Get dynamic skill bindings if available
-        const skillBindings = getSkillBindings ? await getSkillBindings() : {}
+        // Step 2: Get dynamic snippet bindings if available
+        const snippetBindings = getSnippetBindings
+          ? await getSnippetBindings()
+          : {}
 
         // Scan dynamic bindings too — their schemas are equally in-scope for
         // the same exfiltration threat. Dedup cache prevents repeat warnings
         // when the same binding reappears across executions.
-        const skillBindingValues = Object.values(skillBindings)
-        if (skillBindingValues.length > 0) {
-          warnIfBindingsExposeSecrets(skillBindingValues, {
+        const snippetBindingValues = Object.values(snippetBindings)
+        if (snippetBindingValues.length > 0) {
+          warnIfBindingsExposeSecrets(snippetBindingValues, {
             handler: onSecretParameter,
             dedupCache: secretDedupCache,
+            logger,
           })
         }
 
         // Step 3: Merge static and dynamic bindings, then wrap with event awareness
-        const allBindings = { ...staticBindings, ...skillBindings }
+        const allBindings = { ...staticBindings, ...snippetBindings }
         const eventAwareBindings = createEventAwareBindings(
           allBindings,
           emitCustomEvent,
+          toolContext,
         )
 
         // Step 4: Create sandbox context with event-aware bindings
-        isolateContext = await driver.createContext({
-          bindings: eventAwareBindings,
-          timeout,
-          memoryLimit,
-        })
+        try {
+          isolateContext = await driver.createContext({
+            bindings: eventAwareBindings,
+            timeout,
+            memoryLimit,
+          })
+        } catch (error) {
+          return finish(
+            {
+              success: false,
+              error: {
+                message: error instanceof Error ? error.message : String(error),
+                name:
+                  error instanceof Error ? error.name : 'CreateContextError',
+                ...(error instanceof Error &&
+                  error.stack !== undefined && { stack: error.stack }),
+              },
+            },
+            'create-context',
+          )
+        }
 
         // Step 5: Execute the code in the sandbox
         const executionResult = await isolateContext.execute(strippedCode)
@@ -228,31 +300,45 @@ export function createCodeModeTool(
         }
 
         if (executionResult.success) {
-          return {
-            success: true,
-            result: executionResult.value,
-            logs: executionResult.logs,
-          }
-        } else {
-          return {
+          return finish(
+            {
+              success: true,
+              result: executionResult.value,
+              logs: executionResult.logs,
+            },
+            'execute',
+          )
+        }
+
+        return finish(
+          {
             success: false,
             error: executionResult.error
               ? {
                   message: executionResult.error.message,
                   name: executionResult.error.name,
+                  ...(executionResult.error.stack !== undefined && {
+                    stack: executionResult.error.stack,
+                  }),
                 }
-              : { message: 'Unknown execution error' },
+              : { message: 'Unknown execution error', name: 'UnknownError' },
             logs: executionResult.logs,
-          }
-        }
-      } catch (error) {
-        return {
-          success: false,
-          error: {
-            message: error instanceof Error ? error.message : String(error),
-            name: error instanceof Error ? error.name : 'Error',
           },
-        }
+          'execute',
+        )
+      } catch (error) {
+        return finish(
+          {
+            success: false,
+            error: {
+              message: error instanceof Error ? error.message : String(error),
+              name: error instanceof Error ? error.name : 'Error',
+              ...(error instanceof Error &&
+                error.stack !== undefined && { stack: error.stack }),
+            },
+          },
+          'unhandled',
+        )
       } finally {
         // Always clean up the sandbox context
         if (isolateContext) {
@@ -272,7 +358,7 @@ function buildToolDescription(tools: Array<CodeModeTool>): string {
   const externalFunctions = eager.map((t) => `external_${t.name}`).join(', ')
 
   const discoverable = hasLazy
-    ? ` Additional functions can be discovered via the discover_tools tool.`
+    ? ` To get more functions, call the discover_tools tool before you run code here. discover_tools is a separate tool. It is not available inside this sandbox.`
     : ''
 
   return (

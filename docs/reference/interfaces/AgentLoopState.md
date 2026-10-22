@@ -3,9 +3,7 @@ id: AgentLoopState
 title: AgentLoopState
 ---
 
-# Interface: AgentLoopState
-
-Defined in: [packages/ai/src/types.ts:833](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L833)
+Defined in: packages/ai/src/types.ts:1208
 
 State passed to agent loop strategy for determining whether to continue
 
@@ -17,7 +15,7 @@ State passed to agent loop strategy for determining whether to continue
 finishReason: string | null;
 ```
 
-Defined in: [packages/ai/src/types.ts:839](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L839)
+Defined in: packages/ai/src/types.ts:1214
 
 Finish reason from the last response
 
@@ -29,7 +27,7 @@ Finish reason from the last response
 iterationCount: number;
 ```
 
-Defined in: [packages/ai/src/types.ts:835](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L835)
+Defined in: packages/ai/src/types.ts:1210
 
 Current iteration count (0-indexed). One iteration = one model turn.
 
@@ -41,9 +39,9 @@ Current iteration count (0-indexed). One iteration = one model turn.
 lastTurnToolCallCount: number;
 ```
 
-Defined in: [packages/ai/src/types.ts:851](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L851)
+Defined in: packages/ai/src/types.ts:1226
 
-Tool calls in the most recent budgeted batch — a live model turn or a
+Tool calls in the most recent batch — a live model turn or a
 pending/resume batch (0 when the last phase produced no tool calls).
 
 ***
@@ -57,7 +55,7 @@ messages: ModelMessage<
   | null>[];
 ```
 
-Defined in: [packages/ai/src/types.ts:837](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L837)
+Defined in: packages/ai/src/types.ts:1212
 
 Current messages array
 
@@ -69,9 +67,9 @@ Current messages array
 toolCallCount: number;
 ```
 
-Defined in: [packages/ai/src/types.ts:846](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L846)
+Defined in: packages/ai/src/types.ts:1221
 
 Cumulative tool calls counted so far in this run (model-emitted during the
-agent loop, including ones skipped by `maxToolCallsPerTurn`, and pending
-tools from the inbound message list when resumed). Not a recount of full
-message history; not model turns.
+agent loop, including ones skipped by middleware, and pending tools from
+the inbound message list when resumed). Not a recount of full message
+history; not model turns.

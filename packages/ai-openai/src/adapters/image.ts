@@ -28,15 +28,8 @@ import type {
 } from '../image/image-provider-options'
 import type { OpenAIClientConfig } from '../utils/client'
 
-// Per OpenAI docs: dall-e-2 accepts 1 image to `images.edit()`; the
-// gpt-image models accept up to 16; dall-e-3 does not support edit at all.
-const EDIT_MAX_IMAGES: Record<OpenAIImageModel, number> = {
-  'dall-e-2': 1,
-  'gpt-image-1': 16,
-  'gpt-image-1-mini': 16,
-  'gpt-image-2': 16,
-  'dall-e-3': 0,
-}
+// Per OpenAI docs: the gpt-image models accept up to 16 images to `images.edit()`.
+const EDIT_MAX_IMAGES = 16
 
 /**
  * Configuration for OpenAI image adapter
@@ -57,7 +50,8 @@ export interface OpenAIImageConfig extends OpenAIClientConfig {
  * OpenAI Image Generation Adapter
  *
  * Tree-shakeable adapter for OpenAI image generation functionality.
- * Supports gpt-image-2, gpt-image-1, gpt-image-1-mini, dall-e-3, and dall-e-2 models.
+ * Supports gpt-image-2.5-flare, gpt-image-2.5-sunburst, gpt-image-2,
+ * gpt-image-1, and gpt-image-1-mini models.
  *
  * Features:
  * - Model-specific type-safe provider options
@@ -96,7 +90,7 @@ export class OpenAIImageAdapter<
 
     validatePrompt({ prompt, model })
     validateImageSize(model, size)
-    validateNumberOfImages(model, numberOfImages)
+    validateNumberOfImages(numberOfImages)
 
     if (resolved.videos.length > 0) {
       throw new Error(
@@ -123,12 +117,15 @@ export class OpenAIImageAdapter<
 
     // With exactOptionalPropertyTypes, vendor SDK request shapes reject
     // `T | undefined` in optional fields. Build the request incrementally and
-    // only set `size` when it's actually defined.
+    // only set `size` when it's actually defined. The SDK's `quality` type
+    // does not list the gpt-image-2.5 `xhigh` / `max` levels yet, so cast the
+    // spread.
     const request: OpenAI_SDK.Images.ImageGenerateParams = {
       model,
       prompt,
       n: numberOfImages ?? 1,
-      ...(modelOptions ?? {}),
+      ...((modelOptions ??
+        {}) as Partial<OpenAI_SDK.Images.ImageGenerateParamsNonStreaming>),
     }
     if (size !== undefined) {
       request.size = size
@@ -192,10 +189,8 @@ export class OpenAIImageAdapter<
 
   /**
    * Image-conditioned generation via OpenAI's `images.edit()` endpoint.
-   * dall-e-2 accepts 1 input image; gpt-image-2 / gpt-image-1 /
-   * gpt-image-1-mini accept up to 16; dall-e-3 rejects entirely. A part with
-   * `metadata.role === 'mask'` is routed to the SDK's `mask` field (PNG with
-   * alpha channel).
+   * The gpt-image models accept up to 16 input images. A part with `metadata.role === 'mask'` is
+   * routed to the SDK's `mask` field (PNG with alpha channel).
    */
   private async editImages(args: {
     model: OpenAIImageModel
@@ -207,14 +202,6 @@ export class OpenAIImageAdapter<
     logger: ImageGenerationOptions<OpenAIImageProviderOptions>['logger']
   }): Promise<ImageGenerationResult> {
     const { model, prompt, numberOfImages, size, modelOptions, logger } = args
-    const maxImages = EDIT_MAX_IMAGES[model]
-    if (maxImages === 0) {
-      throw new Error(
-        `${this.name}: model "${model}" does not support image prompt parts. ` +
-          `Use gpt-image-2, gpt-image-1, gpt-image-1-mini, or dall-e-2 for image-conditioned generation.`,
-      )
-    }
-
     const maskParts = args.imageInputs.filter(
       (part) => part.metadata?.role === 'mask',
     )
@@ -232,9 +219,9 @@ export class OpenAIImageAdapter<
         `${this.name}: the prompt contained only mask image parts; at least one source image is required.`,
       )
     }
-    if (sourceParts.length > maxImages) {
+    if (sourceParts.length > EDIT_MAX_IMAGES) {
       throw new Error(
-        `${this.name}: model "${model}" accepts at most ${maxImages} source image(s); received ${sourceParts.length}.`,
+        `${this.name}: model "${model}" accepts at most ${EDIT_MAX_IMAGES} source image(s); received ${sourceParts.length}.`,
       )
     }
 
@@ -248,10 +235,8 @@ export class OpenAIImageAdapter<
       ? await imagePartToFile(maskParts[0], 'mask', this.allowUrlFetch)
       : undefined
 
-    // `modelOptions` is typed across all four image models (including dall-e-3's
-    // `quality: 'hd' | 'standard'` which isn't valid for edit). dall-e-3 has
-    // already been rejected above, so any remaining quality value is valid for
-    // the edit endpoint — cast the spread to clear the union mismatch.
+    // The SDK's edit params do not list every gpt-image option (e.g. the
+    // gpt-image-2.5 `xhigh` / `max` quality levels), so cast the spread.
     const request: OpenAI_SDK.Images.ImageEditParamsNonStreaming = {
       model,
       prompt,
@@ -323,14 +308,14 @@ export class OpenAIImageAdapter<
  * Creates an OpenAI image adapter with explicit API key.
  * Type resolution happens here at the call site.
  *
- * @param model - The model name (e.g., 'dall-e-3', 'gpt-image-1')
+ * @param model - The model name (e.g., 'gpt-image-2.5-flare', 'gpt-image-1')
  * @param apiKey - Your OpenAI API key
  * @param config - Optional additional configuration
  * @returns Configured OpenAI image adapter instance with resolved types
  *
  * @example
  * ```typescript
- * const adapter = createOpenaiImage('dall-e-3', "sk-...");
+ * const adapter = createOpenaiImage('gpt-image-2.5-flare', "sk-...");
  *
  * const result = await generateImage({
  *   adapter,
@@ -354,7 +339,7 @@ export function createOpenaiImage<TModel extends OpenAIImageModel>(
  * - `process.env` (Node.js)
  * - `window.env` (Browser with injected env)
  *
- * @param model - The model name (e.g., 'dall-e-3', 'gpt-image-1')
+ * @param model - The model name (e.g., 'gpt-image-2.5-flare', 'gpt-image-1')
  * @param config - Optional configuration (excluding apiKey which is auto-detected)
  * @returns Configured OpenAI image adapter instance with resolved types
  * @throws Error if OPENAI_API_KEY is not found in environment
@@ -362,7 +347,7 @@ export function createOpenaiImage<TModel extends OpenAIImageModel>(
  * @example
  * ```typescript
  * // Automatically uses OPENAI_API_KEY from environment
- * const adapter = openaiImage('dall-e-3');
+ * const adapter = openaiImage('gpt-image-2.5-flare');
  *
  * const result = await generateImage({
  *   adapter,

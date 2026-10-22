@@ -1,16 +1,17 @@
+import {
+  getOpenAIProviderToolMetadata,
+  openAIProviderTool,
+} from './openai-provider-tool'
 import type { CustomTool as CustomToolConfig } from 'openai/resources/responses/responses'
 import type { Tool } from '@tanstack/ai'
 
 export type { CustomToolConfig }
 
-/** @deprecated Renamed to `CustomToolConfig`. Will be removed in a future release. */
-export type CustomTool = CustomToolConfig
-
 /**
  * Converts a standard Tool to OpenAI CustomTool format
  */
 export function convertCustomToolToAdapterFormat(tool: Tool): CustomToolConfig {
-  const metadata = tool.metadata as CustomToolConfig
+  const metadata = getOpenAIProviderToolMetadata(tool) as CustomToolConfig
   // Conditional spread: the SDK's `CustomToolConfig` declares optional
   // fields as `description?: string` (no `| undefined`) under
   // exactOptionalPropertyTypes, so we omit absent fields rather than
@@ -29,11 +30,14 @@ export function convertCustomToolToAdapterFormat(tool: Tool): CustomToolConfig {
  * Creates a standard Tool from CustomTool parameters.
  */
 export function customTool(toolData: CustomToolConfig): Tool {
-  return {
-    name: 'custom',
-    description: toolData.description || 'A custom tool',
-    metadata: {
-      ...toolData,
+  return openAIProviderTool(
+    {
+      name: 'custom',
+      description: toolData.description || 'A custom tool',
+      metadata: {
+        ...toolData,
+      },
     },
-  }
+    'custom',
+  )
 }

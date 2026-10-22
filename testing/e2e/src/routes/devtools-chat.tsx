@@ -14,9 +14,9 @@ function DevtoolsChatRoute() {
   const { testId, aimockPort } = Route.useSearch()
   const [showSecondary, setShowSecondary] = useState(false)
   const chat = useChat({
-    id: 'devtools-chat:primary',
+    threadId: 'devtools-chat:primary',
     connection: fetchServerSentEvents('/api/chat'),
-    body: { provider: 'openai', feature: 'chat', testId, aimockPort },
+    forwardedProps: { provider: 'openai', feature: 'chat', testId, aimockPort },
     devtools: { name: 'Support Chat' },
   })
 
@@ -70,9 +70,9 @@ function SecondaryChat({
   aimockPort?: number
 }) {
   const secondary = useChat({
-    id: 'devtools-chat:secondary',
+    threadId: 'devtools-chat:secondary',
     connection: fetchServerSentEvents('/api/chat'),
-    body: { provider: 'openai', feature: 'chat', testId, aimockPort },
+    forwardedProps: { provider: 'openai', feature: 'chat', testId, aimockPort },
     devtools: { name: 'Secondary Chat' },
   })
 

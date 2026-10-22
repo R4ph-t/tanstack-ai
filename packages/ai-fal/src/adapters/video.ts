@@ -6,8 +6,15 @@ import {
   generateId as utilGenerateId,
 } from '../utils/client'
 import { buildFalUsage, takeBillableUnits } from '../utils/billing'
-import { mapVideoSizeToFalFormat } from '../video/video-provider-options'
-import { mapImageInputsToFalVideoFields } from '../image/image-inputs'
+import {
+  getFalVideoDurationOptions,
+  mapVideoSizeToFalFormat,
+} from '../video/video-provider-options'
+import {
+  contentSourceToFalUrl,
+  mapImageInputsToFalVideoFields,
+} from '../image/image-inputs'
+import type { DurationOptions } from '@tanstack/ai/adapters'
 import type {
   AudioPart,
   MediaInputMetadata,
@@ -20,6 +27,7 @@ import type {
 import type {
   FalModel,
   FalModelInput,
+  FalModelVideoDuration,
   FalModelVideoSize,
   FalVideoPromptModalitiesFor,
   FalVideoProviderOptions,
@@ -70,17 +78,12 @@ function mapAudioInputsToFalFields(
     )
   }
   return {
-    audio_url:
-      part.source.type === 'url'
-        ? part.source.value
-        : `data:${part.source.mimeType};base64,${part.source.value}`,
+    audio_url: contentSourceToFalUrl(part.source),
   }
 }
 
 function videoPartToUrl(part: VideoPart<MediaInputMetadata>): string {
-  return part.source.type === 'url'
-    ? part.source.value
-    : `data:${part.source.mimeType};base64,${part.source.value}`
+  return contentSourceToFalUrl(part.source)
 }
 
 type FalQueueStatus = 'IN_QUEUE' | 'IN_PROGRESS' | 'COMPLETED'
@@ -101,7 +104,7 @@ interface FalVideoResultData {
  *
  * Note: fal.ai does not return a FAILED queue status. Errors surface
  * as exceptions when fetching results from a COMPLETED job (e.g. 422
- * validation errors). Those are handled in getVideoUrl().
+ * validation errors). Those are handled in getVideo().
  */
 function mapFalStatusToVideoStatus(
   falStatus: FalQueueStatus,
@@ -132,10 +135,13 @@ export class FalVideoAdapter<TModel extends FalModel> extends BaseVideoAdapter<
   FalVideoProviderOptions<TModel>,
   Record<TModel, FalVideoProviderOptions<TModel>>,
   Record<TModel, FalModelVideoSize<TModel>>,
-  Record<TModel, FalVideoPromptModalitiesFor<TModel>>
+  Record<TModel, FalVideoPromptModalitiesFor<TModel>>,
+  Record<TModel, FalModelVideoDuration<TModel>>
 > {
   override readonly kind = 'video' as const
   readonly name = 'fal' as const
+  // Consumes fal storage URLs uploaded via falFiles().
+  override readonly supportsFileSources = true
 
   constructor(model: TModel, config?: FalClientConfig) {
     super({}, model)
@@ -145,7 +151,8 @@ export class FalVideoAdapter<TModel extends FalModel> extends BaseVideoAdapter<
   async createVideoJob(
     options: VideoGenerationOptions<
       FalVideoProviderOptions<TModel>,
-      FalModelVideoSize<TModel>
+      FalModelVideoSize<TModel>,
+      FalModelVideoDuration<TModel>
     >,
   ): Promise<VideoJobResult> {
     const { size, duration, modelOptions, logger } = options
@@ -176,12 +183,14 @@ export class FalVideoAdapter<TModel extends FalModel> extends BaseVideoAdapter<
         // Media-only prompts omit the prompt field rather than sending an
         // empty string (e.g. pure image-to-video endpoints).
         ...(resolved.text ? { prompt: resolved.text } : {}),
-        ...(duration ? { duration } : {}),
+        ...(duration !== undefined ? { duration } : {}),
       } as FalModelInput<TModel>
 
-      // Submit to queue and get request ID
+      // Submit to queue and get request ID. Request-specific abortSignal only —
+      // never via fal.config() (global; would cancel concurrent jobs).
       const { request_id } = await fal.queue.submit(this.model, {
         input,
+        ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
       })
 
       return {
@@ -195,6 +204,12 @@ export class FalVideoAdapter<TModel extends FalModel> extends BaseVideoAdapter<
       })
       throw error
     }
+  }
+
+  override availableDurations(): DurationOptions<
+    FalModelVideoDuration<TModel>
+  > {
+    return getFalVideoDurationOptions(this.model)
   }
 
   async getVideoStatus(jobId: string): Promise<VideoStatusResult> {
@@ -214,7 +229,7 @@ export class FalVideoAdapter<TModel extends FalModel> extends BaseVideoAdapter<
     }
   }
 
-  async getVideoUrl(jobId: string): Promise<VideoUrlResult> {
+  override async getVideo(jobId: string): Promise<VideoUrlResult> {
     let result
     try {
       result = await fal.queue.result(this.model, {

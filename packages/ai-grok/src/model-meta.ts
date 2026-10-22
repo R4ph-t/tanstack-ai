@@ -1,10 +1,24 @@
 /**
  * Model metadata interface for documentation and type inference
  */
-import type {
-  GrokBuildProviderOptions,
-  GrokTextProviderOptions,
-} from './text/text-provider-options'
+import type { Modality, ModelReasoning } from '@tanstack/ai'
+import type { ModelReasoningCapability } from '@tanstack/ai/adapter-internals'
+import type { GrokTextProviderOptions } from './text/text-provider-options'
+
+// Reasoning shapes: the levels a model has for `chat({ reasoning })`, and
+// the provider value to send for each. Each model points at one of them.
+const EFFORT_LOW_TO_HIGH = {
+  levels: { low: 'low', medium: 'medium', high: 'high' },
+  budget: false,
+} as const
+const EFFORT_LOW_TO_XHIGH = {
+  levels: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' },
+  budget: false,
+} as const
+const EFFORT_NONE_LOW_TO_HIGH = {
+  levels: { off: 'none', low: 'low', medium: 'medium', high: 'high' },
+  budget: false,
+} as const
 
 interface ModelMeta {
   name: string
@@ -27,7 +41,73 @@ interface ModelMeta {
       normal: number
     }
   }
+  /** The model's data for `chat({ reasoning })`. None: it does not reason. */
+  reasoning?: ModelReasoning
 }
+
+const GROK_4_5 = {
+  name: 'grok-4.5',
+  context_window: 500_000,
+  supports: {
+    input: ['text', 'image', 'document'],
+    output: ['text'],
+    capabilities: ['reasoning', 'structured_outputs', 'tool_calling'],
+    tools: [],
+  },
+  pricing: {
+    input: {
+      normal: 2,
+      cached: 0.3,
+    },
+    output: {
+      normal: 6,
+    },
+  },
+  reasoning: EFFORT_LOW_TO_HIGH,
+} as const satisfies ModelMeta
+
+const GROK_4_6 = {
+  name: 'grok-4.6',
+  context_window: 500_000,
+  supports: {
+    input: ['text', 'image', 'document'],
+    output: ['text'],
+    capabilities: ['reasoning', 'structured_outputs', 'tool_calling'],
+    tools: [],
+  },
+  pricing: {
+    input: {
+      normal: 2,
+      cached: 0.5,
+    },
+    output: {
+      normal: 6,
+    },
+  },
+  reasoning: EFFORT_LOW_TO_XHIGH,
+} as const satisfies ModelMeta
+
+const GROK_4_7 = {
+  name: 'grok-4.7',
+  context_window: 500_000,
+  max_output_tokens: 450_000,
+  supports: {
+    input: ['text', 'image', 'document'],
+    output: ['text'],
+    capabilities: ['reasoning', 'structured_outputs', 'tool_calling'],
+    tools: [],
+  },
+  pricing: {
+    input: {
+      normal: 1.6,
+      cached: 0.4,
+    },
+    output: {
+      normal: 4.8,
+    },
+  },
+  reasoning: EFFORT_LOW_TO_XHIGH,
+} as const satisfies ModelMeta
 
 export type GrokProviderToolKind =
   | 'web_search'
@@ -41,22 +121,6 @@ const GROK_RESPONSES_TOOLS = [
   'file_search',
   'mcp',
 ] as const satisfies ReadonlyArray<GrokProviderToolKind>
-
-const GROK_2_IMAGE = {
-  name: 'grok-2-image-1212',
-  supports: {
-    input: ['text'],
-    output: ['image'],
-  },
-  pricing: {
-    input: {
-      normal: 0.07,
-    },
-    output: {
-      normal: 0.07,
-    },
-  },
-} as const satisfies ModelMeta
 
 // Imagine API image models. Pricing is per generated image (output only).
 const GROK_IMAGINE_IMAGE = {
@@ -91,17 +155,38 @@ const GROK_IMAGINE_IMAGE_QUALITY = {
   },
 } as const satisfies ModelMeta
 
+// xAI's recommended Imagine image model. Supports the 2.0-only `quality`
+// provider option ('low' | 'medium', default 'medium').
+const GROK_IMAGINE_IMAGE_2_0 = {
+  name: 'grok-imagine-image-2.0',
+  supports: {
+    input: ['text', 'image'],
+    output: ['image'],
+  },
+  pricing: {
+    input: {
+      normal: 0,
+    },
+    output: {
+      normal: 0.04,
+    },
+  },
+} as const satisfies ModelMeta
+
 // Imagine API video models. Pricing is per second of generated video
 // (output only); generated videos carry an audio track.
 //
-// grok-imagine-video (v1.0) supports both text-to-video (a starting image is
-// optional) and image-to-video. grok-imagine-video-1.5 is image-to-video
-// only: a starting-frame image is required (the text prompt describes the
-// desired motion) — its text-to-video is rejected by the API.
+// Both models support text-to-video and image-to-video (a starting-frame
+// image is optional). grok-imagine-video-1.5 is the documented default: it
+// adds native 1080p for text-to-video / image-to-video plus
+// reference-to-video (`reference_images` / `reference_audios`; reference
+// output is capped at 720p). Source-video edit (`/v1/videos/edits`) and
+// extend (`/v1/videos/extensions`) are grok-imagine-video only — xAI's
+// 1.5 model page lists text+image input, not video.
 const GROK_IMAGINE_VIDEO = {
   name: 'grok-imagine-video',
   supports: {
-    input: ['text', 'image'],
+    input: ['text', 'image', 'video'],
     output: ['video', 'audio'],
   },
   pricing: {
@@ -150,6 +235,7 @@ const GROK_4_3 = {
       normal: 2.5,
     },
   },
+  reasoning: EFFORT_NONE_LOW_TO_HIGH,
 } as const satisfies ModelMeta
 
 const GROK_BUILD_0_1 = {
@@ -172,17 +258,81 @@ const GROK_BUILD_0_1 = {
   },
 } as const satisfies ModelMeta
 
+// Vertex Model Garden IDs. These are not the xAI API catalog.
+// Source: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/grok
+const GROK_4_20_REASONING = {
+  name: 'grok-4.20-reasoning',
+  context_window: 1_000_000,
+  supports: {
+    input: ['text', 'image'],
+    output: ['text'],
+    capabilities: ['reasoning', 'structured_outputs', 'tool_calling'],
+    tools: [] as const,
+  },
+} as const satisfies ModelMeta
+
+const GROK_4_20_NON_REASONING = {
+  name: 'grok-4.20-non-reasoning',
+  context_window: 1_000_000,
+  supports: {
+    input: ['text', 'image'],
+    output: ['text'],
+    capabilities: ['structured_outputs', 'tool_calling'],
+    tools: [] as const,
+  },
+} as const satisfies ModelMeta
+
+const GROK_4_1_FAST_REASONING = {
+  name: 'grok-4.1-fast-reasoning',
+  context_window: 2_000_000,
+  supports: {
+    input: ['text', 'image'],
+    output: ['text'],
+    capabilities: ['reasoning', 'structured_outputs', 'tool_calling'],
+    tools: [] as const,
+  },
+} as const satisfies ModelMeta
+
+const GROK_4_1_FAST_NON_REASONING = {
+  name: 'grok-4.1-fast-non-reasoning',
+  context_window: 2_000_000,
+  supports: {
+    input: ['text', 'image'],
+    output: ['text'],
+    capabilities: ['structured_outputs', 'tool_calling'],
+    tools: [] as const,
+  },
+} as const satisfies ModelMeta
+
 /**
- * Grok chat models supported by the Responses adapter.
+ * Grok chat models supported by the xAI Responses adapter.
  */
-export const GROK_CHAT_MODELS = [GROK_BUILD_0_1.name, GROK_4_3.name] as const
+export const GROK_CHAT_MODELS = [
+  GROK_4_7.name,
+  GROK_4_5.name,
+  GROK_4_6.name,
+  GROK_BUILD_0_1.name,
+  GROK_4_3.name,
+] as const
+
+/**
+ * Grok chat models on Vertex AI / Gemini Enterprise Agent Platform.
+ * This list is the Google partner catalog, not the xAI API catalog.
+ */
+export const GROK_VERTEX_CHAT_MODELS = [
+  GROK_4_3.name,
+  GROK_4_20_REASONING.name,
+  GROK_4_20_NON_REASONING.name,
+  GROK_4_1_FAST_REASONING.name,
+  GROK_4_1_FAST_NON_REASONING.name,
+] as const
 
 /**
  * Grok Image Generation Models
  */
 export const GROK_IMAGE_MODELS = [
-  GROK_2_IMAGE.name,
   GROK_IMAGINE_IMAGE.name,
+  GROK_IMAGINE_IMAGE_2_0.name,
   GROK_IMAGINE_IMAGE_QUALITY.name,
 ] as const
 
@@ -228,8 +378,21 @@ const GROK_VOICE_FAST_1 = {
   },
 } as const satisfies ModelMeta
 
-const GROK_VOICE_THINK_FAST_1 = {
-  name: 'grok-voice-think-fast-1.0',
+// xAI's current recommended speech-to-speech model.
+const GROK_VOICE_THINK_FAST_2 = {
+  name: 'grok-voice-think-fast-2.0',
+  supports: {
+    input: ['audio', 'text'],
+    output: ['audio', 'text'],
+    capabilities: ['reasoning', 'tool_calling'],
+    tools: [] as const,
+  },
+} as const satisfies ModelMeta
+
+// Rolling alias used by xAI's realtime docs examples; always points at the
+// latest speech-to-speech model.
+const GROK_VOICE_LATEST = {
+  name: 'grok-voice-latest',
   supports: {
     input: ['audio', 'text'],
     output: ['audio', 'text'],
@@ -243,11 +406,22 @@ export const GROK_TTS_MODELS = [GROK_TTS.name] as const
 export const GROK_TRANSCRIPTION_MODELS = [GROK_STT.name] as const
 
 export const GROK_REALTIME_MODELS = [
+  GROK_VOICE_THINK_FAST_2.name,
+  GROK_VOICE_LATEST.name,
   GROK_VOICE_FAST_1.name,
-  GROK_VOICE_THINK_FAST_1.name,
 ] as const
 
+/**
+ * Default speech-to-speech model used by the realtime token issuer and the
+ * realtime client adapter when no model is specified. Single source of truth
+ * so a future default bump cannot leave the two sides disagreeing.
+ */
+export const GROK_DEFAULT_REALTIME_MODEL: GrokRealtimeModel =
+  'grok-voice-think-fast-2.0'
+
 export type GrokChatModel = (typeof GROK_CHAT_MODELS)[number]
+export type GrokVertexChatModel = (typeof GROK_VERTEX_CHAT_MODELS)[number]
+export type GrokTextAdapterModel = GrokChatModel | GrokVertexChatModel
 export type GrokImageModel = (typeof GROK_IMAGE_MODELS)[number]
 export type GrokVideoModel = (typeof GROK_VIDEO_MODELS)[number]
 export type GrokTTSModel = (typeof GROK_TTS_MODELS)[number]
@@ -261,7 +435,34 @@ export type GrokRealtimeModel = (typeof GROK_REALTIME_MODELS)[number]
 export type GrokModelInputModalitiesByName = {
   [GROK_4_3.name]: typeof GROK_4_3.supports.input
   [GROK_BUILD_0_1.name]: typeof GROK_BUILD_0_1.supports.input
+  [GROK_4_5.name]: typeof GROK_4_5.supports.input
+  [GROK_4_6.name]: typeof GROK_4_6.supports.input
+  [GROK_4_20_REASONING.name]: typeof GROK_4_20_REASONING.supports.input
+  [GROK_4_20_NON_REASONING.name]: typeof GROK_4_20_NON_REASONING.supports.input
+  [GROK_4_1_FAST_REASONING.name]: typeof GROK_4_1_FAST_REASONING.supports.input
+  [GROK_4_1_FAST_NON_REASONING.name]: typeof GROK_4_1_FAST_NON_REASONING.supports.input
+  [GROK_4_7.name]: typeof GROK_4_7.supports.input
 }
+
+/**
+ * Runtime map from chat model name to its supported input modalities, for the
+ * text adapter's `inputModalities`. `satisfies` keeps it equal to
+ * {@link GrokModelInputModalitiesByName}. An unknown name gives `undefined`.
+ */
+export const GROK_MODEL_INPUT_MODALITIES: Readonly<
+  Record<string, ReadonlyArray<Modality>>
+> = {
+  [GROK_4_3.name]: GROK_4_3.supports.input,
+  [GROK_BUILD_0_1.name]: GROK_BUILD_0_1.supports.input,
+  [GROK_4_5.name]: GROK_4_5.supports.input,
+  [GROK_4_6.name]: GROK_4_6.supports.input,
+  [GROK_4_20_REASONING.name]: GROK_4_20_REASONING.supports.input,
+  [GROK_4_20_NON_REASONING.name]: GROK_4_20_NON_REASONING.supports.input,
+  [GROK_4_1_FAST_REASONING.name]: GROK_4_1_FAST_REASONING.supports.input,
+  [GROK_4_1_FAST_NON_REASONING.name]:
+    GROK_4_1_FAST_NON_REASONING.supports.input,
+  [GROK_4_7.name]: GROK_4_7.supports.input,
+} satisfies GrokModelInputModalitiesByName
 
 /**
  * Type-only map from Grok chat model name to its supported provider tools.
@@ -271,6 +472,11 @@ export type GrokModelInputModalitiesByName = {
 export type GrokChatModelToolCapabilitiesByName = {
   [GROK_4_3.name]: typeof GROK_4_3.supports.tools
   [GROK_BUILD_0_1.name]: typeof GROK_BUILD_0_1.supports.tools
+  [GROK_4_20_REASONING.name]: typeof GROK_4_20_REASONING.supports.tools
+  [GROK_4_20_NON_REASONING.name]: typeof GROK_4_20_NON_REASONING.supports.tools
+  [GROK_4_1_FAST_REASONING.name]: typeof GROK_4_1_FAST_REASONING.supports.tools
+  [GROK_4_1_FAST_NON_REASONING.name]: typeof GROK_4_1_FAST_NON_REASONING.supports.tools
+  [GROK_4_7.name]: typeof GROK_4_7.supports.tools
 }
 
 export type GrokProviderOptions = GrokTextProviderOptions
@@ -280,7 +486,11 @@ export type GrokProviderOptions = GrokTextProviderOptions
  */
 export type GrokChatModelProviderOptionsByName = {
   [GROK_4_3.name]: GrokProviderOptions
-  [GROK_BUILD_0_1.name]: GrokBuildProviderOptions
+  [GROK_BUILD_0_1.name]: GrokProviderOptions
+  [GROK_4_20_REASONING.name]: GrokProviderOptions
+  [GROK_4_20_NON_REASONING.name]: GrokProviderOptions
+  [GROK_4_1_FAST_REASONING.name]: GrokProviderOptions
+  [GROK_4_1_FAST_NON_REASONING.name]: GrokProviderOptions
 }
 
 // ===========================
@@ -304,3 +514,36 @@ export type ResolveInputModalities<TModel extends string> =
   TModel extends keyof GrokModelInputModalitiesByName
     ? GrokModelInputModalitiesByName[TModel]
     : readonly ['text']
+
+// Reasoning
+//
+// Each model's `reasoning` field holds its data for `chat({ reasoning })`: the
+// levels it has, with the provider value for each, and whether it takes a
+// thinking token budget. The data comes from models.dev. The generator that
+// writes it comes with the model catalog later. Until then, the sync scripts
+// keep these fields as they are.
+
+const GROK_REASONING = {
+  [GROK_4_3.name]: GROK_4_3.reasoning,
+  [GROK_4_5.name]: GROK_4_5.reasoning,
+  [GROK_4_6.name]: GROK_4_6.reasoning,
+  [GROK_4_7.name]: GROK_4_7.reasoning,
+}
+
+/**
+ * Each chat model's reasoning levels, and whether it takes a token budget,
+ * for `chat({ reasoning })`. Derived from the `reasoning` field. A model
+ * that is not here does not reason.
+ */
+export type GrokModelReasoningByName = {
+  [K in keyof typeof GROK_REASONING]: ModelReasoningCapability<
+    (typeof GROK_REASONING)[K]
+  >
+}
+
+/**
+ * Runtime map from chat model name to its reasoning data, for the text adapter.
+ * An unknown name gives `undefined`: the adapter sends no reasoning field.
+ */
+export const GROK_MODEL_REASONING: Readonly<Record<string, ModelReasoning>> =
+  GROK_REASONING

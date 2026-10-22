@@ -4,7 +4,11 @@ import {
   generateImage,
   generateSpeech,
   generateTranscription,
+  generateLiveVideo,
   generateVideo,
+  generateWorld,
+  getVideoJobStatus,
+  summarize,
 } from '../../src/index'
 import { otelMiddleware } from '../../src/middlewares/otel'
 import { createFakeTracer } from './fake-otel'
@@ -74,13 +78,13 @@ describe('generation middleware — wiring', () => {
           promptTokens: 0,
           completionTokens: 0,
           totalTokens: 0,
-          unitsBilled: 1,
           cost: 0.04,
         },
       })),
     }
 
     const result = await generateImage({
+      threadId: 'thread-1',
       adapter: adapter as any,
       prompt: 'a sunset',
       middleware: [middleware],
@@ -99,6 +103,99 @@ describe('generation middleware — wiring', () => {
     expect(events.finish[0]!.ctx.requestId).toBe(events.start[0]!.requestId)
   })
 
+  it('generateWorld fires start then finish', async () => {
+    const { middleware, events } = recordingMiddleware()
+    const adapter = {
+      kind: 'world' as const,
+      name: 'reactor',
+      model: 'visko-orbis-stable',
+      createWorld: vi.fn(async () => ({
+        id: 'world-1',
+        model: 'reactor/visko-orbis-stable',
+        token: 'jwt',
+        expiresAt: Date.now() + 60_000,
+        prompt: 'a world',
+        status: 'ready' as const,
+      })),
+    }
+
+    const result = await generateWorld({
+      threadId: 'thread-1',
+      adapter: adapter as any,
+      prompt: 'a world',
+      middleware: [middleware],
+      debug: false,
+    })
+
+    expect(result.token).toBe('jwt')
+    expect(events.start).toHaveLength(1)
+    expect(events.start[0]!.activity).toBe('world')
+    expect(events.start[0]!.provider).toBe('reactor')
+    expect(events.finish).toHaveLength(1)
+    expect(events.error).toHaveLength(0)
+    expect(events.finish[0]!.ctx.requestId).toBe(events.start[0]!.requestId)
+  })
+
+  it('generateLiveVideo fires start then finish', async () => {
+    const { middleware, events } = recordingMiddleware()
+    const adapter = {
+      kind: 'liveVideo' as const,
+      name: 'reactor',
+      model: 'helios',
+      createLiveVideo: vi.fn(async () => ({
+        id: 'live-1',
+        model: 'reactor/helios',
+        token: 'jwt',
+        expiresAt: Date.now() + 60_000,
+        prompt: 'a shot',
+        status: 'ready' as const,
+      })),
+    }
+
+    const result = await generateLiveVideo({
+      threadId: 'thread-1',
+      adapter: adapter as any,
+      prompt: 'a shot',
+      middleware: [middleware],
+      debug: false,
+    })
+
+    expect(result.token).toBe('jwt')
+    expect(events.start).toHaveLength(1)
+    expect(events.start[0]!.activity).toBe('liveVideo')
+    expect(events.start[0]!.provider).toBe('reactor')
+    expect(events.finish).toHaveLength(1)
+    expect(events.error).toHaveLength(0)
+    expect(events.finish[0]!.ctx.requestId).toBe(events.start[0]!.requestId)
+  })
+
+  it('generateWorld fires error and rethrows', async () => {
+    const { middleware, events } = recordingMiddleware()
+    const adapter = {
+      kind: 'world' as const,
+      name: 'reactor',
+      model: 'visko-orbis-stable',
+      createWorld: vi.fn(async () => {
+        throw new Error('world boom')
+      }),
+    }
+
+    await expect(
+      generateWorld({
+        threadId: 'thread-1',
+        adapter: adapter as any,
+        prompt: 'x',
+        middleware: [middleware],
+        debug: false,
+      }),
+    ).rejects.toThrow('world boom')
+
+    expect(events.start).toHaveLength(1)
+    expect(events.finish).toHaveLength(0)
+    expect(events.error).toHaveLength(1)
+    expect((events.error[0]!.info.error as Error).message).toBe('world boom')
+  })
+
   it('generateImage fires error and rethrows', async () => {
     const { middleware, events } = recordingMiddleware()
     const adapter = {
@@ -112,6 +209,7 @@ describe('generation middleware — wiring', () => {
 
     await expect(
       generateImage({
+        threadId: 'thread-1',
         adapter: adapter as any,
         prompt: 'x',
         middleware: [middleware],
@@ -143,6 +241,7 @@ describe('generation middleware — wiring', () => {
     }
 
     await generateImage({
+      threadId: 'thread-1',
       adapter: adapter as any,
       prompt: 'a sunset',
       middleware: [otelMiddleware({ tracer })],
@@ -171,6 +270,7 @@ describe('generation middleware — wiring', () => {
     }
 
     await generateSpeech({
+      threadId: 'thread-1',
       adapter: adapter as any,
       text: 'hello',
       middleware: [middleware],
@@ -193,19 +293,23 @@ describe('generation middleware — wiring', () => {
           promptTokens: 0,
           completionTokens: 0,
           totalTokens: 0,
-          durationSeconds: 4,
+          billed: { quantity: 4, unit: 'seconds' },
         },
       })),
     }
 
     await generateTranscription({
+      threadId: 'thread-1',
       adapter: adapter as any,
       audio: 'base64',
       middleware: [middleware],
     })
 
     expect(events.start[0]!.activity).toBe('transcription')
-    expect(events.finish[0]!.info.usage?.durationSeconds).toBe(4)
+    expect(events.finish[0]!.info.usage?.billed).toEqual({
+      quantity: 4,
+      unit: 'seconds',
+    })
   })
 
   it('generateAudio fires start/finish', async () => {
@@ -220,22 +324,30 @@ describe('generation middleware — wiring', () => {
           promptTokens: 0,
           completionTokens: 0,
           totalTokens: 0,
-          unitsBilled: 1,
+          billed: { quantity: 1, unit: 'units' },
         },
       })),
     }
 
     await generateAudio({
+      threadId: 'thread-1',
       adapter: adapter as any,
       prompt: 'an upbeat track',
       middleware: [middleware],
     })
 
     expect(events.start[0]!.activity).toBe('audio')
-    expect(events.finish[0]!.info.usage?.unitsBilled).toBe(1)
+    expect(events.finish[0]!.info.usage?.billed).toEqual({
+      quantity: 1,
+      unit: 'units',
+    })
   })
 
-  it('generateVideo (non-streaming) fires start/finish for the submit', async () => {
+  // Regression: the submit used to fire onFinish, so persistence stamped a run
+  // `completed` the moment the job was QUEUED — no url, no blob, no artifacts —
+  // and the eventual result had nowhere to land. Submitting opens the run; the
+  // poll that sees a terminal job state closes it.
+  it('generateVideo (non-streaming) opens the run without finishing it', async () => {
     const { middleware, events } = recordingMiddleware()
     const adapter = {
       kind: 'video' as const,
@@ -243,19 +355,489 @@ describe('generation middleware — wiring', () => {
       model: 'sora-2',
       createVideoJob: vi.fn(async () => ({ jobId: 'job-1', model: 'sora-2' })),
       getVideoStatus: vi.fn(),
-      getVideoUrl: vi.fn(),
+      getVideo: vi.fn(),
     }
 
     const job = await generateVideo({
       adapter: adapter as any,
       prompt: 'a cat',
+      threadId: 'video:slot',
       middleware: [middleware],
     })
 
     expect(job.jobId).toBe('job-1')
     expect(events.start[0]!.activity).toBe('video')
+    // The identity persistence keys on reached the middleware — without it,
+    // `withGenerationPersistence` throws for want of a scope.
+    expect(events.start[0]!.threadId).toBe('video:slot')
+    // Keyed on the provider job, so a later poll can recompute it from the
+    // jobId alone. Nothing about the run has to be carried by the caller.
+    expect(events.start[0]!.runId).toBe('video:openai:job-1')
+    expect(events.finish).toHaveLength(0)
+    expect(events.error).toHaveLength(0)
+    // Correlation rides the jobId; nothing extra is bolted onto the result.
+    expect(job).not.toHaveProperty('runId')
+  })
+
+  // The submit is not free to pick its own id: the poll can only recompute one
+  // derived from the job, so honoring a custom id here would resurrect exactly
+  // the "forgot to pass it through" split-record bug this design removes.
+  it('generateVideo (non-streaming) ignores a caller-supplied runId', async () => {
+    const { middleware, events } = recordingMiddleware()
+    const adapter = {
+      kind: 'video' as const,
+      name: 'openai',
+      model: 'sora-2',
+      createVideoJob: vi.fn(async () => ({ jobId: 'job-1', model: 'sora-2' })),
+      getVideoStatus: vi.fn(),
+      getVideo: vi.fn(),
+    }
+
+    await generateVideo({
+      adapter: adapter as any,
+      prompt: 'a cat',
+      threadId: 'video:slot',
+      runId: 'run-fixed',
+      middleware: [middleware],
+    })
+
+    expect(events.start[0]!.runId).toBe('video:openai:job-1')
+  })
+
+  it('generateVideo (non-streaming) keys the run per provider', async () => {
+    const jobFor = (name: string) => ({
+      kind: 'video' as const,
+      name,
+      model: 'sora-2',
+      createVideoJob: vi.fn(async () => ({ jobId: 'job-1', model: 'sora-2' })),
+      getVideoStatus: vi.fn(),
+      getVideo: vi.fn(),
+    })
+    const { middleware, events } = recordingMiddleware()
+
+    await generateVideo({
+      adapter: jobFor('openai') as any,
+      prompt: 'a cat',
+      threadId: 'video:slot',
+      middleware: [middleware],
+    })
+    await generateVideo({
+      adapter: jobFor('fal') as any,
+      prompt: 'a cat',
+      threadId: 'video:slot',
+      middleware: [middleware],
+    })
+
+    // Two providers can hand out the same job id; their runs must not collide.
+    expect(events.start[0]!.runId).not.toBe(events.start[1]!.runId)
+  })
+
+  it('generateVideo (non-streaming) applies result transforms to the submission', async () => {
+    const adapter = {
+      kind: 'video' as const,
+      name: 'openai',
+      model: 'sora-2',
+      createVideoJob: vi.fn(async () => ({ jobId: 'job-1', model: 'sora-2' })),
+      getVideoStatus: vi.fn(),
+      getVideo: vi.fn(),
+    }
+
+    const recorded: Array<unknown> = []
+    const transforming: GenerationMiddleware = {
+      name: 'transform',
+      onStart: (ctx) => {
+        ctx.resultTransforms.push((result) => {
+          recorded.push(result)
+          return undefined
+        })
+      },
+    }
+
+    await generateVideo({
+      adapter: adapter as any,
+      prompt: 'a cat',
+      threadId: 'video:slot',
+      middleware: [transforming],
+    })
+
+    // The jobId reaches the run record at submission time, which is what makes
+    // a job resumable from a later request.
+    expect(recorded[0]).toMatchObject({ jobId: 'job-1' })
+  })
+
+  // A failed submit has no job to key on, so it opens and immediately fails a
+  // run under the request id: `generationRuns.update` on an unknown run id is a
+  // documented no-op, so without the start the failure would persist nowhere and
+  // the thread would hydrate as if nothing had been asked for.
+  it('generateVideo (non-streaming) opens and fails a run when submission fails', async () => {
+    const { middleware, events } = recordingMiddleware()
+    const adapter = {
+      kind: 'video' as const,
+      name: 'openai',
+      model: 'sora-2',
+      createVideoJob: vi.fn(async () => {
+        throw new Error('submit boom')
+      }),
+      getVideoStatus: vi.fn(),
+      getVideo: vi.fn(),
+    }
+
+    await expect(
+      generateVideo({
+        adapter: adapter as any,
+        prompt: 'a cat',
+        threadId: 'video:slot',
+        middleware: [middleware],
+        debug: false,
+      }),
+    ).rejects.toThrow('submit boom')
+
+    expect(events.start).toHaveLength(1)
+    expect(events.error).toHaveLength(1)
+    expect(events.finish).toHaveLength(0)
+    // No job, so no derived id — persistence falls back to the request id. The
+    // record is terminal and unresumable by construction, but it is filed under
+    // the thread, so a hydrating client sees the failure.
+    expect(events.start[0]!.runId).toBeUndefined()
+    expect(events.start[0]!.threadId).toBe('video:slot')
+  })
+
+  it('getVideoJobStatus finishes the submitted run, transforming the result', async () => {
+    const adapter = {
+      kind: 'video' as const,
+      name: 'openai',
+      model: 'sora-2',
+      createVideoJob: vi.fn(async () => ({ jobId: 'job-1', model: 'sora-2' })),
+      getVideoStatus: vi.fn(async () => ({ status: 'completed' as const })),
+      getVideo: vi.fn(async () => ({
+        url: 'https://provider.test/v.mp4',
+        usage: {
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          billed: { quantity: 1, unit: 'units' },
+        },
+      })),
+    }
+
+    const { middleware, events } = recordingMiddleware()
+    const transforming: GenerationMiddleware = {
+      name: 'transform',
+      onStart: (ctx) => {
+        ctx.resultTransforms.push((result) => ({
+          ...(result as Record<string, unknown>),
+          url: 'https://app.test/api/artifacts?id=a1',
+        }))
+      },
+    }
+
+    const job = await generateVideo({
+      adapter: adapter as any,
+      prompt: 'a cat',
+      threadId: 'video:slot',
+      middleware: [middleware, transforming],
+    })
+
+    // Only the jobId crosses from the submit to the poll — the run id is
+    // recomputed from it, so the two halves cannot drift apart.
+    const status = await getVideoJobStatus({
+      adapter: adapter as any,
+      jobId: job.jobId,
+      threadId: 'video:slot',
+      middleware: [middleware, transforming],
+    })
+
+    // The durable url the transform stamped is what the caller gets back, so
+    // the live result and the stored record cannot disagree.
+    expect(status).toMatchObject({
+      jobId: 'job-1',
+      status: 'completed',
+      url: 'https://app.test/api/artifacts?id=a1',
+    })
+    // One run, closed exactly once, under the submission's identity.
     expect(events.finish).toHaveLength(1)
-    expect(events.finish[0]!.info.usage).toBeUndefined()
+    expect(events.finish[0]!.ctx.runId).toBe(events.start[0]!.runId)
+    expect(events.finish[0]!.ctx.runId).toBe('video:openai:job-1')
+    expect(events.finish[0]!.ctx.threadId).toBe('video:slot')
+    expect(events.finish[0]!.info.usage?.billed).toEqual({
+      quantity: 1,
+      unit: 'units',
+    })
+    expect(events.usage).toHaveLength(1)
+    expect(events.error).toHaveLength(0)
+  })
+
+  // The point of deriving the id: the poll typically happens in a LATER request
+  // with a freshly constructed adapter and no memory of the submit.
+  it('getVideoJobStatus rejoins the run from a separate adapter instance', async () => {
+    const makeAdapter = () => ({
+      kind: 'video' as const,
+      name: 'openai',
+      model: 'sora-2',
+      createVideoJob: vi.fn(async () => ({ jobId: 'job-9', model: 'sora-2' })),
+      getVideoStatus: vi.fn(async () => ({ status: 'completed' as const })),
+      getVideo: vi.fn(async () => ({ url: 'https://provider.test/v.mp4' })),
+    })
+
+    const { middleware, events } = recordingMiddleware()
+    const { jobId } = await generateVideo({
+      adapter: makeAdapter() as any,
+      prompt: 'a cat',
+      threadId: 'video:slot',
+      middleware: [middleware],
+    })
+
+    await getVideoJobStatus({
+      adapter: makeAdapter() as any,
+      jobId,
+      threadId: 'video:slot',
+      middleware: [middleware],
+    })
+
+    expect(events.finish[0]!.ctx.runId).toBe(events.start[0]!.runId)
+  })
+
+  // Generation persistence refuses a run with no scope (one filed under none can
+  // never be hydrated by one), so a poll that drops the threadId must fail loudly
+  // instead of filing the finished video somewhere unreachable. Modelled here
+  // with a middleware that refuses the same way `generationScope` does.
+  it('getVideoJobStatus surfaces a poll with an empty scope instead of degrading', async () => {
+    const scopeRequiring: GenerationMiddleware = {
+      name: 'scope-required',
+      onStart: (ctx) => {
+        if (!ctx.threadId) throw new Error('Generation persistence requires a')
+      },
+    }
+    const adapter = {
+      kind: 'video' as const,
+      name: 'openai',
+      model: 'sora-2',
+      createVideoJob: vi.fn(),
+      getVideoStatus: vi.fn(async () => ({ status: 'completed' as const })),
+      getVideo: vi.fn(async () => ({ url: 'https://provider.test/v.mp4' })),
+    }
+
+    await expect(
+      getVideoJobStatus({
+        threadId: '',
+        adapter: adapter as any,
+        jobId: 'job-1',
+        middleware: [scopeRequiring],
+      }),
+    ).rejects.toThrow('Generation persistence requires a')
+  })
+
+  it('getVideoJobStatus leaves the run open while the job is still running', async () => {
+    const { middleware, events } = recordingMiddleware()
+    const adapter = {
+      kind: 'video' as const,
+      name: 'openai',
+      model: 'sora-2',
+      createVideoJob: vi.fn(),
+      getVideoStatus: vi.fn(async () => ({
+        status: 'processing' as const,
+        progress: 42,
+      })),
+      getVideo: vi.fn(),
+    }
+
+    const status = await getVideoJobStatus({
+      adapter: adapter as any,
+      jobId: 'job-1',
+      threadId: 'video:slot',
+      middleware: [middleware],
+    })
+
+    expect(status).toMatchObject({ status: 'processing', progress: 42 })
+    // An in-progress poll is not a lifecycle event: firing hooks here would
+    // open a span (and re-resume the run) on every tick of a poll loop.
+    expect(events.start).toHaveLength(0)
+    expect(events.finish).toHaveLength(0)
+    expect(events.error).toHaveLength(0)
+    expect(adapter.getVideo).not.toHaveBeenCalled()
+  })
+
+  it('getVideoJobStatus fails the run when the job failed', async () => {
+    const { middleware, events } = recordingMiddleware()
+    const adapter = {
+      kind: 'video' as const,
+      name: 'openai',
+      model: 'sora-2',
+      createVideoJob: vi.fn(),
+      getVideoStatus: vi.fn(async () => ({
+        status: 'failed' as const,
+        error: 'moderation',
+      })),
+      getVideo: vi.fn(),
+    }
+
+    const status = await getVideoJobStatus({
+      adapter: adapter as any,
+      jobId: 'job-1',
+      threadId: 'video:slot',
+      middleware: [middleware],
+    })
+
+    expect(status.status).toBe('failed')
+    // Otherwise the record sits at `running` forever, indistinguishable from a
+    // job still being worked on.
+    expect(events.error).toHaveLength(1)
+    expect(events.error[0]!.ctx.runId).toBe('video:openai:job-1')
+    expect(events.finish).toHaveLength(0)
+  })
+
+  it('getVideoJobStatus fails the run when the url fetch fails', async () => {
+    const { middleware, events } = recordingMiddleware()
+    const adapter = {
+      kind: 'video' as const,
+      name: 'openai',
+      model: 'sora-2',
+      createVideoJob: vi.fn(),
+      getVideoStatus: vi.fn(async () => ({ status: 'completed' as const })),
+      getVideo: vi.fn(async () => {
+        throw new Error('url boom')
+      }),
+    }
+
+    const status = await getVideoJobStatus({
+      adapter: adapter as any,
+      jobId: 'job-1',
+      threadId: 'video:slot',
+      middleware: [middleware],
+    })
+
+    expect(status).toMatchObject({ status: 'failed', error: 'url boom' })
+    expect(events.error).toHaveLength(1)
+    expect(events.finish).toHaveLength(0)
+  })
+
+  it('getVideoJobStatus works without middleware', async () => {
+    const adapter = {
+      kind: 'video' as const,
+      name: 'openai',
+      model: 'sora-2',
+      createVideoJob: vi.fn(),
+      getVideoStatus: vi.fn(async () => ({ status: 'completed' as const })),
+      getVideo: vi.fn(async () => ({ url: 'https://provider.test/v.mp4' })),
+    }
+
+    const status = await getVideoJobStatus({
+      threadId: 'thread-1',
+      adapter: adapter as any,
+      jobId: 'job-1',
+    })
+
+    expect(status).toMatchObject({
+      jobId: 'job-1',
+      status: 'completed',
+      url: 'https://provider.test/v.mp4',
+    })
+  })
+
+  const streamAdapter = (body: ReadableStream<Uint8Array>) => ({
+    kind: 'video' as const,
+    name: 'openai',
+    model: 'sora-2',
+    createVideoJob: vi.fn(),
+    getVideoStatus: vi.fn(async () => ({ status: 'completed' as const })),
+    getVideo: vi.fn(async () => ({
+      jobId: 'job-1',
+      body,
+      contentType: 'video/mp4',
+    })),
+  })
+
+  it('getVideoJobStatus hands a provider stream to middleware to host', async () => {
+    const body = new Blob(['mp4-bytes']).stream()
+    let stored = ''
+    const host: GenerationMiddleware = {
+      name: 'host',
+      onStart(ctx) {
+        ctx.resultTransforms.push(async (result: any) => {
+          stored = await new Response(result.body).text()
+          const { body: _body, contentType: _type, ...rest } = result
+          return { ...rest, url: 'https://cdn.test/job-1.mp4' }
+        })
+      },
+    }
+
+    const status = await getVideoJobStatus({
+      adapter: streamAdapter(body) as any,
+      jobId: 'job-1',
+      threadId: 'video:slot',
+      middleware: [host],
+    })
+
+    expect(stored).toBe('mp4-bytes')
+    expect(status).toEqual({
+      jobId: 'job-1',
+      status: 'completed',
+      url: 'https://cdn.test/job-1.mp4',
+    })
+  })
+
+  it('getVideoJobStatus inlines an unhosted provider stream as a data URL', async () => {
+    const { middleware, events } = recordingMiddleware()
+
+    const status = await getVideoJobStatus({
+      adapter: streamAdapter(new Blob(['mp4-bytes']).stream()) as any,
+      jobId: 'job-1',
+      threadId: 'video:slot',
+      middleware: [middleware],
+    })
+
+    expect(status).toEqual({
+      jobId: 'job-1',
+      status: 'completed',
+      url: `data:video/mp4;base64,${btoa('mp4-bytes')}`,
+    })
+    expect(events.error).toHaveLength(0)
+    expect(events.finish).toHaveLength(1)
+  })
+
+  it('getVideoJobStatus fails the run when the provider stream breaks', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error('download broke'))
+      },
+    })
+    const { middleware, events } = recordingMiddleware()
+
+    const status = await getVideoJobStatus({
+      adapter: streamAdapter(body) as any,
+      jobId: 'job-1',
+      threadId: 'video:slot',
+      middleware: [middleware],
+    })
+
+    expect(status).toMatchObject({ status: 'failed', error: 'download broke' })
+    expect(events.error).toHaveLength(1)
+    expect(events.finish).toHaveLength(0)
+  })
+
+  it('generateVideo (streaming) inlines an unhosted provider stream as a data URL', async () => {
+    const adapter = {
+      ...streamAdapter(new Blob(['mp4-bytes']).stream()),
+      createVideoJob: vi.fn(async () => ({ jobId: 'job-1', model: 'sora-2' })),
+    }
+
+    const chunks: Array<{ type: string; name?: string; value?: unknown }> = []
+    for await (const chunk of generateVideo({
+      threadId: 'thread-1',
+      adapter: adapter as any,
+      prompt: 'a cat',
+      stream: true,
+      pollingInterval: 1,
+    })) {
+      chunks.push(chunk)
+    }
+
+    expect(chunks.find((c) => c.name === 'generation:result')?.value).toEqual({
+      jobId: 'job-1',
+      status: 'completed',
+      url: `data:video/mp4;base64,${btoa('mp4-bytes')}`,
+    })
+    expect(chunks.at(-1)).toMatchObject({ type: 'RUN_FINISHED' })
   })
 
   it('generateVideo (streaming) fires finish with usage at completion', async () => {
@@ -266,18 +848,19 @@ describe('generation middleware — wiring', () => {
       model: 'sora-2',
       createVideoJob: vi.fn(async () => ({ jobId: 'job-1', model: 'sora-2' })),
       getVideoStatus: vi.fn(async () => ({ status: 'completed' as const })),
-      getVideoUrl: vi.fn(async () => ({
+      getVideo: vi.fn(async () => ({
         url: 'https://example.com/v.mp4',
         usage: {
           promptTokens: 0,
           completionTokens: 0,
           totalTokens: 0,
-          unitsBilled: 1,
+          billed: { quantity: 1, unit: 'units' },
         },
       })),
     }
 
     const stream = generateVideo({
+      threadId: 'thread-1',
       adapter: adapter as any,
       prompt: 'a cat',
       stream: true,
@@ -290,8 +873,68 @@ describe('generation middleware — wiring', () => {
 
     expect(events.start[0]!.activity).toBe('video')
     expect(events.finish).toHaveLength(1)
-    expect(events.finish[0]!.info.usage?.unitsBilled).toBe(1)
+    expect(events.finish[0]!.info.usage?.billed).toEqual({
+      quantity: 1,
+      unit: 'units',
+    })
     expect(events.error).toHaveLength(0)
+  })
+
+  // Regression: video was the only media activity that never applied result
+  // transforms, and never put the caller's threadId/runId on the middleware
+  // context. Persistence registers artifact capture AND the run-record result
+  // write as result transforms, so both silently no-opped — a completed video
+  // stored no result, no artifacts, and no thread link, and therefore restored
+  // as nothing on reload.
+  it('generateVideo (streaming) applies result transforms and carries identity', async () => {
+    const adapter = {
+      kind: 'video' as const,
+      name: 'openai',
+      model: 'sora-2',
+      createVideoJob: vi.fn(async () => ({ jobId: 'job-1', model: 'sora-2' })),
+      getVideoStatus: vi.fn(async () => ({ status: 'completed' as const })),
+      getVideo: vi.fn(async () => ({ url: 'https://provider.test/v.mp4' })),
+    }
+
+    const seen: Array<GenerationMiddlewareContext> = []
+    const transforming: GenerationMiddleware = {
+      name: 'transform',
+      onStart: (ctx) => {
+        seen.push(ctx)
+        ctx.resultTransforms?.push((result) => ({
+          ...(result as Record<string, unknown>),
+          url: 'https://app.test/api/artifacts?id=a1',
+        }))
+      },
+    }
+
+    const chunks: Array<{ type: string; name?: string; value?: unknown }> = []
+    for await (const chunk of generateVideo({
+      adapter: adapter as any,
+      prompt: 'a cat',
+      stream: true,
+      pollingInterval: 1,
+      threadId: 'video:slot',
+      runId: 'run-abc',
+      middleware: [transforming],
+    })) {
+      chunks.push(chunk as { type: string; name?: string; value?: unknown })
+    }
+
+    // The transform rewrote the terminal result the consumer actually sees.
+    const terminal = chunks.find((c) => c.name === 'generation:result')
+    expect(terminal?.value).toMatchObject({
+      jobId: 'job-1',
+      status: 'completed',
+      url: 'https://app.test/api/artifacts?id=a1',
+    })
+
+    // Identity reached the middleware, not just the wire chunks.
+    expect(seen[0]).toMatchObject({
+      activity: 'video',
+      threadId: 'video:slot',
+      runId: 'run-abc',
+    })
   })
 
   it('generateVideo (streaming) fires error when the job fails', async () => {
@@ -305,10 +948,11 @@ describe('generation middleware — wiring', () => {
         status: 'failed' as const,
         error: 'generation failed',
       })),
-      getVideoUrl: vi.fn(),
+      getVideo: vi.fn(),
     }
 
     const stream = generateVideo({
+      threadId: 'thread-1',
       adapter: adapter as any,
       prompt: 'a cat',
       stream: true,
@@ -347,10 +991,11 @@ describe('generation middleware — wiring', () => {
         status: 'failed' as const,
         error: 'generation failed',
       })),
-      getVideoUrl: vi.fn(),
+      getVideo: vi.fn(),
     }
 
     const stream = generateVideo({
+      threadId: 'thread-1',
       adapter: adapter as any,
       prompt: 'a cat',
       stream: true,
@@ -383,10 +1028,11 @@ describe('generation middleware — wiring', () => {
       createVideoJob: vi.fn(async () => ({ jobId: 'job-1', model: 'sora-2' })),
       // Never completes, so the poll loop keeps running until we abandon it.
       getVideoStatus: vi.fn(async () => ({ status: 'in_progress' as const })),
-      getVideoUrl: vi.fn(),
+      getVideo: vi.fn(),
     }
 
     const stream = generateVideo({
+      threadId: 'thread-1',
       adapter: adapter as any,
       prompt: 'a cat',
       stream: true,
@@ -415,18 +1061,19 @@ describe('generation middleware — wiring', () => {
       model: 'sora-2',
       createVideoJob: vi.fn(async () => ({ jobId: 'job-1', model: 'sora-2' })),
       getVideoStatus: vi.fn(async () => ({ status: 'completed' as const })),
-      getVideoUrl: vi.fn(async () => ({
+      getVideo: vi.fn(async () => ({
         url: 'https://example.com/v.mp4',
         usage: {
           promptTokens: 0,
           completionTokens: 0,
           totalTokens: 0,
-          unitsBilled: 1,
+          billed: { quantity: 1, unit: 'units' },
         },
       })),
     }
 
     const stream = generateVideo({
+      threadId: 'thread-1',
       adapter: adapter as any,
       prompt: 'a cat',
       stream: true,
@@ -440,10 +1087,225 @@ describe('generation middleware — wiring', () => {
 
     expect(events.start).toHaveLength(1)
     expect(events.finish).toHaveLength(1)
-    expect(events.finish[0]!.info.usage?.unitsBilled).toBe(1)
+    expect(events.finish[0]!.info.usage?.billed).toEqual({
+      quantity: 1,
+      unit: 'units',
+    })
     // Abandoning after success must not be reported as a cancellation.
     expect(events.abort).toHaveLength(0)
     expect(events.error).toHaveLength(0)
+  })
+
+  // `summarize` used to accept no middleware at all, so `useSummarize({
+  // persistence: true })` type-checked but no library path could ever write its
+  // run record — a promise nothing could keep.
+  it('summarize (non-streaming) fires start/usage/finish and transforms the result', async () => {
+    const { middleware, events } = recordingMiddleware()
+    const transforming: GenerationMiddleware = {
+      name: 'transform',
+      onStart: (ctx) => {
+        ctx.resultTransforms.push((result) => ({
+          ...(result as Record<string, unknown>),
+          summary: 'rewritten',
+        }))
+      },
+    }
+    const adapter = {
+      kind: 'summarize' as const,
+      name: 'openai',
+      model: 'gpt-5.5',
+      summarize: vi.fn(async () => ({
+        id: 'sum-1',
+        model: 'gpt-5.5',
+        summary: 'the original',
+        usage: { promptTokens: 10, completionTokens: 3, totalTokens: 13 },
+      })),
+    }
+
+    const result = await summarize({
+      adapter: adapter as any,
+      text: 'a long article',
+      threadId: 'summary:slot',
+      runId: 'run-1',
+      middleware: [middleware, transforming],
+    })
+
+    expect(result.summary).toBe('rewritten')
+    expect(events.start).toHaveLength(1)
+    expect(events.start[0]!.activity).toBe('summarize')
+    expect(events.start[0]!.threadId).toBe('summary:slot')
+    expect(events.start[0]!.runId).toBe('run-1')
+    expect(events.usage[0]!.info.totalTokens).toBe(13)
+    expect(events.finish).toHaveLength(1)
+    expect(events.error).toHaveLength(0)
+  })
+
+  it('summarize (non-streaming) fires error and rethrows', async () => {
+    const { middleware, events } = recordingMiddleware()
+    const adapter = {
+      kind: 'summarize' as const,
+      name: 'openai',
+      model: 'gpt-5.5',
+      summarize: vi.fn(async () => {
+        throw new Error('summarize boom')
+      }),
+    }
+
+    await expect(
+      summarize({
+        adapter: adapter as any,
+        text: 'a long article',
+        threadId: 'summary:slot',
+        middleware: [middleware],
+        debug: false,
+      }),
+    ).rejects.toThrow('summarize boom')
+
+    expect(events.error).toHaveLength(1)
+    expect(events.finish).toHaveLength(0)
+  })
+
+  it('summarize (streaming, native) transforms the terminal result chunk', async () => {
+    const { middleware, events } = recordingMiddleware()
+    const transforming: GenerationMiddleware = {
+      name: 'transform',
+      onStart: (ctx) => {
+        ctx.resultTransforms.push((result) => ({
+          ...(result as Record<string, unknown>),
+          summary: 'rewritten',
+        }))
+      },
+    }
+    const adapter = {
+      kind: 'summarize' as const,
+      name: 'openai',
+      model: 'gpt-5.5',
+      summarize: vi.fn(),
+      summarizeStream: vi.fn(async function* () {
+        yield { type: 'TEXT_MESSAGE_CONTENT', delta: 'the ', timestamp: 1 }
+        yield { type: 'TEXT_MESSAGE_CONTENT', delta: 'original', timestamp: 2 }
+        yield {
+          type: 'CUSTOM',
+          name: 'generation:result',
+          value: {
+            id: 'sum-1',
+            model: 'gpt-5.5',
+            summary: 'the original',
+            usage: { promptTokens: 10, completionTokens: 3, totalTokens: 13 },
+          },
+          timestamp: 3,
+        }
+        yield { type: 'RUN_FINISHED', runId: 'run-1', timestamp: 4 }
+      }),
+    }
+
+    const chunks: Array<{ type: string; name?: string; value?: unknown }> = []
+    for await (const chunk of summarize({
+      adapter: adapter as any,
+      text: 'a long article',
+      stream: true,
+      threadId: 'summary:slot',
+      runId: 'run-1',
+      middleware: [middleware, transforming],
+    })) {
+      chunks.push(chunk as { type: string; name?: string; value?: unknown })
+    }
+
+    // The rewritten result is what the client sees, so it matches the record.
+    const terminal = chunks.find((c) => c.name === 'generation:result')
+    expect(terminal?.value).toMatchObject({ summary: 'rewritten' })
+    expect(events.start[0]!.activity).toBe('summarize')
+    expect(events.start[0]!.threadId).toBe('summary:slot')
+    expect(events.finish).toHaveLength(1)
+    expect(events.finish[0]!.info.usage?.totalTokens).toBe(13)
+    expect(events.abort).toHaveLength(0)
+  })
+
+  it('summarize (streaming, native) fires abort when the consumer walks away', async () => {
+    const { middleware, events } = recordingMiddleware()
+    const adapter = {
+      kind: 'summarize' as const,
+      name: 'openai',
+      model: 'gpt-5.5',
+      summarize: vi.fn(),
+      summarizeStream: vi.fn(async function* () {
+        yield { type: 'TEXT_MESSAGE_CONTENT', delta: 'partial', timestamp: 1 }
+        yield { type: 'TEXT_MESSAGE_CONTENT', delta: ' more', timestamp: 2 }
+      }),
+    }
+
+    for await (const _chunk of summarize({
+      adapter: adapter as any,
+      text: 'a long article',
+      stream: true,
+      threadId: 'summary:slot',
+      middleware: [middleware],
+    })) {
+      break
+    }
+
+    expect(events.abort).toHaveLength(1)
+    expect(events.finish).toHaveLength(0)
+  })
+
+  it('summarize (streaming, fallback) runs middleware around the one-shot call', async () => {
+    const { middleware, events } = recordingMiddleware()
+    const adapter = {
+      kind: 'summarize' as const,
+      name: 'openai',
+      model: 'gpt-5.5',
+      summarize: vi.fn(async () => ({
+        id: 'sum-1',
+        model: 'gpt-5.5',
+        summary: 'the original',
+        usage: { promptTokens: 10, completionTokens: 3, totalTokens: 13 },
+      })),
+    }
+
+    const chunks: Array<{ type: string; name?: string }> = []
+    for await (const chunk of summarize({
+      adapter: adapter as any,
+      text: 'a long article',
+      stream: true,
+      threadId: 'summary:slot',
+      middleware: [middleware],
+    })) {
+      chunks.push(chunk as { type: string; name?: string })
+    }
+
+    expect(chunks.map((c) => c.type)).toContain('RUN_FINISHED')
+    expect(events.start).toHaveLength(1)
+    expect(events.finish).toHaveLength(1)
+    // `threadId` stays the caller's; only `runId` comes from the wire identity,
+    // so the run is filed in a slot a client can actually hydrate.
+    expect(events.start[0]!.threadId).toBe('summary:slot')
+    expect(typeof events.start[0]!.runId).toBe('string')
+  })
+
+  it('summarize with otelMiddleware produces a summarize span', async () => {
+    const { tracer, spans } = createFakeTracer()
+    const adapter = {
+      kind: 'summarize' as const,
+      name: 'openai',
+      model: 'gpt-5.5',
+      summarize: vi.fn(async () => ({
+        id: 'sum-1',
+        model: 'gpt-5.5',
+        summary: 'short',
+        usage: { promptTokens: 10, completionTokens: 3, totalTokens: 13 },
+      })),
+    }
+
+    await summarize({
+      threadId: 'thread-1',
+      adapter: adapter as any,
+      text: 'a long article',
+      middleware: [otelMiddleware({ tracer })],
+    })
+
+    expect(spans).toHaveLength(1)
+    expect(spans[0]!.attributes['gen_ai.operation.name']).toBe('summarize')
+    expect(spans[0]!.ended).toBe(true)
   })
 
   it('a throwing middleware hook propagates (matches chat semantics)', async () => {
@@ -466,6 +1328,7 @@ describe('generation middleware — wiring', () => {
     // middleware hooks propagate so a misbehaving middleware surfaces loudly.
     await expect(
       generateImage({
+        threadId: 'thread-1',
         adapter: adapter as any,
         prompt: 'x',
         middleware: [brokenMiddleware],

@@ -1,5 +1,19 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/TanStack/ai/main/media/header_ai.png" alt="TanStack AI" />
+  <picture>
+    <source
+      media="(prefers-color-scheme: dark)"
+      srcset="https://tanstack.com/api/readme/ai.png?framework=angular&theme=dark"
+    />
+    <source
+      media="(prefers-color-scheme: light)"
+      srcset="https://tanstack.com/api/readme/ai.png?framework=angular"
+    />
+    <img
+      src="https://tanstack.com/api/readme/ai.png?framework=angular"
+      alt="TanStack Angular AI"
+      width="900"
+    />
+  </picture>
 </div>
 
 <br />
@@ -73,6 +87,7 @@ export class ChatComponent {
   // injectChat is called in a field initializer — this is a valid injection context.
   chat = injectChat({
     connection: fetchServerSentEvents('/api/chat'),
+    threadId: 'support-42',
   })
 }
 ```
@@ -88,7 +103,7 @@ All state is exposed as Angular `Signal`s. Read them by calling them as function
 | `chat.isSubscribed()`     | `boolean`            | Whether a live (SSE push) session is active |
 | `chat.connectionStatus()` | `ConnectionStatus`   | Transport connection status                 |
 
-Available methods on the return value: `sendMessage`, `append`, `reload`, `stop`, `clear`, `setMessages`, `addToolResult`, `addToolApprovalResponse`.
+Available methods on the return value: `sendMessage`, `append`, `reload`, `stop`, `clear`, `setMessages`, `addToolResult`.
 
 ## Server endpoint
 
@@ -104,6 +119,7 @@ export async function POST(request: Request) {
   const stream = chat({
     adapter: openaiText('gpt-5.5'),
     messages: body.messages,
+    threadId: body.threadId,
   })
 
   return toServerSentEventsResponse(stream)
@@ -132,20 +148,29 @@ Angular's DI system requires that `inject()` is called during component construc
 ```typescript
 // Field initializer (recommended)
 export class MyComponent {
-  chat = injectChat({ connection: fetchServerSentEvents('/api/chat') })
+  chat = injectChat({
+    connection: fetchServerSentEvents('/api/chat'),
+    threadId: 'support-42',
+  })
 }
 
 // Constructor
 export class MyComponent {
   chat: ReturnType<typeof injectChat>
   constructor() {
-    this.chat = injectChat({ connection: fetchServerSentEvents('/api/chat') })
+    this.chat = injectChat({
+      connection: fetchServerSentEvents('/api/chat'),
+      threadId: 'support-42',
+    })
   }
 }
 
 // Inside runInInjectionContext
 const chat = runInInjectionContext(injector, () =>
-  injectChat({ connection: fetchServerSentEvents('/api/chat') }),
+  injectChat({
+    connection: fetchServerSentEvents('/api/chat'),
+    threadId: 'support-42',
+  }),
 )
 ```
 

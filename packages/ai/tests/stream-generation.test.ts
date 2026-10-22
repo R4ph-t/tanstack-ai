@@ -5,6 +5,7 @@ import {
   generateSpeech,
   generateTranscription,
 } from '../src/index'
+import { tanstackMetadata } from '../src/utilities/merge-metadata'
 import type { StreamChunk, VideoStatusResult } from '../src/types'
 
 // Helper to collect all chunks from an async iterable
@@ -48,6 +49,7 @@ describe('generateImage({ stream: true })', () => {
 
     const chunks = await collectChunks(
       generateImage({
+        threadId: 'thread-1',
         adapter,
         prompt: 'A beautiful sunset',
         stream: true,
@@ -71,7 +73,8 @@ describe('generateImage({ stream: true })', () => {
 
     expect(chunks[2]!.type).toBe('RUN_FINISHED')
     if (chunks[2]!.type === 'RUN_FINISHED') {
-      expect(chunks[2]!.finishReason).toBe('stop')
+      expect(chunks[2]!).not.toHaveProperty('finishReason')
+      expect(tanstackMetadata(chunks[2]!)?.finishReason).toBe('stop')
     }
   })
 
@@ -84,6 +87,7 @@ describe('generateImage({ stream: true })', () => {
 
     const chunks = await collectChunks(
       generateImage({
+        threadId: 'thread-1',
         adapter,
         prompt: 'A beautiful sunset',
         stream: true,
@@ -96,7 +100,7 @@ describe('generateImage({ stream: true })', () => {
 
     expect(chunks[1]!.type).toBe('RUN_ERROR')
     if (chunks[1]!.type === 'RUN_ERROR') {
-      expect(chunks[1]!.error!.message).toBe('Image generation failed')
+      expect(chunks[1]!.message).toBe('Image generation failed')
     }
   })
 
@@ -115,6 +119,7 @@ describe('generateImage({ stream: true })', () => {
 
     const chunks = await collectChunks(
       generateImage({
+        threadId: 'thread-1',
         adapter,
         prompt: 'Multiple images',
         stream: true,
@@ -136,6 +141,7 @@ describe('generateImage({ stream: true })', () => {
 
     const chunks = await collectChunks(
       generateImage({
+        threadId: 'thread-1',
         adapter,
         prompt: 'Timestamp test',
         stream: true,
@@ -201,7 +207,7 @@ describe('generateVideo({ stream: true })', () => {
         }
       }),
 
-      getVideoUrl: vi.fn(async () => ({
+      getVideo: vi.fn(async () => ({
         jobId: 'job-123',
         url: 'https://example.com/video.mp4',
         expiresAt: new Date('2030-01-01'),
@@ -214,6 +220,7 @@ describe('generateVideo({ stream: true })', () => {
 
     const chunks = await collectChunks(
       generateVideo({
+        threadId: 'thread-1',
         adapter,
         prompt: 'test',
         stream: true,
@@ -257,6 +264,7 @@ describe('generateVideo({ stream: true })', () => {
 
     const chunks = await collectChunks(
       generateVideo({
+        threadId: 'thread-1',
         adapter,
         prompt: 'test',
         stream: true,
@@ -269,7 +277,7 @@ describe('generateVideo({ stream: true })', () => {
 
     const error = chunks.find((c) => c.type === 'RUN_ERROR')
     if (error?.type === 'RUN_ERROR') {
-      expect(error.error!.message).toBe('Video processing error')
+      expect(error.message).toBe('Video processing error')
     }
   })
 
@@ -278,6 +286,7 @@ describe('generateVideo({ stream: true })', () => {
 
     await collectChunks(
       generateVideo({
+        threadId: 'thread-1',
         adapter,
         prompt: 'A flying car',
         size: '1280x720',
@@ -303,6 +312,7 @@ describe('generateVideo({ stream: true })', () => {
 
     const chunks = await collectChunks(
       generateVideo({
+        threadId: 'thread-1',
         adapter,
         prompt: 'test',
         stream: true,
@@ -314,7 +324,7 @@ describe('generateVideo({ stream: true })', () => {
     const error = chunks.find((c) => c.type === 'RUN_ERROR')
     expect(error).toBeDefined()
     if (error?.type === 'RUN_ERROR') {
-      expect(error.error!.message).toBe('Video generation timed out')
+      expect(error.message).toBe('Video generation timed out')
     }
   })
 
@@ -326,6 +336,7 @@ describe('generateVideo({ stream: true })', () => {
 
     const chunks = await collectChunks(
       generateVideo({
+        threadId: 'thread-1',
         adapter,
         prompt: 'test',
         stream: true,
@@ -342,18 +353,19 @@ describe('generateVideo({ stream: true })', () => {
 
     const error = chunks.find((c) => c.type === 'RUN_ERROR')
     if (error?.type === 'RUN_ERROR') {
-      expect(error.error!.message).toBe('Job creation failed')
+      expect(error.message).toBe('Job creation failed')
     }
   })
 
-  it('should emit RUN_ERROR when getVideoUrl throws after completed status', async () => {
+  it('should emit RUN_ERROR when getVideo throws after completed status', async () => {
     const adapter = createMockVideoAdapter({ pollsBeforeComplete: 1 })
-    adapter.getVideoUrl = vi.fn(async () => {
+    adapter.getVideo = vi.fn(async () => {
       throw new Error('Failed to retrieve video URL')
     })
 
     const chunks = await collectChunks(
       generateVideo({
+        threadId: 'thread-1',
         adapter,
         prompt: 'test',
         stream: true,
@@ -364,7 +376,7 @@ describe('generateVideo({ stream: true })', () => {
     const error = chunks.find((c) => c.type === 'RUN_ERROR')
     expect(error).toBeDefined()
     if (error?.type === 'RUN_ERROR') {
-      expect(error.error!.message).toBe('Failed to retrieve video URL')
+      expect(error.message).toBe('Failed to retrieve video URL')
     }
   })
 
@@ -378,6 +390,7 @@ describe('generateVideo({ stream: true })', () => {
 
     const chunks = await collectChunks(
       generateVideo({
+        threadId: 'thread-1',
         adapter,
         prompt: 'test',
         stream: true,
@@ -388,7 +401,7 @@ describe('generateVideo({ stream: true })', () => {
     const error = chunks.find((c) => c.type === 'RUN_ERROR')
     expect(error).toBeDefined()
     if (error?.type === 'RUN_ERROR') {
-      expect(error.error!.message).toBe('Content policy violation')
+      expect(error.message).toBe('Content policy violation')
     }
   })
 
@@ -401,6 +414,7 @@ describe('generateVideo({ stream: true })', () => {
 
     const chunks = await collectChunks(
       generateVideo({
+        threadId: 'thread-1',
         adapter,
         prompt: 'test',
         stream: true,
@@ -411,7 +425,7 @@ describe('generateVideo({ stream: true })', () => {
     const error = chunks.find((c) => c.type === 'RUN_ERROR')
     expect(error).toBeDefined()
     if (error?.type === 'RUN_ERROR') {
-      expect(error.error!.message).toBe('Video generation failed')
+      expect(error.message).toBe('Video generation failed')
     }
   })
 })
@@ -449,6 +463,7 @@ describe('generateSpeech({ stream: true })', () => {
 
     const chunks = await collectChunks(
       generateSpeech({
+        threadId: 'thread-1',
         adapter,
         text: 'Hello world',
         stream: true,
@@ -475,7 +490,8 @@ describe('generateSpeech({ stream: true })', () => {
 
     expect(chunks[2]!.type).toBe('RUN_FINISHED')
     if (chunks[2]!.type === 'RUN_FINISHED') {
-      expect(chunks[2]!.finishReason).toBe('stop')
+      expect(chunks[2]!).not.toHaveProperty('finishReason')
+      expect(tanstackMetadata(chunks[2]!)?.finishReason).toBe('stop')
     }
   })
 
@@ -488,6 +504,7 @@ describe('generateSpeech({ stream: true })', () => {
 
     const chunks = await collectChunks(
       generateSpeech({
+        threadId: 'thread-1',
         adapter,
         text: 'Hello world',
         stream: true,
@@ -500,7 +517,7 @@ describe('generateSpeech({ stream: true })', () => {
 
     expect(chunks[1]!.type).toBe('RUN_ERROR')
     if (chunks[1]!.type === 'RUN_ERROR') {
-      expect(chunks[1]!.error!.message).toBe('Speech generation failed')
+      expect(chunks[1]!.message).toBe('Speech generation failed')
     }
   })
 })
@@ -537,6 +554,7 @@ describe('generateTranscription({ stream: true })', () => {
 
     const chunks = await collectChunks(
       generateTranscription({
+        threadId: 'thread-1',
         adapter,
         audio: 'base64-audio-data',
         stream: true,
@@ -562,7 +580,8 @@ describe('generateTranscription({ stream: true })', () => {
 
     expect(chunks[2]!.type).toBe('RUN_FINISHED')
     if (chunks[2]!.type === 'RUN_FINISHED') {
-      expect(chunks[2]!.finishReason).toBe('stop')
+      expect(chunks[2]!).not.toHaveProperty('finishReason')
+      expect(tanstackMetadata(chunks[2]!)?.finishReason).toBe('stop')
     }
   })
 
@@ -575,6 +594,7 @@ describe('generateTranscription({ stream: true })', () => {
 
     const chunks = await collectChunks(
       generateTranscription({
+        threadId: 'thread-1',
         adapter,
         audio: 'base64-audio-data',
         stream: true,
@@ -587,7 +607,7 @@ describe('generateTranscription({ stream: true })', () => {
 
     expect(chunks[1]!.type).toBe('RUN_ERROR')
     if (chunks[1]!.type === 'RUN_ERROR') {
-      expect(chunks[1]!.error!.message).toBe('Transcription failed')
+      expect(chunks[1]!.message).toBe('Transcription failed')
     }
   })
 })

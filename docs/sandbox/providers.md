@@ -2,205 +2,166 @@
 title: Providers
 id: providers
 order: 3
-description: "Pick and configure where a TanStack AI sandbox runs — local process, Docker, Daytona, or Vercel — and understand the capabilities each one exposes."
+description: "Pick where a TanStack AI sandbox runs (local process, Docker container, Docker Sandboxes microVM, Daytona, Vercel, Sprites, Upstash Box, Blaxel, E2B, boxd, or Railway), install it, and configure it."
 ---
 
-A provider owns the isolation primitive: where the harness actually runs. Every
-provider implements the same `SandboxProvider` / `SandboxHandle` contract, so the
-[workspace](./workspace) you hand the agent and the [policy](./policy) that guards
-it are provider-agnostic. Pick a provider for the isolation, auth, and
-snapshot/resume behaviour you need; the rest of your sandbox definition stays the
-same.
+A provider is where the sandbox runs: a local process for a fast loop, or an isolated VM in production.
 
-> The provider is _where_ the agent runs. For _which_ agent runs — Grok Build,
-> Claude Code, Codex, OpenCode, or any ACP agent via `acpCompatible` — see
-> [Harnesses](./harnesses).
+A provider is that place. Every provider has the same contract, so your [workspace](./workspace), [policy](./policy), and harness stay the same when you change the provider.
 
-## Choosing a provider
+## Set up a provider
 
-| Provider | Package | Isolation | Notes |
+1. Pick a row from the table.
+
+| Provider | Package | Isolation | Needs |
 | --- | --- | --- | --- |
-| Local process | `@tanstack/ai-sandbox-local-process` | none (host) | The fast, no-Docker dev loop. Trusted/dev use only. |
-| Docker | `@tanstack/ai-sandbox-docker` | container | Real isolation; commit-based snapshots, fork, resume-by-id. |
-| Daytona | `@tanstack/ai-sandbox-daytona` | cloud sandbox | Managed [Daytona](https://www.daytona.io/) sandboxes; port preview links, resume-by-id. Needs `DAYTONA_API_KEY`. |
-| Vercel | `@tanstack/ai-sandbox-vercel` | microVM | Managed [Vercel Sandbox](https://vercel.com/docs/sandbox) microVMs; exposed-port domains, resume-by-id (persistent). Needs `VERCEL_TOKEN` + team/project. |
-| Sprites | `@tanstack/ai-sandbox-sprites` | stateful sandbox | Managed [Sprites](https://sprites.dev) (Fly.io) sandboxes; durable filesystem, in-place checkpoints, single proxied public-URL port, resume-by-id. Needs `SPRITES_API_KEY`. |
+| Local process | `@tanstack/ai-sandbox-local-process` | None (your host) | Nothing. For trusted dev work only. |
+| Docker | `@tanstack/ai-sandbox-docker` | Container | Docker running. |
+| Docker Sandboxes (`sbx`) | `@tanstack/ai-sandbox-docker` | microVM | The `sbx` CLI, `sbx login`, and a hypervisor. |
+| [Daytona](https://www.daytona.io/) | `@tanstack/ai-sandbox-daytona` | Cloud sandbox | `DAYTONA_API_KEY` |
+| [Vercel](https://vercel.com/docs/sandbox) | `@tanstack/ai-sandbox-vercel` | microVM | `VERCEL_TOKEN`, a team, and a project. |
+| [Sprites](https://sprites.dev) | `@tanstack/ai-sandbox-sprites` | Stateful sandbox | `SPRITES_API_KEY` |
+| [Upstash Box](https://github.com/upstash/box) | `@tanstack/ai-sandbox-upstash-box` | Cloud sandbox | `UPSTASH_BOX_API_KEY` |
+| [Blaxel](https://blaxel.ai) | `@tanstack/ai-sandbox-blaxel` | Cloud sandbox | `BL_API_KEY` and `BL_WORKSPACE`, or a Blaxel CLI login. |
+| [E2B](https://e2b.dev) | `@tanstack/ai-sandbox-e2b` | microVM | `E2B_API_KEY` |
+| [boxd](https://boxd.sh) | `@tanstack/ai-sandbox-boxd` | microVM | `BOXD_API_KEY` and `BOXD_ORG`. |
+| [Railway](https://railway.com) | `@tanstack/ai-sandbox-railway` | microVM | `RAILWAY_API_TOKEN` or `RAILWAY_TOKEN`, and an environment. |
 
-Each provider is its own package, and the constructor is the only thing that
-differs between them:
+2. Install its package. This example installs the Docker provider. Use the package from your row.
+
+<!-- ::start:tabs variant="package-manager" mode="install" -->
+
+react: @tanstack/ai-sandbox-docker
+vue: @tanstack/ai-sandbox-docker
+solid: @tanstack/ai-sandbox-docker
+svelte: @tanstack/ai-sandbox-docker
+preact: @tanstack/ai-sandbox-docker
+angular: @tanstack/ai-sandbox-docker
+vanilla: @tanstack/ai-sandbox-docker
+octane: @tanstack/ai-sandbox-docker
+
+<!-- ::end:tabs -->
+
+3. Set the env vars from the "Needs" column.
+
+4. Pass the provider to `defineSandbox`:
+
+```ts
+import {
+  createSecrets,
+  defineSandbox,
+  defineWorkspace,
+  githubRepo,
+} from '@tanstack/ai-sandbox'
+import { dockerSandbox } from '@tanstack/ai-sandbox-docker'
+
+export const repoSandbox = defineSandbox({
+  id: 'repo-agent',
+  provider: dockerSandbox({ image: 'node:22' }),
+  workspace: defineWorkspace({
+    source: githubRepo({ repo: 'owner/app' }),
+    setup: ['corepack enable', 'pnpm install'],
+    secrets: createSecrets({
+      XAI_API_KEY: process.env.XAI_API_KEY ?? '',
+    }),
+  }),
+})
+```
+
+To change the provider, change only the `provider` line. Here is the constructor for each one:
 
 ```ts
 import { localProcessSandbox } from '@tanstack/ai-sandbox-local-process'
-import { dockerSandbox } from '@tanstack/ai-sandbox-docker'
+import { dockerSandbox, sbxSandbox } from '@tanstack/ai-sandbox-docker'
 import { daytonaSandbox } from '@tanstack/ai-sandbox-daytona'
 import { vercelSandbox } from '@tanstack/ai-sandbox-vercel'
+import { spritesSandbox } from '@tanstack/ai-sandbox-sprites'
+import { upstashBoxSandbox } from '@tanstack/ai-sandbox-upstash-box'
+import { blaxelSandbox } from '@tanstack/ai-sandbox-blaxel'
+import { e2bSandbox } from '@tanstack/ai-sandbox-e2b'
+import { boxdSandbox } from '@tanstack/ai-sandbox-boxd'
+import { railwaySandbox } from '@tanstack/ai-sandbox-railway'
 
 const dev = localProcessSandbox() // runs on your host
-const isolated = dockerSandbox({ image: 'node:22' }) // runs in a container
-const daytona = daytonaSandbox({ apiKey: process.env.DAYTONA_API_KEY }) // managed cloud sandbox
-const vercel = vercelSandbox({ runtime: 'node24' }) // managed Vercel microVM
-```
-
-> Cloud providers (Daytona, Vercel) run as remote VMs. When you drive them from
-> your laptop, [tools](./tools) bridged from `chat()` can't dial your machine's
-> `localhost` — you need the bridge tunnel. See the [tools guide](./tools) for the
-> ngrok subpath, and the [Cloudflare guide](./cloudflare) for the edge-native
-> co-located model.
-
-## Local process
-
-```ts
-import { localProcessSandbox } from '@tanstack/ai-sandbox-local-process'
-
-const dev = localProcessSandbox()
-```
-
-- **Isolation:** none. The harness runs directly on your host, inheriting your
-  host environment. Use it for trusted/dev work only — there is no boundary
-  between the agent and your machine.
-- **Auth / env:** inherits the host environment. No API key injection is required
-  if your host CLI is already logged in.
-- **Snapshot / resume:** no snapshots and no durable resume-by-id; each run
-  re-creates and re-bootstraps under the same identity. The snapshot step is
-  skipped silently (see [Capabilities](#capabilities)).
-
-### Use a host CLI's own auth (`scrubEnv`)
-
-Because `localProcessSandbox` runs the harness on your host, it inherits your host
-environment — including any API keys exported there. Use `scrubEnv` to remove
-variables before spawning, so the host CLI falls back to its own logged-in
-session instead of billing the API. For example, drop `XAI_API_KEY` so Grok Build
-uses your **grok.com login** (the same trick works for Claude Code with
-`ANTHROPIC_API_KEY` → `claude login`):
-
-```ts
-import { localProcessSandbox } from '@tanstack/ai-sandbox-local-process'
-
-const hostLogin = localProcessSandbox({ scrubEnv: ['XAI_API_KEY'] })
-```
-
-> Only local-process can do this — it is the only provider that runs your host
-> CLI. Isolated and cloud providers have no host login, so they always use an
-> injected API key (supplied as a workspace secret).
-
-## Docker
-
-```ts
-import { dockerSandbox } from '@tanstack/ai-sandbox-docker'
-
-const isolated = dockerSandbox({ image: 'node:22' })
-```
-
-- **Isolation:** a real container boundary between the agent and your host.
-- **Auth / env:** no host login; provide credentials as workspace secrets, which
-  are injected into the container env at create/resume. The agent reaches host
-  tools over `host.docker.internal` (see [tools](./tools)).
-- **Snapshot / resume:** full commit-based snapshots, `fork`, and resume-by-id.
-  Bootstrap snapshots after `setup` completes, so subsequent runs resume from the
-  snapshot instead of re-running setup.
-
-## Daytona
-
-```ts
-import { daytonaSandbox } from '@tanstack/ai-sandbox-daytona'
-
+const isolated = dockerSandbox({ image: 'node:22' }) // container
+const microvm = sbxSandbox() // Docker Sandboxes microVM
 const daytona = daytonaSandbox({ apiKey: process.env.DAYTONA_API_KEY })
-```
-
-- **Isolation:** a managed cloud sandbox — a remote VM you don't run yourself.
-- **Auth / env:** needs `DAYTONA_API_KEY`. Harness credentials are injected as
-  workspace secrets; there is no host login to fall back on.
-- **Snapshot / resume:** no snapshots; resume-by-id reconnects to a still-running
-  sandbox (not a restored point-in-time snapshot), plus port preview links for
-  live previews.
-- **Bridge:** the sandbox is remote, so a [bridged tool](./tools) call can't reach
-  your laptop's `localhost`. In local dev, tunnel the bridge (see [tools](./tools));
-  a deployed orchestrator is reachable out of the box.
-
-## Vercel
-
-```ts
-import { vercelSandbox } from '@tanstack/ai-sandbox-vercel'
-
 const vercel = vercelSandbox({ runtime: 'node24' })
-```
-
-- **Isolation:** a managed microVM (Vercel Sandbox).
-- **Auth / env:** needs `VERCEL_TOKEN` plus a team/project. Harness credentials
-  are injected as workspace secrets.
-- **Snapshot / resume:** persistent resume-by-id with a durable filesystem, plus
-  exposed-port domains for previews.
-- **Bridge:** like Daytona, a remote VM — bridged tools need the tunnel in local
-  dev (see [tools](./tools)).
-
-## Sprites
-
-```ts
-import { spritesSandbox } from '@tanstack/ai-sandbox-sprites'
-
 const sprites = spritesSandbox({ apiKey: process.env.SPRITES_API_KEY })
+const box = upstashBoxSandbox({ apiKey: process.env.UPSTASH_BOX_API_KEY })
+const blaxel = blaxelSandbox() // uses the API key or the CLI login
+const e2b = e2bSandbox() // reads E2B_API_KEY
+const boxd = boxdSandbox({ org: 'acme' }) // reads BOXD_API_KEY
+const railway = railwaySandbox() // reads RAILWAY_TOKEN and RAILWAY_ENVIRONMENT_ID
 ```
 
-- **Isolation:** a managed [Sprites](https://sprites.dev) stateful sandbox
-  (Fly.io) — a remote VM you don't run yourself.
-- **Auth / env:** needs `SPRITES_API_KEY` (token form
-  `org/projectNumber/tokenId/secret`); override the control-plane URL with
-  `apiUrl` / `SPRITES_API_URL`. Harness credentials are injected as workspace
-  secrets.
-- **Snapshot / resume:** resume-by-id reconnects to the named Sprite (its
-  filesystem is durable across idle suspend/resume). `snapshot()` creates a
-  Sprite **checkpoint** (a save point of the writable overlay); restore is
-  **in-place** on the same Sprite via the handle's `restoreCheckpoint()` /
-  `listCheckpoints()`. A checkpoint does not survive Sprite deletion, so the
-  provider intentionally does **not** implement the reconstruct-after-gone
-  `restoreSnapshot` — when a Sprite is gone the framework degrades to a fresh
-  create instead. Restore restarts the environment and can take minutes;
-  `restoreCheckpoint()` polls the workspace until it is listable again before
-  resolving. Note that immediately after a restore the overlay can be listable
-  while individual file reads briefly return an I/O error as it settles — retry
-  reads if you act on the filesystem the instant restore returns.
-- **Ports:** a Sprite proxies a single internal HTTP port (default `8080`,
-  configurable via `httpPort`) to its always-on public URL. `ports.connect(8080)`
-  switches the URL to `public` auth and returns it; other ports are not exposed.
-- **Bridge:** like Daytona/Vercel, a remote VM — bridged tools need the tunnel in
-  local dev (see [tools](./tools)).
+`dockerSandbox()` and `sbxSandbox()` come from the same package. Every other provider has its own package. For the edge, see [Cloudflare](./cloudflare).
+
+## How it works
+
+- The provider decides **where** the agent runs. The [harness](./harnesses) decides **which** agent runs.
+- The provider does not pick how the agent signs in. Set `authMode` on the harness. See [Harness Auth](./auth).
+- Isolated and cloud providers have no host CLI login. Pass API keys as workspace secrets there.
+- Provider-native snapshots and resume keep or recreate the provider state. They make bootstrap faster. [Portable Snapshots](./portable-snapshots) store finished files in your own persistence.
+
+> [!NOTE]
+> Cloud providers (Daytona, Vercel, Sprites, Upstash Box, Blaxel, E2B, boxd, and Railway) run remotely. When you drive them from your laptop, [bridged tools](./tools) cannot reach your `localhost`. Use the ngrok bridge tunnel from the [tools guide](./tools), or see [Cloudflare](./cloudflare) for the edge setup.
 
 ## Capabilities
 
-Providers declare what they support via `capabilities()`. The flags are:
-
-| Capability | Meaning |
-| --- | --- |
-| `fs` | Read/write the sandbox filesystem. |
-| `exec` | Run commands. |
-| `env` | Inject environment variables. |
-| `ports` | Expose/forward ports (preview URLs). |
-| `backgroundProcesses` | Keep long-running processes alive between calls. |
-| `writableStdin` | A spawned process exposes a writable host→process stdin. `true` for local-process and Docker; `false` on remote/edge providers (Daytona, Vercel, Cloudflare), where stdin-fed harnesses deliver the prompt via a file + shell redirection instead. |
-| `snapshots` | Capture and restore point-in-time snapshots. |
-| `networkPolicy` | Enforce network allow/deny rules. |
-| `durableFilesystem` | Disk that survives across resumes. |
-| `fork` | Branch a sandbox from an existing one. |
-
-Code that uses an **optional** capability checks the flag first and degrades
-gracefully — for example, bootstrap only snapshots when `snapshots` is supported,
-so `localProcessSandbox` simply skips the step. Calling an unsupported optional
-method directly (instead of checking the flag) throws an
-`UnsupportedCapabilityError`:
+Each provider reports what it can do with `capabilities()`. Code that needs an optional capability checks the flag first:
 
 ```ts
 import { localProcessSandbox } from '@tanstack/ai-sandbox-local-process'
 
 const provider = localProcessSandbox()
-const caps = provider.capabilities()
 
-if (caps.snapshots) {
-  // safe to take a snapshot
+if (provider.capabilities().snapshots) {
+  // This provider can take a snapshot.
 } else {
-  // degrade gracefully — local-process has no snapshots
+  // Skip the snapshot. Local process has no snapshots.
 }
 ```
 
-Use the flags to write provider-agnostic code: branch on the capability rather
-than the concrete provider, and your sandbox definition keeps working when you
-swap one provider for another.
+| Capability | Meaning |
+| --- | --- |
+| `fs` | Read and write the sandbox filesystem. |
+| `exec` | Run commands. |
+| `env` | Inject environment variables. |
+| `ports` | Expose ports (preview URLs). |
+| `backgroundProcesses` | Keep long-running processes alive between calls. |
+| `writableStdin` | A spawned process has a writable stdin from the host. |
+| `killableProcesses` | A spawned process can be stopped with `SpawnHandle.kill()` and with the `signal` passed to `spawn`. |
+| `snapshots` | Take and restore point-in-time snapshots. |
+| `networkPolicy` | Enforce network allow and deny rules. |
+| `durableFilesystem` | The disk stays across resumes. |
+| `fork` | Create a new sandbox from an existing one. |
+
+The framework checks these flags for you. For example, bootstrap takes a snapshot only when `snapshots` is `true`, so `localProcessSandbox` skips that step. If you call an unsupported optional method directly, it throws an `UnsupportedCapabilityError`.
+
+Branch on the flag, not on the provider name. Then your code keeps working when you change the provider.
+
+### `killableProcesses` across the bundled providers
+
+The [run journal](./journal) reads this flag to decide how to read a run's output. It also limits what a cancel can do. On a `false` provider, cancel destroys the sandbox. See [what cancel means on a provider that cannot kill](./takeover#what-cancel-means-on-a-provider-that-cannot-kill).
+
+| Provider | `killableProcesses` |
+| --- | --- |
+| Local process | `true` |
+| Docker | `true` |
+| Docker Sandboxes (`sbx`) | `false` |
+| Daytona | `false` |
+| Vercel | `false` |
+| Sprites | `true` (not verified) |
+| Upstash Box | `true` |
+| Blaxel | `true` |
+| E2B | `true` |
+| Cloudflare | `false` |
+| boxd | `true` |
+| Railway | `true` |
+
+A bring-your-own provider must set this flag too. For the reason behind each value, see [Providers (Advanced)](./providers-advanced#killableprocesses-per-provider).
+
+## Advanced
+
+Each provider has its own options and limits: idle timers, ports, network rules, non-root users, and snapshot behavior. Read them in [Providers (Advanced)](./providers-advanced) before you go to production.

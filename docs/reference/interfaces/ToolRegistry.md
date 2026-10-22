@@ -3,14 +3,12 @@ id: ToolRegistry
 title: ToolRegistry
 ---
 
-# Interface: ToolRegistry\<TTool\>
-
-Defined in: [packages/ai/src/tool-registry.ts:9](https://github.com/TanStack/ai/blob/main/packages/ai/src/tool-registry.ts#L9)
+Defined in: packages/ai/src/tool-registry.ts:9
 
 A registry that holds tools and allows dynamic tool management.
 
 The registry can be either mutable (allowing additions/removals during execution)
-or frozen (static tool list, for backward compatibility with tools arrays).
+or frozen (a static tool list, made from the normal `tools` array).
 
 ## Type Parameters
 
@@ -20,13 +18,13 @@ or frozen (static tool list, for backward compatibility with tools arrays).
 
 ## Properties
 
-### add()
+### add
 
 ```ts
 add: (tool) => void;
 ```
 
-Defined in: [packages/ai/src/tool-registry.ts:22](https://github.com/TanStack/ai/blob/main/packages/ai/src/tool-registry.ts#L22)
+Defined in: packages/ai/src/tool-registry.ts:22
 
 Add a tool to the registry dynamically.
 For frozen registries, this is a no-op.
@@ -45,13 +43,13 @@ The tool to add
 
 ***
 
-### get()
+### get
 
 ```ts
 get: (name) => TTool | undefined;
 ```
 
-Defined in: [packages/ai/src/tool-registry.ts:46](https://github.com/TanStack/ai/blob/main/packages/ai/src/tool-registry.ts#L46)
+Defined in: packages/ai/src/tool-registry.ts:46
 
 Get a tool by name.
 
@@ -71,13 +69,13 @@ The tool if found, undefined otherwise
 
 ***
 
-### getTools()
+### getTools
 
 ```ts
 getTools: () => TTool[];
 ```
 
-Defined in: [packages/ai/src/tool-registry.ts:14](https://github.com/TanStack/ai/blob/main/packages/ai/src/tool-registry.ts#L14)
+Defined in: packages/ai/src/tool-registry.ts:14
 
 Get all current tools in the registry.
 Called each agent loop iteration to get the latest tool list.
@@ -88,13 +86,13 @@ Called each agent loop iteration to get the latest tool list.
 
 ***
 
-### has()
+### has
 
 ```ts
 has: (name) => boolean;
 ```
 
-Defined in: [packages/ai/src/tool-registry.ts:38](https://github.com/TanStack/ai/blob/main/packages/ai/src/tool-registry.ts#L38)
+Defined in: packages/ai/src/tool-registry.ts:38
 
 Check if a tool exists in the registry.
 
@@ -118,20 +116,20 @@ The name of the tool to check
 readonly isFrozen: boolean;
 ```
 
-Defined in: [packages/ai/src/tool-registry.ts:52](https://github.com/TanStack/ai/blob/main/packages/ai/src/tool-registry.ts#L52)
+Defined in: packages/ai/src/tool-registry.ts:52
 
 Whether this registry is frozen (immutable).
 Frozen registries don't allow add/remove operations.
 
 ***
 
-### remove()
+### remove
 
 ```ts
 remove: (name) => boolean;
 ```
 
-Defined in: [packages/ai/src/tool-registry.ts:31](https://github.com/TanStack/ai/blob/main/packages/ai/src/tool-registry.ts#L31)
+Defined in: packages/ai/src/tool-registry.ts:31
 
 Remove a tool from the registry by name.
 For frozen registries, this always returns false.

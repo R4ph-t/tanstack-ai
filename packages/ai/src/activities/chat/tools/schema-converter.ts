@@ -99,6 +99,26 @@ function pruneMap(map: NullWideningMap): NullWideningMap | undefined {
   return Object.keys(map).length > 0 ? map : undefined
 }
 
+function coerceArrayItems(items: JSONSchema | Array<JSONSchema>): {
+  schema: JSONSchema | Array<JSONSchema>
+  itemMap: NullWideningMap | Array<NullWideningMap> | undefined
+} {
+  if (Array.isArray(items)) {
+    const nested = items.map((item) =>
+      makeStructuredOutputCompatible(item, item.required || []),
+    )
+    const itemMaps = nested.map((entry) => entry.nullWidening ?? {})
+    return {
+      schema: nested.map((entry) => entry.schema),
+      itemMap: itemMaps.some((entry) => Object.keys(entry).length > 0)
+        ? itemMaps
+        : undefined,
+    }
+  }
+  const nested = makeStructuredOutputCompatible(items, items.required || [])
+  return { schema: nested.schema, itemMap: nested.nullWidening }
+}
+
 /**
  * Transform a JSON schema to be compatible with OpenAI's structured output requirements.
  * OpenAI requires:
@@ -146,18 +166,15 @@ function makeStructuredOutputCompatible(
         widenedHere = wasOptional
         childMap = nested.nullWidening
       } else if (prop.type === 'array' && prop.items) {
-        const items = Array.isArray(prop.items) ? prop.items[0] : prop.items
-        const nestedItems = items
-          ? makeStructuredOutputCompatible(items, items.required || [])
-          : undefined
+        const nestedItems = coerceArrayItems(prop.items)
         properties[propName] = {
           ...prop,
-          items: nestedItems ? nestedItems.schema : prop.items,
+          items: nestedItems.schema,
           ...(wasOptional ? { type: ['array', 'null'] } : {}),
         }
         widenedHere = wasOptional
-        childMap = nestedItems?.nullWidening
-          ? { items: nestedItems.nullWidening }
+        childMap = nestedItems.itemMap
+          ? { items: nestedItems.itemMap }
           : undefined
       } else if (wasOptional) {
         // Make optional fields nullable by adding null to the type. Mark
@@ -188,17 +205,13 @@ function makeStructuredOutputCompatible(
     if (Object.keys(propertyMaps).length > 0) map.properties = propertyMaps
   }
 
-  // Handle array types with object items
+  // Handle array item schemas. A tuple (`items: [a, b, …]`) keeps every
+  // position. A homogeneous schema stays a single items map so
+  // `undoNullWidening` applies it to every element.
   if (result.type === 'array' && result.items) {
-    const items = Array.isArray(result.items) ? result.items[0] : result.items
-    if (items) {
-      const nestedItems = makeStructuredOutputCompatible(
-        items,
-        items.required || [],
-      )
-      result.items = nestedItems.schema
-      if (nestedItems.nullWidening) map.items = nestedItems.nullWidening
-    }
+    const nestedItems = coerceArrayItems(result.items)
+    result.items = nestedItems.schema
+    if (nestedItems.itemMap) map.items = nestedItems.itemMap
   }
 
   return { schema: result, nullWidening: pruneMap(map) }
@@ -217,6 +230,14 @@ export interface ConvertSchemaOptions {
    * @default false
    */
   forStructuredOutput?: boolean
+  /**
+   * Which view of a Standard JSON Schema to convert. A schema with a
+   * transform or a pipe has a different `output` view. Use `'output'` to
+   * describe the value that parsing returns.
+   *
+   * @default 'input'
+   */
+  io?: 'input' | 'output'
 }
 
 /**
@@ -225,16 +246,20 @@ export interface ConvertSchemaOptions {
  *
  * - Standard JSON Schemas are rebuilt structurally (dropping `$schema`, which
  *   LLM providers ignore) and given the explicit `type`/`properties`/`required`
- *   defaults object shapes need downstream.
+ *   defaults object shapes need downstream. `io` picks the `input` (default)
+ *   or `output` view.
  * - Plain `JSONSchema` inputs are rebuilt into the typed view; non-object inputs
  *   are surfaced untouched (they can't be widened).
  * - Standard Schema validators lacking a `~standard.jsonSchema` converter throw
  *   with actionable guidance, rather than shipping `{ '~standard': … }` to the
  *   provider and producing an opaque downstream error.
  */
-function toTypedJsonSchema(schema: SchemaInput): JSONSchema | undefined {
+function toTypedJsonSchema(
+  schema: SchemaInput,
+  io: 'input' | 'output' = 'input',
+): JSONSchema | undefined {
   if (isStandardJSONSchema(schema)) {
-    const jsonSchema = schema['~standard'].jsonSchema.input({
+    const jsonSchema = schema['~standard'].jsonSchema[io]({
       target: 'draft-07',
     })
     const result: JSONSchema = toJsonSchema(jsonSchema)
@@ -327,7 +352,7 @@ export function convertSchemaToJsonSchema(
 ): JSONSchema | undefined {
   if (!schema) return undefined
 
-  const { forStructuredOutput = false } = options
+  const { forStructuredOutput = false, io } = options
 
   // Plain-JSONSchema passthrough: with no widening requested, return the schema
   // by reference so callers comparing via `===` keep identity. Only the widening
@@ -340,7 +365,7 @@ export function convertSchemaToJsonSchema(
     return schema
   }
 
-  const base = toTypedJsonSchema(schema)
+  const base = toTypedJsonSchema(schema, io)
   // Non-object inputs can't be widened; surface them untouched.
   if (!base || typeof base !== 'object') return base
   if (!forStructuredOutput) return base

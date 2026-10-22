@@ -54,14 +54,14 @@ test.describe('anthropic — webFetchTool() streaming (#604)', () => {
     expect(toolCallStarts).toHaveLength(2)
     expect(byId(toolCallStarts, 'toolu_client_weather')).toMatchObject({
       toolCallId: 'toolu_client_weather',
-      toolName: 'lookup_weather',
+      toolCallName: 'lookup_weather',
     })
 
     // The web_fetch start is flagged provider-executed (in metadata) and
     // carries the raw server tool result the adapter replays verbatim.
     expect(byId(toolCallStarts, 'srvtoolu_web_fetch')).toMatchObject({
       toolCallId: 'srvtoolu_web_fetch',
-      toolName: 'web_fetch',
+      toolCallName: 'web_fetch',
       metadata: {
         providerExecuted: true,
         anthropic: { resultBlockType: 'web_fetch_tool_result' },
@@ -84,5 +84,26 @@ test.describe('anthropic — webFetchTool() streaming (#604)', () => {
 
     // Run completes cleanly through the agent loop's follow-up turn.
     expect(chunks.some((c) => c.type === 'RUN_FINISHED')).toBe(true)
+  })
+})
+
+test.describe('anthropic — signed thinking replay (#910)', () => {
+  test('keeps thinking blocks on the correct side of server tool calls', async ({
+    request,
+  }) => {
+    const res = await request.post(
+      '/api/anthropic-bug-test?case=thinking-order',
+    )
+    expect(res.ok()).toBe(true)
+    const { chunks, error } = (await res.json()) as {
+      chunks: Array<Record<string, unknown>>
+      error: string | null
+    }
+
+    // The mounted Anthropic endpoint rejects the request unless the replayed
+    // content blocks are thinking(A) → server tool/result → thinking(B) →
+    // local tool. This mirrors Anthropic's signed-thinking validation.
+    expect(error).toBeNull()
+    expect(chunks.some((chunk) => chunk.type === 'RUN_FINISHED')).toBe(true)
   })
 })

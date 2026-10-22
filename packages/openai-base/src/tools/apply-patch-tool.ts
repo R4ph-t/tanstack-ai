@@ -1,10 +1,8 @@
+import { openAIProviderTool } from './openai-provider-tool'
 import type { ApplyPatchTool as ApplyPatchToolConfig } from 'openai/resources/responses/responses'
 import type { Tool } from '@tanstack/ai'
 
 export type { ApplyPatchToolConfig }
-
-/** @deprecated Renamed to `ApplyPatchToolConfig`. Will be removed in a future release. */
-export type ApplyPatchTool = ApplyPatchToolConfig
 
 /**
  * Converts a standard Tool to OpenAI ApplyPatchTool format
@@ -24,9 +22,12 @@ export function convertApplyPatchToolToAdapterFormat(
  * re-wrap this in their own package.
  */
 export function applyPatchTool(): Tool {
-  return {
-    name: 'apply_patch',
-    description: 'Apply a patch to modify files',
-    metadata: {},
-  }
+  return openAIProviderTool(
+    {
+      name: 'apply_patch',
+      description: 'Apply a patch to modify files',
+      metadata: {},
+    },
+    'apply_patch',
+  )
 }

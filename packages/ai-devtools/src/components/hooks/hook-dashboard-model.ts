@@ -61,6 +61,31 @@ export function getHookDisplayName(hook: HookRecord): string {
   return hook.displayName ?? hook.hookName
 }
 
+/**
+ * Stable identity string shown under the hook title.
+ *
+ * Prefer `threadId` when present. For generation hooks it is the single
+ * scope that the app chooses, and it is often the registry key too. Fall back
+ * to the registry `id` (the devtools hook id) for short-lived hooks that do
+ * not name a thread.
+ */
+export function getHookIdentityLabel(hook: HookRecord): string {
+  return hook.threadId ?? hook.id
+}
+
+/**
+ * Secondary subtitle under the title: either just the identity, or
+ * `hookName - identity` when a custom display name is set so the technical
+ * name stays visible.
+ */
+export function getHookIdentitySubtitle(hook: HookRecord): string {
+  const identity = getHookIdentityLabel(hook)
+  if (hook.displayName) {
+    return `${hook.hookName} - ${identity}`
+  }
+  return identity
+}
+
 export function groupHooksByCategory(
   hooks: Array<HookRecord>,
 ): Array<HookCategoryGroup> {

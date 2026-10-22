@@ -1,7 +1,25 @@
+import type { TokenUsage } from '@tanstack/ai'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { chat } from '@tanstack/ai'
 import { GeminiTextAdapter } from '../src/adapters/text'
-import type { StreamChunk } from '@tanstack/ai'
+import type { AdapterYieldChunk } from '@tanstack/ai'
+
+/** `chat()` restores a TokenUsage object on RUN_FINISHED. */
+function tokenUsageOf(chunk: unknown): TokenUsage | undefined {
+  if (typeof chunk !== 'object' || chunk === null || !('usage' in chunk)) {
+    return undefined
+  }
+  const usage = chunk.usage
+  if (
+    typeof usage !== 'object' ||
+    usage === null ||
+    Array.isArray(usage) ||
+    !('promptTokens' in usage)
+  ) {
+    return undefined
+  }
+  return usage as TokenUsage
+}
 
 const mocks = vi.hoisted(() => {
   return {
@@ -73,8 +91,9 @@ describe('Gemini usage extraction', () => {
 
     mocks.generateContentStreamSpy.mockResolvedValueOnce(mockStream)
 
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const chunk of chat({
+      threadId: 'thread-1',
       adapter: createAdapter(),
       messages: [{ role: 'user', content: 'Hello' }],
     })) {
@@ -112,8 +131,9 @@ describe('Gemini usage extraction', () => {
 
     mocks.generateContentStreamSpy.mockResolvedValueOnce(mockStream)
 
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const chunk of chat({
+      threadId: 'thread-1',
       adapter: createAdapter(),
       messages: [{ role: 'user', content: 'Hello' }],
     })) {
@@ -122,7 +142,7 @@ describe('Gemini usage extraction', () => {
 
     const doneChunk = chunks.find((c) => c.type === 'RUN_FINISHED')
     expect(doneChunk).toBeDefined()
-    expect(doneChunk?.usage?.promptTokensDetails).toMatchObject({
+    expect(tokenUsageOf(doneChunk)?.promptTokensDetails).toMatchObject({
       cachedTokens: 25,
     })
   })
@@ -149,8 +169,9 @@ describe('Gemini usage extraction', () => {
 
     mocks.generateContentStreamSpy.mockResolvedValueOnce(mockStream)
 
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const chunk of chat({
+      threadId: 'thread-1',
       adapter: createAdapter(),
       messages: [{ role: 'user', content: 'Hello' }],
     })) {
@@ -159,7 +180,7 @@ describe('Gemini usage extraction', () => {
 
     const doneChunk = chunks.find((c) => c.type === 'RUN_FINISHED')
     expect(doneChunk).toBeDefined()
-    expect(doneChunk?.usage?.completionTokensDetails).toMatchObject({
+    expect(tokenUsageOf(doneChunk)?.completionTokensDetails).toMatchObject({
       reasoningTokens: 30,
     })
   })
@@ -189,8 +210,9 @@ describe('Gemini usage extraction', () => {
 
     mocks.generateContentStreamSpy.mockResolvedValueOnce(mockStream)
 
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const chunk of chat({
+      threadId: 'thread-1',
       adapter: createAdapter(),
       messages: [{ role: 'user', content: 'Hello' }],
     })) {
@@ -199,7 +221,7 @@ describe('Gemini usage extraction', () => {
 
     const doneChunk = chunks.find((c) => c.type === 'RUN_FINISHED')
     expect(doneChunk).toBeDefined()
-    expect(doneChunk?.usage?.promptTokensDetails).toMatchObject({
+    expect(tokenUsageOf(doneChunk)?.promptTokensDetails).toMatchObject({
       textTokens: 100,
       imageTokens: 50,
     })
@@ -230,8 +252,9 @@ describe('Gemini usage extraction', () => {
 
     mocks.generateContentStreamSpy.mockResolvedValueOnce(mockStream)
 
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const chunk of chat({
+      threadId: 'thread-1',
       adapter: createAdapter(),
       messages: [{ role: 'user', content: 'Hello' }],
     })) {
@@ -240,7 +263,7 @@ describe('Gemini usage extraction', () => {
 
     const doneChunk = chunks.find((c) => c.type === 'RUN_FINISHED')
     expect(doneChunk).toBeDefined()
-    expect(doneChunk?.usage?.completionTokensDetails).toMatchObject({
+    expect(tokenUsageOf(doneChunk)?.completionTokensDetails).toMatchObject({
       textTokens: 50,
       audioTokens: 30,
     })
@@ -268,8 +291,9 @@ describe('Gemini usage extraction', () => {
 
     mocks.generateContentStreamSpy.mockResolvedValueOnce(mockStream)
 
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const chunk of chat({
+      threadId: 'thread-1',
       adapter: createAdapter(),
       messages: [{ role: 'user', content: 'Hello' }],
     })) {
@@ -278,7 +302,7 @@ describe('Gemini usage extraction', () => {
 
     const doneChunk = chunks.find((c) => c.type === 'RUN_FINISHED')
     expect(doneChunk).toBeDefined()
-    expect(doneChunk?.usage?.providerUsageDetails).toMatchObject({
+    expect(tokenUsageOf(doneChunk)?.providerUsageDetails).toMatchObject({
       trafficType: 'ON_DEMAND',
     })
   })
@@ -305,8 +329,9 @@ describe('Gemini usage extraction', () => {
 
     mocks.generateContentStreamSpy.mockResolvedValueOnce(mockStream)
 
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const chunk of chat({
+      threadId: 'thread-1',
       adapter: createAdapter(),
       messages: [{ role: 'user', content: 'Hello' }],
     })) {
@@ -315,7 +340,7 @@ describe('Gemini usage extraction', () => {
 
     const doneChunk = chunks.find((c) => c.type === 'RUN_FINISHED')
     expect(doneChunk).toBeDefined()
-    expect(doneChunk?.usage?.providerUsageDetails).toMatchObject({
+    expect(tokenUsageOf(doneChunk)?.providerUsageDetails).toMatchObject({
       toolUsePromptTokenCount: 20,
     })
   })
@@ -337,8 +362,9 @@ describe('Gemini usage extraction', () => {
 
     mocks.generateContentStreamSpy.mockResolvedValueOnce(mockStream)
 
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const chunk of chat({
+      threadId: 'thread-1',
       adapter: createAdapter(),
       messages: [{ role: 'user', content: 'Hello' }],
     })) {

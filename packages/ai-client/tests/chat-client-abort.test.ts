@@ -39,7 +39,7 @@ describe('ChatClient - Abort Signal Handling', () => {
           threadId: 'thread-1',
           model: 'test',
           timestamp: Date.now(),
-          finishReason: 'stop',
+          metadata: { tanstack: { finishReason: 'stop' } },
         }
       },
     }
@@ -47,6 +47,7 @@ describe('ChatClient - Abort Signal Handling', () => {
 
   it('should create AbortController and pass signal to adapter', async () => {
     const client = new ChatClient({
+      threadId: 'thread-1',
       connection: mockAdapter,
     })
 
@@ -109,6 +110,7 @@ describe('ChatClient - Abort Signal Handling', () => {
     }
 
     const client = new ChatClient({
+      threadId: 'thread-1',
       connection: adapterWithAbort,
     })
 
@@ -162,6 +164,7 @@ describe('ChatClient - Abort Signal Handling', () => {
     }
 
     const client = new ChatClient({
+      threadId: 'thread-1',
       connection: adapterWithPartial,
       onChunk: (chunk) => {
         chunks.push(chunk)
@@ -208,6 +211,7 @@ describe('ChatClient - Abort Signal Handling', () => {
     }
 
     const client = new ChatClient({
+      threadId: 'thread-1',
       connection: adapterWithAbort,
       onError: errorSpy,
     })
@@ -245,6 +249,7 @@ describe('ChatClient - Abort Signal Handling', () => {
     }
 
     const client = new ChatClient({
+      threadId: 'thread-1',
       connection: adapterWithAbort,
     })
 
@@ -280,12 +285,13 @@ describe('ChatClient - Abort Signal Handling', () => {
           threadId: 'thread-1',
           model: 'test',
           timestamp: Date.now(),
-          finishReason: 'stop',
+          metadata: { tanstack: { finishReason: 'stop' } },
         }
       },
     }
 
     const client = new ChatClient({
+      threadId: 'thread-1',
       connection: adapter,
     })
 
@@ -324,12 +330,13 @@ describe('ChatClient - Abort Signal Handling', () => {
           threadId: 'thread-1',
           model: 'test',
           timestamp: Date.now(),
-          finishReason: 'stop',
+          metadata: { tanstack: { finishReason: 'stop' } },
         }
       },
     }
 
     const client = new ChatClient({
+      threadId: 'thread-1',
       connection: adapter,
       onError: errorSpy,
       onResponse: () => {
@@ -373,13 +380,14 @@ describe('ChatClient - Abort Signal Handling', () => {
           threadId: 'thread-1',
           model: 'test',
           timestamp: Date.now(),
-          finishReason: 'stop',
+          metadata: { tanstack: { finishReason: 'stop' } },
         }
       },
     }
 
     let firstCall = true
     const client = new ChatClient({
+      threadId: 'thread-1',
       connection: adapter,
       onError: errorSpy,
       onResponse: () => {

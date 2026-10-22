@@ -64,13 +64,15 @@ test.describe('delivery durability', () => {
     expect(produce.ok()).toBeTruthy()
     const produced = parseSse(await produce.text())
 
-    // Sequence: RUN_STARTED(1), content 1..5 (seq 2..6), RUN_FINISHED(7).
+    // Sequence: run-accepted marker(1), RUN_STARTED(2), content 1..5 (seq
+    // 3..7), RUN_FINISHED(8). The marker is what a fresh durable producer
+    // appends so a joiner never sees an empty log.
     expect(contentDeltas(produced)).toEqual(['1', '2', '3', '4', '5'])
     expect(produced.every((e) => e.id !== undefined)).toBeTruthy()
 
-    // Client received through seq 3 (RUN_STARTED, content "1", content "2")
-    // then dropped. Reconnect from that offset via native Last-Event-ID.
-    const resumeFrom = produced[2]!.id!
+    // Client received through content "2" (marker, RUN_STARTED, "1", "2") then
+    // dropped. Reconnect from that offset via native Last-Event-ID.
+    const resumeFrom = produced[3]!.id!
     const reconnect = await request.post('/api/durable-delivery', {
       headers: { 'Last-Event-ID': resumeFrom },
       data: {},
@@ -102,8 +104,106 @@ test.describe('delivery durability', () => {
     const joined = parseSse(await join.text())
 
     expect(contentDeltas(joined)).toEqual(['1', '2', '3', '4', '5'])
-    expect(eventType(joined[0]!)).toBe('RUN_STARTED')
+    // The joining tab sees the same content the producing tab saw.
+    expect(contentDeltas(joined)).toEqual(contentDeltas(produced))
+    // The from-start join replays the run-accepted marker first, then the run.
+    expect(eventType(joined[0]!)).toBe('CUSTOM')
+    expect(eventType(joined[1]!)).toBe('RUN_STARTED')
     expect(eventType(joined[joined.length - 1]!)).toBe('RUN_FINISHED')
+  })
+})
+
+test.describe('delivery durability (live text)', () => {
+  test('streams text while the run is still going, with the default batch', async ({
+    page,
+  }) => {
+    // The `slow` run sends 5 text chunks 300ms apart. Chunks reach the client
+    // only after they are appended to the log, and a batch of 32 never fills
+    // here. So the batch must flush on its own while the run waits, not hold
+    // every chunk until RUN_FINISHED.
+    await page.goto('/')
+    const timing = await page.evaluate(async () => {
+      const startedAt = performance.now()
+      const response = await fetch('/api/durable-delivery?scenario=slow', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      })
+      if (!response.body) throw new Error('Expected a response body')
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let body = ''
+      let firstTextAt = -1
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        body += decoder.decode(value, { stream: true })
+        if (firstTextAt < 0 && body.includes('"TEXT_MESSAGE_CONTENT"')) {
+          firstTextAt = performance.now() - startedAt
+        }
+      }
+      return { firstTextAt, endAt: performance.now() - startedAt }
+    })
+
+    expect(timing.firstTextAt).toBeGreaterThan(0)
+    // The first chunk comes about 1.2s before the end. Held until the end, the
+    // gap would be about 0.
+    expect(timing.endAt - timing.firstTextAt).toBeGreaterThan(800)
+  })
+})
+
+test.describe('delivery durability (agent loop)', () => {
+  test('delivers a full tool-calling run, not truncated at the first RUN_FINISHED', async ({
+    request,
+  }) => {
+    // A tool-calling run emits a RUN_FINISHED per iteration (finishReason
+    // "tool_calls" then "stop"). Regression guard: the durable sink must deliver
+    // the tool result and the second iteration that follow the FIRST terminal —
+    // a sink that ended the log on the first RUN_FINISHED stranded tool-calling
+    // runs at the tool call.
+    const produce = await request.post(
+      '/api/durable-delivery?scenario=agent-loop',
+      { data: {} },
+    )
+    expect(produce.ok()).toBeTruthy()
+    const events = parseSse(await produce.text())
+    const types = events.map(eventType)
+
+    // Both per-iteration terminals arrive (old behaviour stopped after the first).
+    expect(types.filter((t) => t === 'RUN_FINISHED')).toHaveLength(2)
+    // The tool result and the second iteration's reply survive the first terminal.
+    expect(types).toContain('TOOL_CALL_RESULT')
+    expect(contentDeltas(events)).toEqual(['done'])
+    // Every event is offset-tagged, and the log ends on the final 'stop' terminal.
+    expect(events.every((e) => e.id !== undefined)).toBeTruthy()
+    const last = events[events.length - 1]!
+    expect(eventType(last)).toBe('RUN_FINISHED')
+    const metadata = (
+      last.data as { metadata?: { tanstack?: { finishReason?: string } } }
+    ).metadata
+    expect(metadata?.tanstack?.finishReason).toBe('stop')
+  })
+
+  test('a second tab joins a finished tool-calling run in full', async ({
+    request,
+  }) => {
+    const produce = await request.post(
+      '/api/durable-delivery?scenario=agent-loop',
+      { data: {} },
+    )
+    const runId = produce.headers()['x-run-id']
+    if (!runId) throw new Error('Missing X-Run-Id response header')
+
+    const join = await request.get(
+      `/api/durable-delivery?offset=-1&runId=${encodeURIComponent(runId)}`,
+    )
+    expect(join.ok()).toBeTruthy()
+    const joined = parseSse(await join.text())
+    const types = joined.map(eventType)
+    // The replayed log is complete: both terminals, the tool result, the reply.
+    expect(types.filter((t) => t === 'RUN_FINISHED')).toHaveLength(2)
+    expect(types).toContain('TOOL_CALL_RESULT')
+    expect(contentDeltas(joined)).toEqual(['done'])
   })
 })
 
@@ -149,7 +249,8 @@ test.describe('delivery durability (ndjson)', () => {
     expect(contentDeltas(produced)).toEqual(['1', '2', '3', '4', '5'])
     expect(produced.every((e) => e.id !== undefined)).toBeTruthy()
 
-    const resumeFrom = produced[2]!.id!
+    // Index 3: marker, RUN_STARTED, "1", "2" — dropped after content "2".
+    const resumeFrom = produced[3]!.id!
     const reconnect = await request.post(
       '/api/durable-delivery?transport=ndjson',
       {
@@ -186,7 +287,9 @@ test.describe('delivery durability (ndjson)', () => {
     const joined = parseNdjson(await join.text())
 
     expect(contentDeltas(joined)).toEqual(['1', '2', '3', '4', '5'])
-    expect(eventType(joined[0]!)).toBe('RUN_STARTED')
+    // The from-start join replays the run-accepted marker first, then the run.
+    expect(eventType(joined[0]!)).toBe('CUSTOM')
+    expect(eventType(joined[1]!)).toBe('RUN_STARTED')
     expect(eventType(joined[joined.length - 1]!)).toBe('RUN_FINISHED')
   })
 })

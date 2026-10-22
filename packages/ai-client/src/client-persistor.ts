@@ -1,6 +1,11 @@
 import { getChunkRunId } from './connection-adapters'
 import type { StreamChunk } from '@tanstack/ai/client'
-import type { ChatClientPersistence, UIMessage } from './types'
+import type {
+  ChatClientPersistence,
+  ChatPersistedState,
+  ChatResumeSnapshot,
+  UIMessage,
+} from './types'
 
 // `StreamChunk` is a discriminated union; `toolCallId` / `messageId` /
 // `parentMessageId` exist on only some members. Narrow with `in` (matching
@@ -30,10 +35,12 @@ function getChunkParentMessageId(chunk: StreamChunk): string | undefined {
  *
  * Two responsibilities live here:
  *
- * 1. **Storage orchestration** — hydrate from `getItem(id)` on creation, save to
- *    `setItem(id, messages)` on every change through an ordered write queue, and
- *    `removeItem(id)` on clear. A generation counter discards stale writes when a
- *    removal or a newer conversation supersedes an in-flight async operation.
+ * 1. **Storage orchestration** — hydrate from `getItem(id)` on creation, save a
+ *    combined `{ messages, resume? }` record via `setItem` on every change
+ *    through an ordered write queue, and `removeItem(id)` on clear (or when
+ *    both the transcript and resume pointer are empty). A generation counter
+ *    discards stale writes when a removal or a newer conversation supersedes
+ *    an in-flight async operation.
  * 2. **Clear-during-stream suppression** — when a conversation is cleared while a
  *    stream is still producing, late chunks for the cleared run(s) must not
  *    repopulate the now-empty state. The persistor tracks the cleared ids and
@@ -51,6 +58,13 @@ export class ChatPersistor {
   // Bumped on every message change; lets an in-flight async hydration detect
   // that the message list moved on and avoid clobbering it.
   private messagesGeneration = 0
+  // Latest messages + resume snapshot, written together as one combined record
+  // so a full page reload restores both from a single adapter key.
+  private lastMessages: Array<UIMessage> = []
+  private lastResume: ChatResumeSnapshot | null = null
+  // The stored value is in the 0.x format (a bare `UIMessage[]`). 1.0 does not
+  // read it, and must not overwrite it either, so writes stop until a clear.
+  private legacyStored = false
 
   // --- clear-during-stream suppression state ---
   private readonly clearedMessageIds = new Set<string>()
@@ -63,51 +77,108 @@ export class ChatPersistor {
     private readonly adapter: ChatClientPersistence,
     private readonly id: string,
     private readonly applyMessages: (messages: Array<UIMessage>) => void,
+    private readonly applyResume?: (snapshot: ChatResumeSnapshot) => void,
   ) {}
+
+  /** Persist the current state as one combined `{ messages, resume? }` record. */
+  private writeState(): void {
+    if (this.legacyStored) return
+    const messages = [...this.lastMessages]
+    // Nothing to persist (no transcript, no resume pointer): remove the key
+    // rather than writing an empty `{ messages: [] }`, so a cleared
+    // conversation does not leave a stale record behind.
+    if (messages.length === 0 && !this.lastResume) {
+      const generation = this.generation
+      this.runOperation(() => {
+        if (generation !== this.generation) {
+          return
+        }
+        return this.adapter.removeItem(this.id)
+      })
+      return
+    }
+    const generation = this.generation
+    const state: ChatPersistedState = {
+      messages,
+      ...(this.lastResume ? { resume: this.lastResume } : {}),
+    }
+    this.runOperation(() => {
+      if (generation !== this.generation) {
+        return
+      }
+      return this.adapter.setItem(this.id, state)
+    })
+  }
 
   // ---------------------------------------------------------------------------
   // Storage orchestration
   // ---------------------------------------------------------------------------
 
+  /** Validate a raw `getItem` result. */
+  private normalize(
+    raw: ChatPersistedState | null | undefined,
+  ): ChatPersistedState | undefined {
+    if (Array.isArray(raw)) {
+      this.legacyStored = true
+      console.error(
+        `[TanStack AI] The stored chat for threadId "${this.id}" is in the 0.x format (a bare message array). TanStack AI 1.0 does not read this format, so the chat starts empty and the stored value is not overwritten. Clear the chat or the stored value to start saving again.`,
+      )
+      return undefined
+    }
+    if (raw && Array.isArray(raw.messages)) return raw
+    return undefined
+  }
+
   /**
-   * Synchronously read the persisted messages for constructor-time hydration.
-   * Returns the raw `getItem` result (which may be a promise for async stores).
+   * Synchronously read the persisted state for constructor-time hydration.
+   * Returns the normalized combined record, or a promise of it for async stores.
    */
   readInitial():
-    | Array<UIMessage>
-    | null
+    | ChatPersistedState
     | undefined
-    | Promise<Array<UIMessage> | null | undefined> {
+    | Promise<ChatPersistedState | undefined> {
     try {
-      return this.adapter.getItem(this.id)
+      const raw = this.adapter.getItem(this.id)
+      if (raw instanceof Promise) {
+        return raw.then((value) => this.normalize(value)).catch(() => undefined)
+      }
+      const state = this.normalize(raw)
+      if (state) {
+        this.lastMessages = state.messages
+        this.lastResume = state.resume ?? null
+      }
+      return state
     } catch {
       return undefined
     }
   }
 
   /**
-   * Apply messages from an async `getItem` once it resolves, unless the message
-   * list has already changed since hydration began.
+   * Apply state from an async `getItem` once it resolves, unless the message
+   * list has already changed since hydration began. Returns a promise that
+   * settles (never rejects) when it is done, or `undefined` for sync state.
    */
   hydrateAsync(
-    persistedMessages:
-      | Array<UIMessage>
-      | null
+    persistedState:
+      | ChatPersistedState
       | undefined
-      | Promise<Array<UIMessage> | null | undefined>,
-  ): void {
-    if (!(persistedMessages instanceof Promise)) {
-      return
+      | Promise<ChatPersistedState | undefined>,
+  ): Promise<void> | undefined {
+    if (!(persistedState instanceof Promise)) {
+      return undefined
     }
 
     const hydrationGeneration = this.messagesGeneration
-    persistedMessages
-      .then((messages) => {
-        if (
-          Array.isArray(messages) &&
-          this.messagesGeneration === hydrationGeneration
-        ) {
-          this.applyMessages(messages)
+    return persistedState
+      .then((state) => {
+        if (!state || this.messagesGeneration !== hydrationGeneration) {
+          return
+        }
+        this.lastResume = state.resume ?? null
+        this.lastMessages = state.messages
+        this.applyMessages(state.messages)
+        if (state.resume && this.applyResume) {
+          this.applyResume(state.resume)
         }
       })
       .catch(() => {
@@ -116,28 +187,38 @@ export class ChatPersistor {
   }
 
   /**
-   * Record a message-list change and queue a `setItem` write for it. Skips a
+   * Record a message-list change and queue a combined write for it. Skips a
    * single write after {@link beginClear} so the clear's empty snapshot isn't
    * persisted between `clearMessages()` and {@link remove}.
    */
   notifyMessagesChanged(messages: Array<UIMessage>): void {
     this.messagesGeneration++
+    this.lastMessages = [...messages]
     if (this.skipNextPersist) {
       this.skipNextPersist = false
       return
     }
-    const generation = this.generation
-    const messagesSnapshot = [...messages]
-    this.runOperation(() => {
-      if (generation !== this.generation) {
-        return
-      }
-      return this.adapter.setItem(this.id, messagesSnapshot)
-    })
+    this.writeState()
+  }
+
+  /**
+   * Record the current resume snapshot (which run to rejoin / which interrupts
+   * are pending) and persist it alongside the messages. Pass `null` to clear it
+   * once the run reaches a non-interrupt terminal.
+   */
+  persistResumeSnapshot(snapshot: ChatResumeSnapshot | null): void {
+    this.lastResume = snapshot
+    if (this.skipNextPersist) {
+      return
+    }
+    this.writeState()
   }
 
   /** Remove the persisted conversation. Invalidates any queued writes. */
   remove(): void {
+    this.legacyStored = false
+    this.lastMessages = []
+    this.lastResume = null
     const generation = ++this.generation
     this.runOperation(() => {
       if (generation !== this.generation) {
@@ -326,10 +407,12 @@ export class ChatPersistor {
     return (
       chunk.type === 'TEXT_MESSAGE_START' ||
       chunk.type === 'TEXT_MESSAGE_CONTENT' ||
+      chunk.type === 'TEXT_MESSAGE_CHUNK' ||
       chunk.type === 'TOOL_CALL_START' ||
       chunk.type === 'TOOL_CALL_ARGS' ||
       chunk.type === 'TOOL_CALL_END' ||
       chunk.type === 'TOOL_CALL_RESULT' ||
+      chunk.type === 'TOOL_CALL_CHUNK' ||
       chunk.type === 'MESSAGES_SNAPSHOT' ||
       chunk.type === 'RUN_ERROR'
     )

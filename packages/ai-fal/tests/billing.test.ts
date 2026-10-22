@@ -85,7 +85,7 @@ describe('buildFalUsage', () => {
       promptTokens: 0,
       completionTokens: 0,
       totalTokens: 0,
-      unitsBilled: 4,
+      billed: { quantity: 4, unit: 'units' },
     })
   })
 
@@ -94,7 +94,7 @@ describe('buildFalUsage', () => {
       promptTokens: 0,
       completionTokens: 0,
       totalTokens: 0,
-      unitsBilled: 0,
+      billed: { quantity: 0, unit: 'units' },
     })
   })
 })

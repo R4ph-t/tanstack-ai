@@ -14,7 +14,7 @@ import {
 import { grokBuildText } from '../src/index'
 import { GROK_BUILD_MODELS, resolveGrokCliModel } from '../src/model-meta'
 import type { InternalLogger } from '@tanstack/ai/adapter-internals'
-import type { CapabilityContext, StreamChunk } from '@tanstack/ai'
+import type { AdapterYieldChunk, CapabilityContext } from '@tanstack/ai'
 import type { SandboxHandle, SandboxPolicy } from '@tanstack/ai-sandbox'
 
 const baseDir = path.join(
@@ -69,9 +69,9 @@ function capabilityContextWith(
 }
 
 async function collect(
-  stream: AsyncIterable<StreamChunk>,
-): Promise<Array<StreamChunk>> {
-  const out: Array<StreamChunk> = []
+  stream: AsyncIterable<AdapterYieldChunk>,
+): Promise<Array<AdapterYieldChunk>> {
+  const out: Array<AdapterYieldChunk> = []
   for await (const chunk of stream) out.push(chunk)
   return out
 }
@@ -100,6 +100,7 @@ describe('grok-build in-sandbox adapter', () => {
 
     const chunks = await collect(
       adapter.chatStream({
+        threadId: 'thread-1',
         model: 'grok-build-0.1',
         messages: [{ role: 'user', content: 'say pong' }],
         logger: noopLogger,
@@ -120,6 +121,8 @@ describe('grok-build in-sandbox adapter', () => {
     expect(argv).toContain('grok-build-0.1')
     expect(argv).not.toContain('--mcp-config')
     expect(argv).toContain('--always-approve')
+    expect(argv).toContain('--no-plan')
+    expect(argv).toContain('--no-auto-update')
     expect(argv).toContain('--cwd')
     // local-process: harness cwd must be the real host dir, not virtual /workspace.
     expect(argv).toContain(sbx.id)
@@ -139,6 +142,7 @@ describe('grok-build in-sandbox adapter', () => {
 
     await collect(
       adapter.chatStream({
+        threadId: 'thread-1',
         model: 'grok-build-0.1',
         messages: [{ role: 'user', content: 'say pong' }],
         logger: noopLogger,
@@ -170,6 +174,7 @@ describe('grok-build in-sandbox adapter', () => {
 
     const chunks = await collect(
       adapter.chatStream({
+        threadId: 'thread-1',
         model: 'grok-build',
         messages: [{ role: 'user', content: 'say pong' }],
         logger: noopLogger,

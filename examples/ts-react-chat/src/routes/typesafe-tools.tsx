@@ -23,9 +23,9 @@ function TypesafeToolsPage() {
   const [prompt, setPrompt] = useState('Recommend me an acoustic guitar.')
 
   const { messages, sendMessage, isLoading, error } = useChat({
-    id: 'typesafe-tools-bare-array',
+    threadId: 'typesafe-tools-bare-array',
     connection: fetchServerSentEvents('/api/tanchat'),
-    body: { provider: 'openai', model: 'gpt-5.5' },
+    forwardedProps: { provider: 'openai', model: 'gpt-5.5' },
     // 👇 Bare array literal — no clientTools(), no `as const`.
     tools: [
       getGuitarsToolDef,

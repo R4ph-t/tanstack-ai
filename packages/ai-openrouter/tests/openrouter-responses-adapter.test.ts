@@ -3,9 +3,10 @@ import { EventType, chat } from '@tanstack/ai'
 import { resolveDebugOption } from '@tanstack/ai/adapter-internals'
 import { ResponsesRequest$outboundSchema } from '@openrouter/sdk/models'
 import { createOpenRouterResponsesText } from '../src/adapters/responses-text'
+import { createToolInputNormalizer } from '../src/internal/responses-tool-converter'
 import { webSearchTool } from '../src/tools/web-search-tool'
 import { webFetchTool } from '../src/tools/web-fetch-tool'
-import type { StreamChunk, Tool } from '@tanstack/ai'
+import type { AdapterYieldChunk, Tool } from '@tanstack/ai'
 
 const testLogger = resolveDebugOption(false)
 let mockSend: any
@@ -51,6 +52,34 @@ function createAsyncIterable<T>(chunks: Array<T>): AsyncIterable<T> {
   }
 }
 
+// Yields the chunks, then never ends (the HTTP body stays open).
+// `state.returned` is true once the consumer releases the iterator.
+function createOpenAsyncIterable<T>(chunks: Array<T>) {
+  const state = { returned: false }
+  const iterable: AsyncIterable<T> = {
+    [Symbol.asyncIterator]() {
+      let index = 0
+      return {
+        next() {
+          if (index < chunks.length) {
+            return Promise.resolve({ value: chunks[index++]!, done: false })
+          }
+          return new Promise<IteratorResult<T>>(() => {})
+        },
+        return() {
+          state.returned = true
+          return Promise.resolve({ value: undefined as T, done: true })
+        },
+      }
+    },
+  }
+  return { iterable, state }
+}
+
+function timeout(ms: number): Promise<'timeout'> {
+  return new Promise((resolve) => setTimeout(() => resolve('timeout'), ms))
+}
+
 function setupMockSdkClient(
   streamEvents: Array<Record<string, unknown>>,
   nonStreamResult?: Record<string, unknown>,
@@ -66,6 +95,36 @@ function setupMockSdkClient(
 describe('OpenRouter responses adapter — request shape', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+  })
+
+  it('sends reasoning effort, a summary, and the token budget', async () => {
+    setupMockSdkClient([])
+    const adapter = createOpenRouterResponsesText(
+      'google/gemini-2.5-pro',
+      'test-key',
+    )
+
+    for await (const _ of chat({
+      threadId: 'thread-1',
+      adapter,
+      messages: [{ role: 'user', content: 'test' }],
+      reasoning: { level: 'high', budgetTokens: 4000 },
+    })) {
+      // consume
+    }
+
+    const params = mockSend.mock.calls[0]![0].responsesRequest
+    expect(params.reasoning).toEqual({
+      effort: 'high',
+      summary: 'auto',
+      maxTokens: 4000,
+    })
+    const serialized = ResponsesRequest$outboundSchema.parse(params)
+    expect(serialized.reasoning).toEqual({
+      effort: 'high',
+      summary: 'auto',
+      max_tokens: 4000,
+    })
   })
 
   it('maps options into the Responses API payload (snake → camel)', async () => {
@@ -84,6 +143,7 @@ describe('OpenRouter responses adapter — request shape', () => {
     const adapter = createAdapter()
 
     for await (const _ of chat({
+      threadId: 'thread-1',
       adapter,
       systemPrompts: ['Stay concise'],
       messages: [{ role: 'user', content: 'How is the weather?' }],
@@ -143,6 +203,7 @@ describe('OpenRouter responses adapter — request shape', () => {
 
     const adapter = createAdapter()
     for await (const _ of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [
         {
@@ -187,6 +248,7 @@ describe('OpenRouter responses adapter — request shape', () => {
     ])
     const adapter = createAdapter()
     for await (const _ of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [{ role: 'user', content: 'hi' }],
       modelOptions: { variant: 'thinking' as any },
@@ -211,6 +273,7 @@ describe('OpenRouter responses adapter — request shape', () => {
     ])
     const adapter = createAdapter()
     for await (const _ of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [{ role: 'user', content: 'hi' }],
       // Root `metadata` is observability-only and may carry structured
@@ -241,6 +304,7 @@ describe('OpenRouter responses adapter — request shape', () => {
     ])
     const adapter = createAdapter()
     for await (const _ of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [{ role: 'user', content: 'hi' }],
       metadata: { observationName: 'my-call' },
@@ -254,8 +318,9 @@ describe('OpenRouter responses adapter — request shape', () => {
   it('rejects webSearchTool() as RUN_ERROR pointing at the chat adapter', async () => {
     const adapter = createAdapter()
     const ws = webSearchTool() as Tool
-    const events: Array<StreamChunk> = []
+    const events: Array<AdapterYieldChunk> = []
     for await (const evt of adapter.chatStream({
+      threadId: 'thread-1',
       model: 'openai/gpt-4o-mini' as any,
       messages: [{ role: 'user', content: 'hi' }],
       tools: [ws],
@@ -264,8 +329,12 @@ describe('OpenRouter responses adapter — request shape', () => {
       events.push(evt)
     }
     const runError = events.find(
-      (e): e is Extract<StreamChunk, { type: typeof EventType.RUN_ERROR }> =>
-        e.type === EventType.RUN_ERROR,
+      (
+        e,
+      ): e is Extract<
+        AdapterYieldChunk,
+        { type: typeof EventType.RUN_ERROR }
+      > => e.type === EventType.RUN_ERROR,
     )
     expect(runError).toBeDefined()
     expect(runError!.message).toMatch(/openRouterText/)
@@ -274,8 +343,9 @@ describe('OpenRouter responses adapter — request shape', () => {
   it('rejects webFetchTool() as RUN_ERROR pointing at the chat adapter', async () => {
     const adapter = createAdapter()
     const wf = webFetchTool() as Tool
-    const events: Array<StreamChunk> = []
+    const events: Array<AdapterYieldChunk> = []
     for await (const evt of adapter.chatStream({
+      threadId: 'thread-1',
       model: 'openai/gpt-4o-mini' as any,
       messages: [{ role: 'user', content: 'hi' }],
       tools: [wf],
@@ -284,8 +354,12 @@ describe('OpenRouter responses adapter — request shape', () => {
       events.push(evt)
     }
     const runError = events.find(
-      (e): e is Extract<StreamChunk, { type: typeof EventType.RUN_ERROR }> =>
-        e.type === EventType.RUN_ERROR,
+      (
+        e,
+      ): e is Extract<
+        AdapterYieldChunk,
+        { type: typeof EventType.RUN_ERROR }
+      > => e.type === EventType.RUN_ERROR,
     )
     expect(runError).toBeDefined()
     expect(runError!.message).toMatch(/webFetchTool/)
@@ -306,6 +380,7 @@ describe('OpenRouter responses adapter — request shape', () => {
     ])
     const adapter = createAdapter()
     for await (const _ of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [
         {
@@ -346,6 +421,7 @@ describe('OpenRouter responses adapter — request shape', () => {
     ])
     const adapter = createAdapter()
     for await (const _ of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [
         {
@@ -391,6 +467,7 @@ describe('OpenRouter responses adapter — request shape', () => {
     ])
     const adapter = createAdapter()
     for await (const _ of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [
         {
@@ -429,6 +506,7 @@ describe('OpenRouter responses adapter — request shape', () => {
     ])
     const adapter = createAdapter()
     for await (const _ of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [
         {
@@ -469,6 +547,7 @@ describe('OpenRouter responses adapter — request shape', () => {
     ])
     const adapter = createAdapter()
     for await (const _ of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [
         {
@@ -513,6 +592,7 @@ describe('OpenRouter responses adapter — request shape', () => {
     ])
     const adapter = createAdapter()
     for await (const _ of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [
         {
@@ -552,8 +632,9 @@ describe('OpenRouter responses adapter — request shape', () => {
     // inline document data so callers know to use the Responses adapter.
     const { createOpenRouterText } = await import('../src/adapters/text')
     const chatAdapter = createOpenRouterText('openai/gpt-4o-mini' as any, 'k')
-    const events: Array<StreamChunk> = []
+    const events: Array<AdapterYieldChunk> = []
     for await (const evt of chatAdapter.chatStream({
+      threadId: 'thread-1',
       model: 'openai/gpt-4o-mini',
       messages: [
         {
@@ -571,8 +652,12 @@ describe('OpenRouter responses adapter — request shape', () => {
       events.push(evt)
     }
     const runError = events.find(
-      (e): e is Extract<StreamChunk, { type: typeof EventType.RUN_ERROR }> =>
-        e.type === EventType.RUN_ERROR,
+      (
+        e,
+      ): e is Extract<
+        AdapterYieldChunk,
+        { type: typeof EventType.RUN_ERROR }
+      > => e.type === EventType.RUN_ERROR,
     )
     expect(runError).toBeDefined()
     expect(runError!.message.toLowerCase()).toMatch(
@@ -584,6 +669,177 @@ describe('OpenRouter responses adapter — request shape', () => {
 describe('OpenRouter responses adapter — stream event bridge', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+  })
+
+  it('reports RUN_ERROR when the stream ends before response.completed (#1447)', async () => {
+    setupMockSdkClient([
+      {
+        type: 'response.created',
+        sequenceNumber: 0,
+        response: { model: 'm', output: [] },
+      },
+      {
+        type: 'response.output_text.delta',
+        sequenceNumber: 1,
+        itemId: 'msg_1',
+        outputIndex: 0,
+        contentIndex: 0,
+        delta: 'The answer is ',
+      },
+    ])
+    const chunks: Array<AdapterYieldChunk> = []
+    for await (const c of chat({
+      threadId: 'thread-1',
+      adapter: createAdapter(),
+      messages: [{ role: 'user', content: 'hi' }],
+    })) {
+      chunks.push(c)
+    }
+
+    const last = chunks.at(-1)
+    expect(last?.type).toBe('RUN_ERROR')
+    if (last?.type === 'RUN_ERROR') {
+      expect(last.code).toBe('incomplete-stream')
+    }
+    expect(chunks.some((c) => c.type === 'RUN_FINISHED')).toBe(false)
+  })
+
+  it('finishes chat() on response.completed without waiting for EOF (#1445)', async () => {
+    const { iterable, state } = createOpenAsyncIterable([
+      {
+        type: 'response.created',
+        sequenceNumber: 0,
+        response: { model: 'm', output: [] },
+      },
+      {
+        type: 'response.output_text.delta',
+        sequenceNumber: 1,
+        itemId: 'msg_1',
+        outputIndex: 0,
+        contentIndex: 0,
+        delta: 'OK',
+      },
+      {
+        type: 'response.completed',
+        sequenceNumber: 2,
+        response: {
+          model: 'm',
+          output: [],
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        },
+      },
+    ])
+    mockSend = vi.fn().mockResolvedValue(iterable)
+    const chunks: Array<AdapterYieldChunk> = []
+    const run = (async () => {
+      for await (const c of chat({
+        threadId: 'thread-1',
+        adapter: createAdapter(),
+        messages: [{ role: 'user', content: 'hi' }],
+      })) {
+        chunks.push(c)
+      }
+      return 'finished' as const
+    })()
+
+    expect(await Promise.race([run, timeout(1000)])).toBe('finished')
+    expect(chunks.at(-1)?.type).toBe('RUN_FINISHED')
+    expect(state.returned).toBe(true)
+  })
+
+  it('finishes structuredOutputStream on response.completed without waiting for EOF (#1445)', async () => {
+    const { iterable, state } = createOpenAsyncIterable([
+      {
+        type: 'response.created',
+        sequenceNumber: 0,
+        response: { model: 'm', output: [] },
+      },
+      {
+        type: 'response.output_text.delta',
+        sequenceNumber: 1,
+        itemId: 'msg_1',
+        outputIndex: 0,
+        contentIndex: 0,
+        delta: '{"name":"Alice"}',
+      },
+      {
+        type: 'response.completed',
+        sequenceNumber: 2,
+        response: {
+          model: 'm',
+          output: [],
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        },
+      },
+    ])
+    mockSend = vi.fn().mockResolvedValue(iterable)
+    const chunks: Array<AdapterYieldChunk> = []
+    const run = (async () => {
+      for await (const c of createAdapter().structuredOutputStream({
+        chatOptions: {
+          threadId: 'thread-1',
+          model: 'openai/gpt-4o-mini' as any,
+          messages: [{ role: 'user', content: 'profile?' }],
+          logger: testLogger,
+        },
+        outputSchema: {
+          type: 'object',
+          properties: { name: { type: 'string' } },
+          required: ['name'],
+        },
+      })) {
+        chunks.push(c)
+      }
+      return 'finished' as const
+    })()
+
+    expect(await Promise.race([run, timeout(1000)])).toBe('finished')
+    expect(chunks.at(-1)?.type).toBe('RUN_FINISHED')
+    expect(state.returned).toBe(true)
+  })
+
+  it('reports structuredOutputStream EOF without response.completed after valid JSON', async () => {
+    setupMockSdkClient([
+      {
+        type: 'response.created',
+        sequenceNumber: 0,
+        response: { model: 'm', output: [] },
+      },
+      {
+        type: 'response.output_text.delta',
+        sequenceNumber: 1,
+        itemId: 'msg_1',
+        outputIndex: 0,
+        contentIndex: 0,
+        delta: '{"name":"Alice"}',
+      },
+    ])
+    const chunks: Array<AdapterYieldChunk> = []
+    for await (const c of createAdapter().structuredOutputStream({
+      chatOptions: {
+        threadId: 'thread-1',
+        model: 'openai/gpt-4o-mini' as any,
+        messages: [{ role: 'user', content: 'profile?' }],
+        logger: testLogger,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: { name: { type: 'string' } },
+        required: ['name'],
+      },
+    })) {
+      chunks.push(c)
+    }
+
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'RUN_ERROR',
+      code: 'incomplete-stream',
+    })
+    expect(
+      chunks.some(
+        (c) => c.type === 'CUSTOM' && c.name === 'structured-output.complete',
+      ),
+    ).toBe(false)
   })
 
   it('routes text deltas through TEXT_MESSAGE_* lifecycle', async () => {
@@ -620,8 +876,9 @@ describe('OpenRouter responses adapter — stream event bridge', () => {
       },
     ])
     const adapter = createAdapter()
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const c of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [{ role: 'user', content: 'hi' }],
     })) {
@@ -639,6 +896,207 @@ describe('OpenRouter responses adapter — stream event bridge', () => {
       completionTokens: 2,
       totalTokens: 3,
     })
+  })
+
+  it('recovers final text from response.completed when no text was streamed', async () => {
+    setupMockSdkClient([
+      {
+        type: 'response.created',
+        sequenceNumber: 0,
+        response: { model: 'm', output: [] },
+      },
+      {
+        type: 'response.content_part.added',
+        sequenceNumber: 1,
+        outputIndex: 0,
+        contentIndex: 0,
+        itemId: 'msg_1',
+        part: { type: 'output_text', text: '' },
+      },
+      {
+        type: 'response.completed',
+        sequenceNumber: 2,
+        response: {
+          model: 'm',
+          output: [
+            {
+              id: 'msg_1',
+              type: 'message',
+              role: 'assistant',
+              status: 'completed',
+              content: [
+                {
+                  type: 'output_text',
+                  text: 'Recovered final answer',
+                  annotations: [],
+                },
+              ],
+            },
+          ],
+          usage: { inputTokens: 5, outputTokens: 3, totalTokens: 8 },
+        },
+      },
+    ])
+    const adapter = createAdapter()
+    const chunks: Array<AdapterYieldChunk> = []
+
+    for await (const chunk of adapter.chatStream({
+      threadId: 'thread-1',
+      model: 'openai/gpt-4o-mini' as any,
+      messages: [{ role: 'user', content: 'Answer carefully' }],
+      logger: testLogger,
+    })) {
+      chunks.push(chunk)
+    }
+
+    const contentChunks = chunks.filter(
+      (chunk) => chunk.type === EventType.TEXT_MESSAGE_CONTENT,
+    )
+    expect(contentChunks).toHaveLength(1)
+    expect(contentChunks[0]).toMatchObject({
+      delta: 'Recovered final answer',
+      content: 'Recovered final answer',
+    })
+
+    const eventTypes = chunks.map((chunk) => chunk.type)
+    const startIndex = eventTypes.indexOf(EventType.TEXT_MESSAGE_START)
+    const contentIndex = eventTypes.indexOf(EventType.TEXT_MESSAGE_CONTENT)
+    const endIndex = eventTypes.indexOf(EventType.TEXT_MESSAGE_END)
+    const finishedIndex = eventTypes.indexOf(EventType.RUN_FINISHED)
+    expect(startIndex).toBeGreaterThanOrEqual(0)
+    expect(contentIndex).toBeGreaterThan(startIndex)
+    expect(endIndex).toBeGreaterThan(contentIndex)
+    expect(finishedIndex).toBeGreaterThan(endIndex)
+  })
+
+  it('recovers final text from response.output_text.done when no delta was streamed', async () => {
+    setupMockSdkClient([
+      {
+        type: 'response.created',
+        sequenceNumber: 0,
+        response: { model: 'm', output: [] },
+      },
+      {
+        type: 'response.output_text.done',
+        sequenceNumber: 1,
+        outputIndex: 0,
+        contentIndex: 0,
+        itemId: 'msg_1',
+        logprobs: [],
+        text: 'Recovered done-event answer',
+      },
+      {
+        type: 'response.completed',
+        sequenceNumber: 2,
+        response: {
+          model: 'm',
+          output: [],
+          usage: { inputTokens: 5, outputTokens: 3, totalTokens: 8 },
+        },
+      },
+    ])
+    const adapter = createAdapter()
+    const chunks: Array<AdapterYieldChunk> = []
+
+    for await (const chunk of adapter.chatStream({
+      threadId: 'thread-1',
+      model: adapter.model,
+      messages: [{ role: 'user', content: 'Answer carefully' }],
+      logger: testLogger,
+    })) {
+      chunks.push(chunk)
+    }
+
+    expect(
+      chunks.filter((chunk) => chunk.type === EventType.TEXT_MESSAGE_CONTENT),
+    ).toEqual([
+      expect.objectContaining({
+        delta: 'Recovered done-event answer',
+        content: 'Recovered done-event answer',
+      }),
+    ])
+  })
+
+  it('recovers final text from response.completed outputText', async () => {
+    setupMockSdkClient([
+      {
+        type: 'response.created',
+        sequenceNumber: 0,
+        response: { model: 'm', output: [] },
+      },
+      {
+        type: 'response.completed',
+        sequenceNumber: 1,
+        response: {
+          model: 'm',
+          output: [],
+          outputText: 'Recovered outputText answer',
+          usage: { inputTokens: 5, outputTokens: 3, totalTokens: 8 },
+        },
+      },
+    ])
+    const adapter = createAdapter()
+    const chunks: Array<AdapterYieldChunk> = []
+
+    for await (const chunk of adapter.chatStream({
+      threadId: 'thread-1',
+      model: adapter.model,
+      messages: [{ role: 'user', content: 'Answer carefully' }],
+      logger: testLogger,
+    })) {
+      chunks.push(chunk)
+    }
+
+    expect(
+      chunks.filter((chunk) => chunk.type === EventType.TEXT_MESSAGE_CONTENT),
+    ).toEqual([
+      expect.objectContaining({
+        delta: 'Recovered outputText answer',
+        content: 'Recovered outputText answer',
+      }),
+    ])
+  })
+
+  it('recovers final text from raw response.completed output_text', async () => {
+    setupMockSdkClient([
+      {
+        isUnknown: true,
+        raw: {
+          type: 'response.completed',
+          sequence_number: 1,
+          response: {
+            model: 'm',
+            output: [],
+            output_text: 'Recovered raw output_text answer',
+            usage: {
+              input_tokens: 5,
+              output_tokens: 3,
+              total_tokens: 8,
+            },
+          },
+        },
+      },
+    ])
+    const adapter = createAdapter()
+    const chunks: Array<AdapterYieldChunk> = []
+
+    for await (const chunk of adapter.chatStream({
+      threadId: 'thread-1',
+      model: adapter.model,
+      messages: [{ role: 'user', content: 'Answer carefully' }],
+      logger: testLogger,
+    })) {
+      chunks.push(chunk)
+    }
+
+    expect(
+      chunks.filter((chunk) => chunk.type === EventType.TEXT_MESSAGE_CONTENT),
+    ).toEqual([
+      expect.objectContaining({
+        delta: 'Recovered raw output_text answer',
+        content: 'Recovered raw output_text answer',
+      }),
+    ])
   })
 
   it('routes function-call args through TOOL_CALL_START/ARGS/END', async () => {
@@ -686,8 +1144,9 @@ describe('OpenRouter responses adapter — stream event bridge', () => {
     ])
 
     const adapter = createAdapter()
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const c of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [{ role: 'user', content: 'hi' }],
       tools: [weatherTool],
@@ -698,19 +1157,445 @@ describe('OpenRouter responses adapter — stream event bridge', () => {
     const start = chunks.find((c) => c.type === 'TOOL_CALL_START') as any
     expect(start).toMatchObject({
       type: 'TOOL_CALL_START',
-      toolCallId: 'item_1',
+      toolCallId: 'call_abc',
       toolCallName: 'lookup_weather',
+      metadata: { itemId: 'item_1' },
     })
 
     const args = chunks.filter((c) => c.type === 'TOOL_CALL_ARGS') as any[]
     expect(args.length).toBe(1)
+    expect(args[0]!.toolCallId).toBe('call_abc')
     expect(args[0]!.delta).toBe('{"location":"Berlin"}')
 
     const end = chunks.find((c) => c.type === 'TOOL_CALL_END') as any
+    expect(end.toolCallId).toBe('call_abc')
     expect(end.input).toEqual({ location: 'Berlin' })
 
-    const finished = chunks.find((c) => c.type === 'RUN_FINISHED') as any
-    expect(finished.finishReason).toBe('tool_calls')
+    const finished = chunks.find((c) => c.type === 'RUN_FINISHED')
+    if (finished === undefined) {
+      throw new Error('expected RUN_FINISHED')
+    }
+    expect(finished.metadata?.tanstack?.finishReason).toBe('tool_calls')
+  })
+
+  // Strict tools reach the model with optionals widened to required +
+  // nullable, so an omitted optional comes back as `null`. Only those nulls are
+  // stripped; a genuine `.nullable()` null stays. Each row delivers the
+  // arguments through a different TOOL_CALL_END emit path.
+  const widenedArguments =
+    '{"guitar":"Martin D-28","color":null,"strings":{"gauges":["10","46"],"brand":null},"note":null,"case":null,"pickup":{"store":"Berlin","date":null}}'
+  const widenedCall = {
+    type: 'function_call',
+    id: 'item_1',
+    callId: 'call_abc',
+    name: 'recommend_guitar',
+  }
+  const widenedCallAdded = {
+    type: 'response.output_item.added',
+    sequenceNumber: 1,
+    outputIndex: 0,
+    item: { ...widenedCall, arguments: '' },
+  }
+  it.each([
+    {
+      path: 'function_call_arguments.done',
+      events: [
+        widenedCallAdded,
+        {
+          type: 'response.function_call_arguments.done',
+          sequenceNumber: 2,
+          itemId: 'item_1',
+          outputIndex: 0,
+          arguments: widenedArguments,
+        },
+      ],
+      completedOutput: [{ type: 'function_call' }],
+    },
+    {
+      path: 'output_item.done backfill',
+      events: [
+        widenedCallAdded,
+        {
+          type: 'response.output_item.done',
+          sequenceNumber: 2,
+          outputIndex: 0,
+          item: { ...widenedCall, arguments: widenedArguments },
+        },
+      ],
+      completedOutput: [],
+    },
+    {
+      path: 'response.completed backfill',
+      events: [],
+      completedOutput: [{ ...widenedCall, arguments: widenedArguments }],
+    },
+  ])(
+    'undoes strict null-widening on the $path path',
+    async ({ events, completedOutput }) => {
+      const strictTool: Tool = {
+        name: 'recommend_guitar',
+        description: 'Recommend a guitar',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            guitar: { type: 'string' },
+            color: { type: 'string' },
+            strings: {
+              type: 'object',
+              properties: {
+                gauges: { type: 'array', items: { type: 'string' } },
+                brand: { type: 'string' },
+              },
+              required: ['gauges'],
+            },
+            note: { type: ['string', 'null'] },
+            case: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+            pickup: {
+              anyOf: [
+                {
+                  type: 'object',
+                  properties: {
+                    store: { type: 'string' },
+                    date: { type: 'string' },
+                  },
+                  required: ['store'],
+                },
+                { type: 'null' },
+              ],
+            },
+          },
+          required: ['guitar', 'note', 'pickup'],
+        },
+      }
+      setupMockSdkClient([
+        {
+          type: 'response.created',
+          sequenceNumber: 0,
+          response: { model: 'm', output: [] },
+        },
+        ...events,
+        {
+          type: 'response.completed',
+          sequenceNumber: 3,
+          response: {
+            model: 'm',
+            output: completedOutput,
+            usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+          },
+        },
+      ])
+
+      const chunks: Array<AdapterYieldChunk> = []
+      for await (const c of createAdapter().chatStream({
+        threadId: 'thread-1',
+        logger: testLogger,
+        model: 'openai/gpt-4o-mini',
+        messages: [{ role: 'user', content: 'Hello' }],
+        tools: [strictTool],
+      })) {
+        chunks.push(c)
+      }
+
+      const end = chunks.find((c) => c.type === 'TOOL_CALL_END')
+      if (end?.type !== 'TOOL_CALL_END') {
+        throw new Error('expected TOOL_CALL_END')
+      }
+      expect(end.input).toEqual({
+        guitar: 'Martin D-28',
+        strings: { gauges: ['10', '46'] },
+        note: null,
+        case: null,
+        pickup: { store: 'Berlin' },
+      })
+    },
+  )
+
+  it('preserves a streamed function-call name when later items omit it', async () => {
+    setupMockSdkClient([
+      {
+        type: 'response.output_item.added',
+        sequenceNumber: 0,
+        outputIndex: 0,
+        item: {
+          type: 'function_call',
+          id: 'item_1',
+          callId: 'call_abc',
+          arguments: '',
+        },
+      },
+      {
+        type: 'response.output_item.added',
+        sequenceNumber: 1,
+        outputIndex: 0,
+        item: {
+          type: 'function_call',
+          id: 'item_1',
+          callId: 'call_abc',
+          name: 'lookup_weather',
+          arguments: '',
+        },
+      },
+      {
+        type: 'response.output_item.done',
+        sequenceNumber: 2,
+        outputIndex: 0,
+        item: {
+          type: 'function_call',
+          id: 'item_1',
+          callId: 'call_abc',
+          arguments: '{"location":"Berlin"}',
+        },
+      },
+      {
+        type: 'response.completed',
+        sequenceNumber: 3,
+        response: {
+          model: 'm',
+          output: [],
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        },
+      },
+    ])
+
+    const chunks: Array<AdapterYieldChunk> = []
+    for await (const chunk of chat({
+      threadId: 'thread-1',
+      adapter: createAdapter(),
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: [weatherTool],
+    })) {
+      chunks.push(chunk)
+    }
+
+    expect(
+      chunks.find((chunk) => chunk.type === 'TOOL_CALL_START'),
+    ).toMatchObject({
+      toolCallName: 'lookup_weather',
+    })
+    expect(
+      chunks.find((chunk) => chunk.type === 'TOOL_CALL_END'),
+    ).toMatchObject({
+      toolCallId: 'call_abc',
+      input: { location: 'Berlin' },
+    })
+  })
+
+  describe('raw tool arguments', () => {
+    type EndSite = 'arguments.done' | 'output_item.done' | 'response.completed'
+
+    // Each site emits TOOL_CALL_END from a different event. Without a name on
+    // output_item.added, args.done is deferred to a later backfill.
+    function rawArgsStream(
+      site: EndSite,
+      raw: string,
+    ): Array<Record<string, unknown>> {
+      const named = {
+        type: 'function_call',
+        id: 'item_raw',
+        callId: 'call_raw',
+        name: 'lookup_weather',
+      }
+      return [
+        {
+          type: 'response.output_item.added',
+          sequenceNumber: 0,
+          outputIndex: 0,
+          item:
+            site === 'arguments.done'
+              ? { ...named, arguments: '' }
+              : {
+                  type: 'function_call',
+                  id: 'item_raw',
+                  callId: 'call_raw',
+                  arguments: '',
+                },
+        },
+        {
+          type: 'response.function_call_arguments.done',
+          sequenceNumber: 1,
+          itemId: 'item_raw',
+          outputIndex: 0,
+          arguments: raw,
+        },
+        ...(site === 'output_item.done'
+          ? [
+              {
+                type: 'response.output_item.done',
+                sequenceNumber: 2,
+                outputIndex: 0,
+                item: { ...named, arguments: raw },
+              },
+            ]
+          : []),
+        {
+          type: 'response.completed',
+          sequenceNumber: 3,
+          response: {
+            model: 'm',
+            output: [{ ...named, arguments: raw }],
+            usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+          },
+        },
+      ]
+    }
+
+    async function toolEnds(site: EndSite, raw: string) {
+      setupMockSdkClient(rawArgsStream(site, raw))
+      const chunks: Array<AdapterYieldChunk> = []
+      for await (const chunk of createAdapter().chatStream({
+        threadId: 'thread-1',
+        model: 'openai/gpt-4o-mini',
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [weatherTool],
+        logger: testLogger,
+      })) {
+        chunks.push(chunk)
+      }
+      return chunks.filter((chunk) => chunk.type === 'TOOL_CALL_END')
+    }
+
+    it.each<EndSite>([
+      'arguments.done',
+      'output_item.done',
+      'response.completed',
+    ])(
+      'sends the raw argument string as args on TOOL_CALL_END (%s)',
+      async (site) => {
+        const ends = await toolEnds(site, '{"n": 1.50}')
+        expect(ends).toHaveLength(1)
+        expect(ends[0]).toMatchObject({
+          toolCallId: 'call_raw',
+          args: '{"n": 1.50}',
+          input: { n: 1.5 },
+        })
+      },
+    )
+
+    it.each<EndSite>([
+      'arguments.done',
+      'output_item.done',
+      'response.completed',
+    ])('sends malformed arguments as args with no input (%s)', async (site) => {
+      const ends = await toolEnds(site, '{"a":')
+      expect(ends).toHaveLength(1)
+      expect(ends[0]).toMatchObject({ toolCallId: 'call_raw', args: '{"a":' })
+      expect(ends[0]).not.toHaveProperty('input')
+    })
+  })
+
+  it('round-trips distinct Responses item and call IDs through a server tool', async () => {
+    const firstTurn = [
+      {
+        type: 'response.created',
+        sequenceNumber: 0,
+        response: { model: 'm', output: [] },
+      },
+      {
+        type: 'response.output_item.added',
+        sequenceNumber: 1,
+        outputIndex: 0,
+        item: {
+          type: 'function_call',
+          id: 'item_1',
+          callId: 'call_abc',
+          name: 'lookup_weather',
+          arguments: '',
+        },
+      },
+      {
+        type: 'response.function_call_arguments.done',
+        sequenceNumber: 2,
+        itemId: 'item_1',
+        outputIndex: 0,
+        arguments: '{"location":"Berlin"}',
+      },
+      {
+        type: 'response.completed',
+        sequenceNumber: 3,
+        response: {
+          model: 'm',
+          output: [
+            {
+              type: 'function_call',
+              id: 'item_1',
+              callId: 'call_abc',
+              name: 'lookup_weather',
+              arguments: '{"location":"Berlin"}',
+            },
+          ],
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        },
+      },
+    ]
+    const secondTurn = [
+      {
+        type: 'response.created',
+        sequenceNumber: 0,
+        response: { model: 'm', output: [] },
+      },
+      {
+        type: 'response.output_text.delta',
+        sequenceNumber: 1,
+        itemId: 'msg_1',
+        outputIndex: 0,
+        contentIndex: 0,
+        delta: 'Sunny',
+      },
+      {
+        type: 'response.completed',
+        sequenceNumber: 2,
+        response: {
+          model: 'm',
+          output: [],
+          usage: { inputTokens: 2, outputTokens: 1, totalTokens: 3 },
+        },
+      },
+    ]
+    mockSend = vi
+      .fn()
+      .mockResolvedValueOnce(createAsyncIterable(firstTurn))
+      .mockResolvedValueOnce(createAsyncIterable(secondTurn))
+    const execute = vi.fn().mockReturnValue({ temperature: 72 })
+
+    for await (const _ of chat({
+      threadId: 'thread-1',
+      adapter: createAdapter(),
+      messages: [{ role: 'user', content: 'How is the weather?' }],
+      tools: [{ ...weatherTool, execute }],
+    })) {
+      // consume both agent-loop turns
+    }
+
+    expect(execute).toHaveBeenCalledOnce()
+    expect(mockSend).toHaveBeenCalledTimes(2)
+    const secondRequest = mockSend.mock.calls[1]![0].responsesRequest
+    expect(secondRequest.input).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'function_call',
+          id: 'item_1',
+          callId: 'call_abc',
+        }),
+        expect.objectContaining({
+          type: 'function_call_output',
+          callId: 'call_abc',
+        }),
+      ]),
+    )
+    const serialized = ResponsesRequest$outboundSchema.parse(secondRequest)
+    expect(serialized.input).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'function_call',
+          id: 'item_1',
+          call_id: 'call_abc',
+        }),
+        expect.objectContaining({
+          type: 'function_call_output',
+          call_id: 'call_abc',
+        }),
+      ]),
+    )
   })
 
   it('emits parentMessageId on tool-first tool calls matching the assistant message id', async () => {
@@ -769,8 +1654,9 @@ describe('OpenRouter responses adapter — stream event bridge', () => {
     ])
 
     const adapter = createAdapter()
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const c of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [{ role: 'user', content: 'What is the weather in Berlin?' }],
       tools: [weatherTool],
@@ -809,8 +1695,9 @@ describe('OpenRouter responses adapter — stream event bridge', () => {
       },
     ])
     const adapter = createAdapter()
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const c of adapter.chatStream({
+      threadId: 'thread-1',
       model: 'openai/gpt-4o-mini' as any,
       messages: [{ role: 'user', content: 'hi' }],
       logger: testLogger,
@@ -841,8 +1728,9 @@ describe('OpenRouter responses adapter — stream event bridge', () => {
     )
 
     const adapter = createAdapter()
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const c of adapter.chatStream({
+      threadId: 'thread-1',
       model: 'openai/gpt-4o-mini' as any,
       messages: [{ role: 'user', content: 'hi' }],
       logger: testLogger,
@@ -873,8 +1761,9 @@ describe('OpenRouter responses adapter — stream event bridge', () => {
       },
     ])
     const adapter = createAdapter()
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const c of adapter.chatStream({
+      threadId: 'thread-1',
       model: 'openai/gpt-4o-mini' as any,
       messages: [{ role: 'user', content: 'hi' }],
       logger: testLogger,
@@ -904,8 +1793,9 @@ describe('OpenRouter responses adapter — stream event bridge', () => {
       },
     ])
     const adapter = createAdapter()
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const c of adapter.chatStream({
+      threadId: 'thread-1',
       model: 'openai/gpt-4o-mini' as any,
       messages: [{ role: 'user', content: 'hi' }],
       logger: testLogger,
@@ -940,8 +1830,9 @@ describe('OpenRouter responses adapter — stream event bridge', () => {
       },
     ])
     const adapter = createAdapter()
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const c of adapter.chatStream({
+      threadId: 'thread-1',
       model: 'openai/gpt-4o-mini' as any,
       messages: [{ role: 'user', content: 'hi' }],
       logger: testLogger,
@@ -1007,8 +1898,9 @@ describe('OpenRouter responses adapter — stream event bridge', () => {
       },
     ])
     const adapter = createAdapter()
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const c of adapter.chatStream({
+      threadId: 'thread-1',
       model: 'openai/gpt-4o-mini' as any,
       messages: [{ role: 'user', content: 'hi' }],
       logger: testLogger,
@@ -1028,6 +1920,51 @@ describe('OpenRouter responses adapter — stream event bridge', () => {
       .join('')
     expect(allContent).toBe('partial ')
     expect(allContent).not.toContain('after-error')
+  })
+
+  it('emits REASONING_MESSAGE_CONTENT for reasoning_text.delta', async () => {
+    setupMockSdkClient([
+      {
+        type: 'response.created',
+        sequenceNumber: 0,
+        response: { model: 'm', output: [] },
+      },
+      {
+        type: 'response.reasoning_text.delta',
+        sequenceNumber: 1,
+        delta: 'Let me think.',
+      },
+      {
+        type: 'response.output_text.delta',
+        sequenceNumber: 2,
+        delta: 'Done.',
+      },
+      {
+        type: 'response.completed',
+        sequenceNumber: 3,
+        response: {
+          model: 'm',
+          output: [],
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        },
+      },
+    ])
+    const adapter = createAdapter()
+    const chunks: Array<AdapterYieldChunk> = []
+    for await (const c of adapter.chatStream({
+      threadId: 'thread-1',
+      model: 'openai/gpt-4o-mini' as any,
+      messages: [{ role: 'user', content: 'think' }],
+      logger: testLogger,
+    })) {
+      chunks.push(c)
+    }
+
+    const reasoning = chunks.find((c) => c.type === 'REASONING_MESSAGE_CONTENT')
+    expect(reasoning).toBeDefined()
+    if (reasoning?.type === 'REASONING_MESSAGE_CONTENT') {
+      expect(reasoning.delta).toBe('Let me think.')
+    }
   })
 })
 
@@ -1068,6 +2005,7 @@ describe('OpenRouter responses adapter — structured output', () => {
     const adapter = createAdapter()
     const result = await adapter.structuredOutput({
       chatOptions: {
+        threadId: 'thread-1',
         model: 'openai/gpt-4o-mini' as any,
         messages: [{ role: 'user', content: 'profile?' }],
         logger: testLogger,
@@ -1090,6 +2028,101 @@ describe('OpenRouter responses adapter — structured output', () => {
     })
     // Critical: nickname should be `null`, not `undefined`.
     expect((result.data as any).nickname).toBeNull()
+  })
+
+  it('forwards response.usage tokens and cost on structuredOutput (#1076)', async () => {
+    // Regression: non-stream structuredOutput dropped Responses usage/cost,
+    // so consumers never saw TokenUsage after outputSchema finalization.
+    setupMockSdkClient([], {
+      output: [
+        {
+          type: 'message',
+          content: [
+            {
+              type: 'output_text',
+              text: JSON.stringify({ title: 'Hello' }),
+            },
+          ],
+        },
+      ],
+      usage: {
+        inputTokens: 10,
+        outputTokens: 3,
+        totalTokens: 13,
+        cost: 0.0011,
+        costDetails: { upstreamInferenceCost: 0.0009 },
+      },
+    })
+
+    const adapter = createAdapter()
+    const result = await adapter.structuredOutput({
+      chatOptions: {
+        threadId: 'thread-1',
+        model: 'openai/gpt-4o-mini' as any,
+        messages: [{ role: 'user', content: 'title?' }],
+        logger: testLogger,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: { title: { type: 'string' } },
+        required: ['title'],
+      },
+    })
+
+    expect(result.data).toEqual({ title: 'Hello' })
+    expect(result.usage).toEqual({
+      promptTokens: 10,
+      completionTokens: 3,
+      totalTokens: 13,
+      cost: 0.0011,
+      costDetails: { upstreamCost: 0.0009 },
+    })
+  })
+
+  it('forwards cost-only usage on structuredOutput (no token fields)', async () => {
+    // Regression: hasUsage used to require input/output/total tokens, so a
+    // usage object with only OpenRouter cost was dropped entirely.
+    setupMockSdkClient([], {
+      output: [
+        {
+          type: 'message',
+          content: [
+            {
+              type: 'output_text',
+              text: JSON.stringify({ title: 'Hello' }),
+            },
+          ],
+        },
+      ],
+      usage: {
+        cost: 0.0025,
+        costDetails: { upstreamInferenceCost: 0.002 },
+      },
+    })
+
+    const adapter = createAdapter()
+    const result = await adapter.structuredOutput({
+      chatOptions: {
+        threadId: 'thread-1',
+        model: 'openai/gpt-4o-mini' as any,
+        messages: [{ role: 'user', content: 'title?' }],
+        logger: testLogger,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: { title: { type: 'string' } },
+        required: ['title'],
+      },
+    })
+
+    expect(result.data).toEqual({ title: 'Hello' })
+    expect(result.usage).toEqual({
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      cost: 0.0025,
+      costDetails: { upstreamCost: 0.002 },
+    })
   })
 })
 
@@ -1125,6 +2158,7 @@ describe('OpenRouter responses adapter — SDK constructor wiring', () => {
     const adapter = createAdapter()
     const controller = new AbortController()
     for await (const _ of adapter.chatStream({
+      threadId: 'thread-1',
       model: 'openai/gpt-4o-mini' as any,
       messages: [{ role: 'user', content: 'hi' }],
       logger: testLogger,
@@ -1151,6 +2185,7 @@ describe('OpenRouter responses adapter — SDK constructor wiring', () => {
     const adapter = createAdapter()
     const headers = { 'X-Trace-Id': 'trace-r1' }
     for await (const _ of adapter.chatStream({
+      threadId: 'thread-1',
       model: 'openai/gpt-4o-mini' as any,
       messages: [{ role: 'user', content: 'hi' }],
       logger: testLogger,
@@ -1181,8 +2216,9 @@ describe('OpenRouter responses adapter — cost tracking', () => {
       },
     ])
     const adapter = createAdapter()
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const chunk of adapter.chatStream({
+      threadId: 'thread-1',
       model: 'openai/gpt-4o-mini' as any,
       messages: [{ role: 'user', content: 'hi' }],
       logger: testLogger,
@@ -1264,8 +2300,9 @@ describe('OpenRouter responses adapter — cost tracking', () => {
       },
     ])
     const adapter = createAdapter()
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const chunk of adapter.chatStream({
+      threadId: 'thread-1',
       model: 'openai/gpt-4o-mini' as any,
       messages: [{ role: 'user', content: 'hi' }],
       logger: testLogger,
@@ -1287,5 +2324,220 @@ describe('OpenRouter responses adapter — cost tracking', () => {
         },
       },
     })
+  })
+})
+
+describe('OpenRouter responses adapter — stream fields', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const completed = {
+    type: 'response.completed',
+    sequenceNumber: 9,
+    response: {
+      model: 'm',
+      output: [],
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    },
+  }
+
+  const collectStream = async (events: Array<Record<string, unknown>>) => {
+    setupMockSdkClient(events)
+    const adapter = createAdapter()
+    const chunks: Array<AdapterYieldChunk> = []
+    for await (const chunk of adapter.chatStream({
+      threadId: 'thread-1',
+      model: adapter.model,
+      messages: [{ role: 'user', content: 'hi' }],
+      logger: testLogger,
+    })) {
+      chunks.push(chunk)
+    }
+    return chunks
+  }
+
+  it.each([
+    {
+      shape: 'parsed',
+      event: {
+        type: 'response.completed',
+        sequenceNumber: 1,
+        response: {
+          model: 'm',
+          output: [],
+          usage: {
+            inputTokens: 100,
+            inputTokensDetails: { cachedTokens: 40 },
+            outputTokens: 50,
+            totalTokens: 150,
+          },
+        },
+      },
+    },
+    {
+      shape: 'raw (UNKNOWN)',
+      event: {
+        isUnknown: true,
+        raw: {
+          type: 'response.completed',
+          sequence_number: 1,
+          response: {
+            model: 'm',
+            output: [],
+            usage: {
+              input_tokens: 100,
+              input_tokens_details: { cached_tokens: 40 },
+              output_tokens: 50,
+              total_tokens: 150,
+            },
+          },
+        },
+      },
+    },
+  ])('reads cached input tokens from a $shape event', async ({ event }) => {
+    const chunks = await collectStream([event])
+    expect(chunks.find((c) => c.type === 'RUN_FINISHED')).toMatchObject({
+      usage: {
+        promptTokens: 100,
+        completionTokens: 50,
+        totalTokens: 150,
+        promptTokensDetails: { cachedTokens: 40 },
+      },
+    })
+  })
+
+  it('reads a function call from an output item the SDK could not parse', async () => {
+    const chunks = await collectStream([
+      {
+        type: 'response.output_item.done',
+        sequenceNumber: 1,
+        outputIndex: 0,
+        item: {
+          type: 'UNKNOWN',
+          isUnknown: true,
+          raw: {
+            type: 'function_call',
+            id: 'item_1',
+            call_id: 'call_abc',
+            name: 'lookup_weather',
+            arguments: '{"location":"Berlin"}',
+          },
+        },
+      },
+      completed,
+    ])
+    expect(chunks.find((c) => c.type === 'TOOL_CALL_START')).toMatchObject({
+      toolCallId: 'call_abc',
+      toolCallName: 'lookup_weather',
+    })
+    expect(chunks.find((c) => c.type === 'TOOL_CALL_END')).toMatchObject({
+      toolCallId: 'call_abc',
+      input: { location: 'Berlin' },
+    })
+  })
+
+  it('reads structured output from a message item the SDK could not parse', async () => {
+    setupMockSdkClient([], {
+      id: 'resp_1',
+      model: 'm',
+      output: [
+        {
+          type: 'UNKNOWN',
+          isUnknown: true,
+          raw: {
+            type: 'message',
+            id: 'msg_1',
+            role: 'assistant',
+            content: [{ type: 'output_text', text: '{"ok":true}' }],
+          },
+        },
+      ],
+    })
+    const adapter = createAdapter()
+    const result = await adapter.structuredOutput({
+      chatOptions: {
+        threadId: 'thread-1',
+        model: adapter.model,
+        messages: [{ role: 'user', content: 'ok?' }],
+        logger: testLogger,
+      },
+      outputSchema: { type: 'object' },
+    })
+    expect(result.data).toEqual({ ok: true })
+  })
+
+  it('keeps the function call namespace on the stream and on replay', async () => {
+    const chunks = await collectStream([
+      {
+        type: 'response.output_item.added',
+        sequenceNumber: 1,
+        outputIndex: 0,
+        item: {
+          type: 'function_call',
+          id: 'item_1',
+          callId: 'call_abc',
+          name: 'search_docs',
+          namespace: 'docs',
+          arguments: '',
+        },
+      },
+      completed,
+    ])
+    expect(chunks.find((c) => c.type === 'TOOL_CALL_START')).toMatchObject({
+      metadata: { itemId: 'item_1', namespace: 'docs' },
+    })
+
+    setupMockSdkClient([completed])
+    const adapter = createAdapter()
+    for await (const _ of adapter.chatStream({
+      threadId: 'thread-1',
+      model: adapter.model,
+      messages: [
+        {
+          role: 'assistant',
+          content: null,
+          toolCalls: [
+            {
+              id: 'call_abc',
+              type: 'function',
+              function: { name: 'search_docs', arguments: '{}' },
+              metadata: { itemId: 'item_1', namespace: 'docs' },
+            },
+          ],
+        },
+        { role: 'tool', toolCallId: 'call_abc', content: 'ok' },
+      ],
+      logger: testLogger,
+    })) {
+      // consume
+    }
+    const { input } = mockSend.mock.calls[0]![0].responsesRequest
+    expect(input).toContainEqual(
+      expect.objectContaining({
+        type: 'function_call',
+        name: 'search_docs',
+        namespace: 'docs',
+      }),
+    )
+  })
+})
+
+describe('OpenRouter responses tool input normalizer — own keys', () => {
+  it('strips the widened null of a property named __proto__', () => {
+    const normalize = createToolInputNormalizer([
+      {
+        name: 'inspect',
+        description: 'Inspect',
+        inputSchema: JSON.parse(
+          '{"type":"object","properties":{"__proto__":{"type":"string"},"keep":{"type":["string","null"]}},"required":["keep"]}',
+        ),
+      },
+    ])
+    expect(
+      JSON.stringify(
+        normalize('inspect', JSON.parse('{"__proto__":null,"keep":null}')),
+      ),
+    ).toBe('{"keep":null}')
   })
 })

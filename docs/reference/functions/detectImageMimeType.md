@@ -3,13 +3,11 @@ id: detectImageMimeType
 title: detectImageMimeType
 ---
 
-# Function: detectImageMimeType()
-
 ```ts
-function detectImageMimeType(base64Data): "image/png" | "image/jpeg" | "image/gif" | "image/webp" | undefined;
+function detectImageMimeType(base64Data): "image/jpeg" | "image/png" | "image/gif" | "image/webp" | undefined;
 ```
 
-Defined in: [packages/ai/src/utils.ts:17](https://github.com/TanStack/ai/blob/main/packages/ai/src/utils.ts#L17)
+Defined in: packages/ai/src/utils.ts:17
 
 Detect image mime type from base64 data using magic bytes.
 Returns undefined if the format cannot be detected.
@@ -27,7 +25,7 @@ The base64-encoded image data
 
 ## Returns
 
-`"image/png"` \| `"image/jpeg"` \| `"image/gif"` \| `"image/webp"` \| `undefined`
+`"image/jpeg"` \| `"image/png"` \| `"image/gif"` \| `"image/webp"` \| `undefined`
 
 The detected mime type, or undefined if unrecognized
 

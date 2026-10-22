@@ -3,9 +3,7 @@ id: ProviderExecutedToolMetadata
 title: ProviderExecutedToolMetadata
 ---
 
-# Interface: ProviderExecutedToolMetadata
-
-Defined in: [packages/ai/src/types.ts:178](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L178)
+Defined in: packages/ai/src/types.ts:227
 
 Convention for tool-call `metadata` that marks a call as **provider-executed**
 — run by the provider's own infrastructure (e.g. Anthropic `web_search` /
@@ -19,7 +17,8 @@ Convention for tool-call `metadata` that marks a call as **provider-executed**
 
 Provider-specific payloads live under a namespaced key (e.g. `anthropic`),
 keeping this convention opaque to the framework core. The index signature
-preserves those per-adapter fields.
+preserves those per-adapter fields. `sources` is the normalized list of
+links a web search used, shared across providers.
 
 ## Indexable
 
@@ -32,7 +31,17 @@ preserves those per-adapter fields.
 ### providerExecuted?
 
 ```ts
-optional providerExecuted: boolean;
+optional providerExecuted?: boolean;
 ```
 
-Defined in: [packages/ai/src/types.ts:179](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L179)
+Defined in: packages/ai/src/types.ts:228
+
+***
+
+### sources?
+
+```ts
+optional sources?: ProviderExecutedToolSource[];
+```
+
+Defined in: packages/ai/src/types.ts:229

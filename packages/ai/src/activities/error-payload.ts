@@ -18,6 +18,28 @@ const ABORT_ERROR_NAMES = new Set([
   'RequestAbortedError',
 ])
 
+/**
+ * True when a thrown value is an abort-shaped error (DOM `AbortError`, OpenAI
+ * `APIUserAbortError`, OpenRouter `RequestAbortedError`) — i.e. user-initiated
+ * cancellation rather than a genuine failure. Matches on the error `name` so
+ * callers can discriminate aborts without depending on a signal's state or on
+ * provider-specific message strings.
+ */
+export function isAbortShapedError(error: unknown): boolean {
+  if (error && typeof error === 'object') {
+    const name = (error as { name?: unknown }).name
+    return typeof name === 'string' && ABORT_ERROR_NAMES.has(name)
+  }
+  return false
+}
+
+/**
+ * The `RUN_ERROR.code` a text adapter sets when the provider says the input
+ * does not fit in the model's context window. Shorten the messages, then call
+ * the model again. The provider's own text stays in `message`.
+ */
+export const CONTEXT_OVERFLOW_CODE = 'context_overflow'
+
 // HTTP status codes carried as numbers (e.g. `error.status = 429`) are a
 // common variant on SDK error classes; coerce so the resulting `code` field
 // is stable as a string for downstream consumers.
@@ -29,32 +51,49 @@ function normalizeCode(codeField: unknown): string | undefined {
   return undefined
 }
 
+// SDK error classes disagree on where they carry the HTTP status. Most expose a
+// `code` (OpenAI/Anthropic error bodies), but some report it only as a numeric
+// `status` — Google's `@google/genai` `ApiError` sets `status: number` and no
+// `code` at all. Without this fallback such errors reach downstream consumers
+// with `code: undefined`, so a 401/403/404/429 is indistinguishable from an
+// unknown failure and cannot be classified.
+//
+// Only a *numeric* `status` is used: a string `status` is commonly an HTTP
+// reason phrase ("Forbidden") or a symbolic status ("PERMISSION_DENIED"), not
+// the numeric code consumers key on, so forwarding it would be misleading.
+function extractCode(source: {
+  code?: unknown
+  status?: unknown
+}): string | undefined {
+  const fromCode = normalizeCode(source.code)
+  if (fromCode !== undefined) return fromCode
+  if (typeof source.status === 'number' && Number.isFinite(source.status)) {
+    return String(source.status)
+  }
+  return undefined
+}
+
 export function toRunErrorPayload(
   error: unknown,
   fallbackMessage = 'Unknown error occurred',
 ): { message: string; code: string | undefined } {
-  if (error && typeof error === 'object') {
-    const name = (error as { name?: unknown }).name
-    if (typeof name === 'string' && ABORT_ERROR_NAMES.has(name)) {
-      return { message: 'Request aborted', code: 'aborted' }
-    }
+  if (isAbortShapedError(error)) {
+    return { message: 'Request aborted', code: 'aborted' }
   }
   if (error instanceof Error) {
-    const codeField = (error as Error & { code?: unknown }).code
     return {
       message: error.message || fallbackMessage,
-      code: normalizeCode(codeField),
+      code: extractCode(error as Error & { code?: unknown; status?: unknown }),
     }
   }
   if (typeof error === 'object' && error !== null) {
     const messageField = (error as { message?: unknown }).message
-    const codeField = (error as { code?: unknown }).code
     return {
       message:
         typeof messageField === 'string' && messageField.length > 0
           ? messageField
           : fallbackMessage,
-      code: normalizeCode(codeField),
+      code: extractCode(error as { code?: unknown; status?: unknown }),
     }
   }
   if (typeof error === 'string' && error.length > 0) {
@@ -105,4 +144,36 @@ export function toRunErrorRawEvent(error: unknown): unknown {
   }
   if (e.metadata !== undefined && e.metadata !== null) return e.metadata
   return undefined
+}
+
+/**
+ * Read how long a provider asks you to wait before a retry, from the response
+ * headers that an SDK error carries. It reads `retry-after-ms` first, then
+ * `retry-after` in seconds or as an HTTP date. Gives `undefined` when no
+ * usable header is present.
+ *
+ *   const retryAfterMs = toRetryAfterMs(error)
+ *   yield { type: EventType.RUN_ERROR, ..., ...(retryAfterMs !== undefined && { retryAfterMs }) }
+ */
+export function toRetryAfterMs(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object' || !('headers' in error)) {
+    return undefined
+  }
+  const { headers } = error
+  const get = (name: string): string | null | undefined => {
+    if (headers instanceof Headers) return headers.get(name)
+    if (headers && typeof headers === 'object' && name in headers) {
+      const value: unknown = Reflect.get(headers, name)
+      return typeof value === 'string' ? value : undefined
+    }
+    return undefined
+  }
+  const ms = Number(get('retry-after-ms') || NaN)
+  if (Number.isFinite(ms) && ms >= 0) return ms
+  const value = get('retry-after')
+  if (!value) return undefined
+  const seconds = Number(value)
+  if (Number.isFinite(seconds)) return seconds >= 0 ? seconds * 1000 : undefined
+  const date = Date.parse(value)
+  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now())
 }

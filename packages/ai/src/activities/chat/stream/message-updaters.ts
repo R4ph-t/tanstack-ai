@@ -5,12 +5,14 @@
  * These are used by StreamProcessor to manage the message array.
  */
 
+import { isRedactedThinkingId } from '../../../utilities/reasoning-encrypted-value'
 import { parsePartialJSON } from './json-parser'
 import type {
   ContentPart,
   StructuredOutputPart,
   ThinkingPart,
   ToolCallPart,
+  ToolResultOutcome,
   ToolResultPart,
   UIMessage,
 } from '../../../types'
@@ -117,6 +119,7 @@ export function updateToolResultPart(
   content: string | Array<ContentPart>,
   state: ToolResultState,
   error?: string,
+  outcome?: ToolResultOutcome,
 ): Array<UIMessage> {
   return messages.map((msg) => {
     if (msg.id !== messageId) {
@@ -134,6 +137,7 @@ export function updateToolResultPart(
       toolCallId,
       content,
       state,
+      ...(outcome !== undefined && { outcome }),
       ...(error && { error }),
     }
 
@@ -455,15 +459,41 @@ export function updateThinkingPart(
     }
 
     const parts = [...msg.parts]
-    const thinkingPartIndex = parts.findIndex(
+    let thinkingPartIndex = parts.findIndex(
       (p) => p.type === 'thinking' && p.stepId === stepId,
     )
+
+    // A hydrated message carries its thinking without a stepId: the stored form
+    // has no field for one, so `modelMessageToUIMessage` cannot put it back.
+    // When a run is rejoined mid-stream the replayed reasoning is keyed by
+    // stepId, matches nothing, and gets appended -- leaving a second thinking
+    // part sitting after the answer text. Adopt the first stepId-less thinking
+    // part instead, so the replay lands on the part it belongs to. Live
+    // streaming always writes a stepId, so the only parts this can match are
+    // hydrated ones.
+    let adopted: ThinkingPart | undefined
+    if (thinkingPartIndex < 0) {
+      thinkingPartIndex = parts.findIndex(
+        (p) => p.type === 'thinking' && p.stepId === undefined,
+      )
+      const candidate = parts[thinkingPartIndex]
+      if (candidate?.type === 'thinking') adopted = candidate
+    }
+
+    // Keep the signature the hydrated part already had when this update does
+    // not carry one; losing it would strip the provider's encrypted reasoning
+    // from a message that is about to be sent back.
+    const nextSignature = signature ?? adopted?.signature
+    // A hydrated part has no stepId to carry the redacted marker, so it keeps
+    // its own flag.
+    const redacted = isRedactedThinkingId(stepId) || adopted?.redacted === true
 
     const thinkingPart: ThinkingPart = {
       type: 'thinking',
       content,
       stepId,
-      ...(signature && { signature }),
+      ...(nextSignature && { signature: nextSignature }),
+      ...(redacted && { redacted: true }),
     }
 
     if (thinkingPartIndex >= 0) {

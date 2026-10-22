@@ -3,40 +3,31 @@ id: CodeModeConsoleEvent
 title: CodeModeConsoleEvent
 ---
 
-# Interface: CodeModeConsoleEvent
-
-Defined in: [packages/ai/src/types.ts:1454](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1454)
+Defined in: packages/ai/src/types.ts:1839
 
 Custom event for extensibility.
 
-@ag-ui/core provides: `name`, `value`
-TanStack AI adds: `model?`
+@ag-ui/core provides: `name`, `value`, `subagentRunId?`
 
 ## Extends
 
 - [`CustomEvent`](CustomEvent.md)
 
-## Indexable
-
-```ts
-[k: string]: unknown
-```
-
 ## Properties
 
-### model?
+### metadata?
 
 ```ts
-optional model: string;
+optional metadata?: Record<string, any>;
 ```
 
-Defined in: [packages/ai/src/types.ts:1339](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1339)
+Defined in: packages/ai/src/types.ts:1756
 
-Model identifier for multi-model support
+Extra information attached to this event.
 
 #### Inherited from
 
-[`CustomEvent`](CustomEvent.md).[`model`](CustomEvent.md#model)
+[`CustomEvent`](CustomEvent.md).[`metadata`](CustomEvent.md#metadata)
 
 ***
 
@@ -46,7 +37,10 @@ Model identifier for multi-model support
 name: "code_mode:console";
 ```
 
-Defined in: [packages/ai/src/types.ts:1455](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1455)
+Defined in: packages/ai/src/types.ts:1840
+
+What this custom event is. Required: without it a consumer cannot route
+the value.
 
 #### Overrides
 
@@ -56,18 +50,34 @@ CustomEvent.name
 
 ***
 
+### type
+
+```ts
+type: "CUSTOM";
+```
+
+Defined in: packages/ai/src/types.ts:1755
+
+#### Inherited from
+
+[`CustomEvent`](CustomEvent.md).[`type`](CustomEvent.md#type)
+
+***
+
 ### value
 
 ```ts
 value: object;
 ```
 
-Defined in: [packages/ai/src/types.ts:1456](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L1456)
+Defined in: packages/ai/src/types.ts:1841
+
+The payload. Any JSON value, and required.
 
 #### level
 
 ```ts
-level: "error" | "log" | "warn" | "info";
+level: "error" | "info" | "warn" | "log";
 ```
 
 #### message

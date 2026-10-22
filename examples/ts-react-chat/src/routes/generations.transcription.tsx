@@ -2,7 +2,9 @@ import { useMemo, useRef, useState } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
 import { useTranscription } from '@tanstack/ai-react'
 import { fetchServerSentEvents } from '@tanstack/ai-client'
+import { byteplusVoiceByok } from '@tanstack/ai-byteplus/byok'
 import { transcribeFn, transcribeStreamFn } from '../lib/server-fns'
+import { byok } from '../lib/byok'
 import { TRANSCRIPTION_PROVIDERS } from '../lib/audio-providers'
 import type {
   TranscriptionProviderConfig,
@@ -12,6 +14,8 @@ import type { UseTranscriptionReturn } from '@tanstack/ai-react'
 import type { TranscriptionGenerateInput } from '@tanstack/ai-client'
 
 type Mode = 'streaming' | 'direct' | 'server-fn'
+
+// Persist each variant's lightweight resume snapshot across reloads.
 
 function TranscriptionForm({
   mode,
@@ -23,13 +27,22 @@ function TranscriptionForm({
   const hookOptions = useMemo(() => {
     if (mode === 'streaming') {
       return {
+        threadId: `transcription:${mode}:${config.id}`,
         connection: fetchServerSentEvents('/api/transcribe'),
         body: { provider: config.id },
+        persistence: true,
+        ...(config.id === 'byteplus'
+          ? { byok, byokProvider: () => byteplusVoiceByok.id }
+          : {}),
       }
     }
     if (mode === 'direct') {
       return {
-        fetcher: (input: TranscriptionGenerateInput) =>
+        threadId: `transcription:${mode}:${config.id}`,
+        fetcher: (
+          input: TranscriptionGenerateInput,
+          { threadId }: { threadId: string },
+        ) =>
           transcribeFn({
             data: {
               audio: input.audio as string,
@@ -37,12 +50,18 @@ function TranscriptionForm({
               responseFormat: input.responseFormat,
               modelOptions: input.modelOptions,
               provider: config.id,
+              threadId,
             },
           }),
+        persistence: true,
       }
     }
     return {
-      fetcher: (input: TranscriptionGenerateInput) =>
+      threadId: `transcription:${mode}:${config.id}`,
+      fetcher: (
+        input: TranscriptionGenerateInput,
+        { threadId }: { threadId: string },
+      ) =>
         transcribeStreamFn({
           data: {
             audio: input.audio as string,
@@ -50,8 +69,10 @@ function TranscriptionForm({
             responseFormat: input.responseFormat,
             modelOptions: input.modelOptions,
             provider: config.id,
+            threadId,
           },
         }),
+      persistence: true,
     }
   }, [mode, config.id])
 

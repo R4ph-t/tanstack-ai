@@ -1,4 +1,9 @@
 import { createGeneration } from './create-generation.svelte'
+import { reconstructSpeechResult } from '@tanstack/ai-client'
+import type {
+  CreateGenerationOptions,
+  CreateGenerationReturn,
+} from './create-generation.svelte'
 import type { StreamChunk, TTSResult } from '@tanstack/ai'
 import type {
   AIDevtoolsDisplayOptions,
@@ -14,13 +19,19 @@ import type {
  *
  * @template TOutput - The output type after optional transform (defaults to TTSResult)
  */
-export interface CreateGenerateSpeechOptions<TOutput = TTSResult> {
+export interface CreateGenerateSpeechOptions<TOutput = TTSResult> extends Pick<
+  CreateGenerationOptions<SpeechGenerateInput, TTSResult, TOutput>,
+  | 'persistence'
+  | 'threadId'
+  | 'hydrateGeneration'
+  | 'joinRun'
+  | 'byok'
+  | 'byokProvider'
+> {
   /** Connect-based adapter for streaming transport (SSE, HTTP stream, custom) */
   connection?: ConnectConnectionAdapter
   /** Direct async function for speech generation */
   fetcher?: GenerationFetcher<SpeechGenerateInput, TTSResult>
-  /** Unique identifier for this generation instance */
-  id?: string
   /** Additional body parameters to send with connect-based adapter requests */
   body?: Record<string, any>
   /** Display options for TanStack AI Devtools. */
@@ -46,7 +57,10 @@ export interface CreateGenerateSpeechOptions<TOutput = TTSResult> {
  *
  * @template TOutput - The output type (after optional transform)
  */
-export interface CreateGenerateSpeechReturn<TOutput = TTSResult> {
+export interface CreateGenerateSpeechReturn<TOutput = TTSResult> extends Omit<
+  CreateGenerationReturn<TOutput>,
+  'generate'
+> {
   /** The TTS result containing audio data, or null */
   readonly result: TOutput | null
   /** Whether generation is in progress */
@@ -57,12 +71,6 @@ export interface CreateGenerateSpeechReturn<TOutput = TTSResult> {
   readonly status: GenerationClientState
   /** Trigger speech generation */
   generate: (input: SpeechGenerateInput) => Promise<void>
-  /** Abort the current generation */
-  stop: () => void
-  /** Clear result, error, and return to idle */
-  reset: () => void
-  /** Update additional body parameters */
-  updateBody: (body: Record<string, any>) => void
 }
 
 /**
@@ -74,6 +82,7 @@ export interface CreateGenerateSpeechReturn<TOutput = TTSResult> {
  *   import { createGenerateSpeech, fetchServerSentEvents } from '@tanstack/ai-svelte'
  *
  *   const speech = createGenerateSpeech({
+ *     threadId: 'welcome-speech',
  *     connection: fetchServerSentEvents('/api/generate/speech'),
  *   })
  * </script>
@@ -107,6 +116,7 @@ export function createGenerateSpeech<TTransformed = void>(
   const gen = createGeneration<SpeechGenerateInput, TTSResult, TTransformed>({
     ...options,
     devtools,
+    reconstructResult: reconstructSpeechResult,
   })
 
   return {
@@ -122,9 +132,13 @@ export function createGenerateSpeech<TTransformed = void>(
     get status() {
       return gen.status
     },
-    generate: gen.generate as (input: SpeechGenerateInput) => Promise<void>,
+    generate: gen.generate,
     stop: gen.stop,
     reset: gen.reset,
     updateBody: gen.updateBody,
+    dispose: gen.dispose,
+    get runId() {
+      return gen.runId
+    },
   }
 }

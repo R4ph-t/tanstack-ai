@@ -1,11 +1,15 @@
 import { test, expect } from './fixtures'
 import {
+  collectHydrationErrors,
   sendMessage,
   waitForResponse,
   getLastAssistantMessage,
   featureUrl,
 } from './helpers'
 import { providersFor } from './test-matrix'
+
+// The server conversion test in this spec does not call a provider HTTP
+// endpoint, so it intentionally does not configure aimock.
 
 for (const provider of providersFor('chat')) {
   test.describe(`${provider} — chat`, () => {
@@ -53,6 +57,211 @@ for (const provider of providersFor('chat')) {
   })
 }
 
+test('preserves UI message IDs at the server conversion boundary', async ({
+  request,
+}) => {
+  const response = await request.post('/api/message-ids', {
+    data: {
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          parts: [{ type: 'text', content: 'Hello' }],
+        },
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          parts: [
+            { type: 'text', content: 'Let me check.' },
+            {
+              type: 'tool-call',
+              id: 'tool-1',
+              name: 'getWeather',
+              arguments: '{}',
+              state: 'input-complete',
+            },
+            {
+              type: 'tool-result',
+              id: 'result-1',
+              name: 'getWeather',
+              toolCallId: 'tool-1',
+              content: [{ type: 'text', content: '{"temp":72}' }],
+              state: 'complete',
+              metadata: { source: 'e2e' },
+              createdAt: '2026-08-20T00:00:00.000Z',
+            },
+          ],
+        },
+      ],
+    },
+  })
+
+  expect(response.ok()).toBe(true)
+  const { modelMessages, wireMessages, snapshots, mergedSnapshots } =
+    await response.json()
+
+  expect(modelMessages).toEqual([
+    { id: 'user-1', role: 'user', content: 'Hello' },
+    {
+      id: 'assistant-1',
+      role: 'assistant',
+      content: 'Let me check.',
+      toolCalls: [
+        {
+          id: 'tool-1',
+          type: 'function',
+          function: { name: 'getWeather', arguments: '{}' },
+        },
+      ],
+    },
+    {
+      id: 'result-1',
+      role: 'tool',
+      name: 'getWeather',
+      content: [{ type: 'text', content: '{"temp":72}' }],
+      toolCallId: 'tool-1',
+      metadata: { source: 'e2e' },
+      createdAt: '2026-08-20T00:00:00.000Z',
+    },
+  ])
+  expect(wireMessages).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ role: 'assistant', id: 'assistant-1' }),
+      expect.objectContaining({
+        role: 'tool',
+        toolCallId: 'tool-1',
+        id: 'result-1',
+        metadata: {
+          source: 'e2e',
+          tanstack: {
+            toolResult: {
+              id: 'result-1',
+              createdAt: '2026-08-20T00:00:00.000Z',
+              content: [{ type: 'text', content: '{"temp":72}' }],
+            },
+          },
+        },
+      }),
+    ]),
+  )
+  expect(snapshots).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        id: 'assistant-1',
+        role: 'assistant',
+        parts: expect.arrayContaining([
+          expect.objectContaining({
+            type: 'tool-result',
+            id: 'result-1',
+            content: [{ type: 'text', content: '{"temp":72}' }],
+            metadata: { source: 'e2e' },
+          }),
+        ]),
+      }),
+    ]),
+  )
+  const mergedAssistant = mergedSnapshots.find(
+    (message: { id?: string }) => message.id === 'assistant-1',
+  )
+  expect(mergedAssistant?.parts).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        type: 'tool-result',
+        id: 'result-1',
+        content: [{ type: 'text', content: '{"temp":72}' }],
+        metadata: { source: 'e2e' },
+        createdAt: '2026-08-20T00:00:00.000Z',
+      }),
+    ]),
+  )
+})
+
+test('merges assistant segments that share a UI message ID', async ({
+  request,
+}) => {
+  const response = await request.post('/api/message-ids', {
+    data: {
+      messages: [
+        {
+          id: 'assistant-round-trip',
+          role: 'assistant',
+          parts: [
+            { type: 'text', content: 'First step.' },
+            {
+              type: 'tool-call',
+              id: 'tool-1',
+              name: 'first',
+              arguments: '{}',
+              state: 'input-complete',
+            },
+            {
+              type: 'tool-result',
+              toolCallId: 'tool-1',
+              content: '{"ok":true}',
+              state: 'complete',
+            },
+            { type: 'text', content: 'Second step.' },
+          ],
+        },
+      ],
+    },
+  })
+
+  expect(response.ok()).toBe(true)
+  const { modelMessages, mergedSnapshots } = await response.json()
+
+  const assistantSegments = modelMessages.filter(
+    (message: { role: string }) => message.role === 'assistant',
+  )
+  expect(assistantSegments).toHaveLength(2)
+  expect(
+    assistantSegments.map((message: { id?: string }) => message.id),
+  ).toEqual(['assistant-round-trip', 'assistant-round-trip'])
+
+  const assistantMessages = mergedSnapshots.filter(
+    (message: { role: string }) => message.role === 'assistant',
+  )
+  expect(assistantMessages).toHaveLength(1)
+  expect(assistantMessages[0]).toMatchObject({
+    id: 'assistant-round-trip',
+    parts: [
+      expect.objectContaining({ type: 'text', content: 'First step.' }),
+      expect.objectContaining({ type: 'tool-call', id: 'tool-1' }),
+      expect.objectContaining({ type: 'tool-result', toolCallId: 'tool-1' }),
+      expect.objectContaining({ type: 'text', content: 'Second step.' }),
+    ],
+  })
+})
+
+test('rejects malformed JSON at the server conversion boundary', async ({
+  request,
+}) => {
+  const response = await request.post('/api/message-ids', {
+    data: '{',
+    headers: { 'Content-Type': 'application/json' },
+  })
+
+  expect(response.status()).toBe(400)
+})
+
+test('rejects invalid message parts at the server conversion boundary', async ({
+  request,
+}) => {
+  const response = await request.post('/api/message-ids', {
+    data: {
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          parts: [{ type: 'text', content: 42 }],
+        },
+      ],
+    },
+  })
+
+  expect(response.status()).toBe(400)
+})
+
 test.describe('openai chat persistence', () => {
   test('persists chat messages across browser reload with localStorage', async ({
     page,
@@ -73,6 +282,8 @@ test.describe('openai chat persistence', () => {
       'Fender Stratocaster',
     )
 
+    const hydrationErrors = collectHydrationErrors(page)
+
     await page.reload()
 
     await expect(page.getByTestId('user-message')).toContainText(
@@ -81,6 +292,7 @@ test.describe('openai chat persistence', () => {
     await expect(page.getByTestId('assistant-message')).toContainText(
       'Fender Stratocaster',
     )
+    expect(hydrationErrors).toEqual([])
   })
 
   test('clear() removes the persisted conversation so a reload starts empty', async ({
@@ -108,6 +320,36 @@ test.describe('openai chat persistence', () => {
     await expect(page.getByTestId('message-list')).toBeVisible()
     await expect(page.getByTestId('user-message')).toHaveCount(0)
     await expect(page.getByTestId('assistant-message')).toHaveCount(0)
+  })
+
+  test('setMessages() takes the frozen messages back and the chat keeps working', async ({
+    page,
+    testId,
+    aimockPort,
+  }) => {
+    await page.goto(
+      `${featureUrl('openai', 'chat', testId, aimockPort)}&persistence=localStorage`,
+    )
+    const pageErrors: Array<string> = []
+    page.on('pageerror', (error) => pageErrors.push(error.message))
+
+    await sendMessage(page, '[chat] recommend a guitar')
+    await waitForResponse(page)
+
+    // Pass the hook's own frozen `messages` array straight back in.
+    await page.getByTestId('set-messages-button').click()
+    await expect(page.getByTestId('user-message')).toHaveCount(1)
+    await expect(page.getByTestId('assistant-message')).toContainText(
+      'Fender Stratocaster',
+    )
+
+    await sendMessage(page, '[per-call-body] send with per-call body')
+    await waitForResponse(page)
+    await expect(page.getByTestId('user-message')).toHaveCount(2)
+    await expect(page.getByTestId('assistant-message').last()).toContainText(
+      'Acknowledged the per-call body send.',
+    )
+    expect(pageErrors).toEqual([])
   })
 
   test('switches per-thread history when the chat id changes in place', async ({

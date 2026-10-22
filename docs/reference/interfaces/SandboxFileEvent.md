@@ -3,9 +3,7 @@ id: SandboxFileEvent
 title: SandboxFileEvent
 ---
 
-# Interface: SandboxFileEvent
-
-Defined in: [packages/ai/src/activities/chat/middleware/types.ts:17](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/middleware/types.ts#L17)
+Defined in: packages/ai/src/activities/chat/middleware/types.ts:37
 
 A file change observed inside a sandbox during a chat run.
 
@@ -21,7 +19,7 @@ A file change observed inside a sandbox during a chat run.
 path: string;
 ```
 
-Defined in: [packages/ai/src/activities/chat/middleware/types.ts:20](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/middleware/types.ts#L20)
+Defined in: packages/ai/src/activities/chat/middleware/types.ts:40
 
 Absolute path inside the sandbox (under the workspace root).
 
@@ -33,7 +31,7 @@ Absolute path inside the sandbox (under the workspace root).
 timestamp: number;
 ```
 
-Defined in: [packages/ai/src/activities/chat/middleware/types.ts:21](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/middleware/types.ts#L21)
+Defined in: packages/ai/src/activities/chat/middleware/types.ts:41
 
 ***
 
@@ -43,4 +41,4 @@ Defined in: [packages/ai/src/activities/chat/middleware/types.ts:21](https://git
 type: "create" | "change" | "delete";
 ```
 
-Defined in: [packages/ai/src/activities/chat/middleware/types.ts:18](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/middleware/types.ts#L18)
+Defined in: packages/ai/src/activities/chat/middleware/types.ts:38

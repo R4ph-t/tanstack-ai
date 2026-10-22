@@ -1,7 +1,25 @@
+import type { TokenUsage } from '@tanstack/ai'
 import { describe, expect, it, vi } from 'vitest'
 import { chat } from '@tanstack/ai'
 import { OpenAITextAdapter } from '../src/adapters/text'
-import type { StreamChunk } from '@tanstack/ai'
+import type { AdapterYieldChunk } from '@tanstack/ai'
+
+/** `chat()` restores a TokenUsage object on RUN_FINISHED. */
+function tokenUsageOf(chunk: unknown): TokenUsage | undefined {
+  if (typeof chunk !== 'object' || chunk === null || !('usage' in chunk)) {
+    return undefined
+  }
+  const usage = chunk.usage
+  if (
+    typeof usage !== 'object' ||
+    usage === null ||
+    Array.isArray(usage) ||
+    !('promptTokens' in usage)
+  ) {
+    return undefined
+  }
+  return usage as TokenUsage
+}
 
 const createAdapter = () =>
   new OpenAITextAdapter({ apiKey: 'test-key' }, 'gpt-4o-mini')
@@ -57,8 +75,9 @@ describe('OpenAI usage extraction', () => {
       responses: { create: responsesCreate },
     }
 
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const chunk of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [{ role: 'user', content: 'Hello' }],
     })) {
@@ -114,8 +133,9 @@ describe('OpenAI usage extraction', () => {
       responses: { create: responsesCreate },
     }
 
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const chunk of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [{ role: 'user', content: 'Hello' }],
     })) {
@@ -124,7 +144,7 @@ describe('OpenAI usage extraction', () => {
 
     const doneChunk = chunks.find((c) => c.type === 'RUN_FINISHED')
     expect(doneChunk).toBeDefined()
-    expect(doneChunk?.usage?.promptTokensDetails).toEqual({
+    expect(tokenUsageOf(doneChunk)?.promptTokensDetails).toEqual({
       cachedTokens: 25,
     })
   })
@@ -169,8 +189,9 @@ describe('OpenAI usage extraction', () => {
       responses: { create: responsesCreate },
     }
 
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const chunk of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [{ role: 'user', content: 'Hello' }],
     })) {
@@ -179,7 +200,7 @@ describe('OpenAI usage extraction', () => {
 
     const doneChunk = chunks.find((c) => c.type === 'RUN_FINISHED')
     expect(doneChunk).toBeDefined()
-    expect(doneChunk?.usage?.completionTokensDetails).toEqual({
+    expect(tokenUsageOf(doneChunk)?.completionTokensDetails).toEqual({
       reasoningTokens: 30,
     })
   })
@@ -217,8 +238,9 @@ describe('OpenAI usage extraction', () => {
       responses: { create: responsesCreate },
     }
 
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const chunk of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [{ role: 'user', content: 'Hello' }],
     })) {
@@ -271,8 +293,9 @@ describe('OpenAI usage extraction', () => {
       responses: { create: responsesCreate },
     }
 
-    const chunks: Array<StreamChunk> = []
+    const chunks: Array<AdapterYieldChunk> = []
     for await (const chunk of chat({
+      threadId: 'thread-1',
       adapter,
       messages: [{ role: 'user', content: 'Hello' }],
     })) {
@@ -281,6 +304,6 @@ describe('OpenAI usage extraction', () => {
 
     const doneChunk = chunks.find((c) => c.type === 'RUN_FINISHED')
     expect(doneChunk).toBeDefined()
-    expect(doneChunk?.usage?.promptTokensDetails).toBeUndefined()
+    expect(tokenUsageOf(doneChunk)?.promptTokensDetails).toBeUndefined()
   })
 })

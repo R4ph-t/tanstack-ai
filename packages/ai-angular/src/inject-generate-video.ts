@@ -22,16 +22,55 @@ import type {
   VideoGenerateResult,
   VideoStatusInfo,
 } from '@tanstack/ai-client'
+import type { ByokClient } from '@tanstack/ai-client/byok'
+import type { ProviderId } from '@tanstack/ai/byok'
 import type { StreamChunk } from '@tanstack/ai'
-
-let nextId = 0
 
 export interface InjectGenerateVideoOptions<TOutput = VideoGenerateResult> {
   connection?: ConnectConnectionAdapter
   fetcher?: GenerationFetcher<VideoGenerateInput, VideoGenerateResult>
-  id?: string
   body?: ReactiveOption<Record<string, any>>
+  /** Optional BYOK keyring. Keys go in `x-byok-*` headers, never the body. */
+  byok?: ByokClient
+  /** Optional provider id. If it returns a slug, only that key is sent. If no slug resolves (`byokProvider`, then `body.provider`), generate throws. */
+  byokProvider?: () => ProviderId | undefined
   devtools?: AIDevtoolsDisplayOptions
+  /**
+   * How this generation persists across reloads.
+   * - Omit / `false`: ephemeral, in-memory only.
+   * - `true`: server-driven — on mount the client hydrates the last generation
+   *   for its `threadId` from the server (needs a connection with a
+   *   `hydrateGeneration` handler) and repaints it; it never auto-starts a run.
+   */
+  persistence?: boolean
+  /**
+   * The **scope** this generation belongs to: a stable, app-chosen name for the
+   * slot successive runs fill — not a link to a chat conversation.
+   *
+   * The hook starts empty and produces many runs over its life; each gets its
+   * own `runId`, but all belong to one scope. Persistence keys on this, so
+   * derive it from your own domain and keep it identical across reloads (e.g.
+   * `` `video-${videoId}-start-frame` ``). It is also sent as the AG-UI thread
+   * id on the wire, which the protocol requires.
+   *
+   * Required. A generated id would change on every reload, so persistence
+   * would restore nothing.
+   */
+  threadId: string
+  /**
+   * Server-driven hydration handler for `persistence: true` when the
+   * connection doesn't carry one (e.g. alongside `fetcher`, or a `stream()` /
+   * `rpcStream()` adapter built without handlers) — typically a one-line
+   * server-function call. The connection's own handler takes precedence.
+   */
+  hydrateGeneration?: ConnectConnectionAdapter['hydrateGeneration']
+  /**
+   * Re-attach handler that replays a run still generating to completion on
+   * mount, when the connection doesn't carry one. Without it, a restored
+   * `running` snapshot surfaces as an (interrupted) error. The connection's
+   * own handler takes precedence.
+   */
+  joinRun?: ConnectConnectionAdapter['joinRun']
   onResult?: (result: VideoGenerateResult) => TOutput | null | void
   onError?: (error: Error) => void
   onProgress?: (progress: number, message?: string) => void
@@ -50,6 +89,13 @@ export interface InjectGenerateVideoResult<TOutput = VideoGenerateResult> {
   status: Signal<GenerationClientState>
   stop: () => void
   reset: () => void
+  /**
+   * The id of the generation job currently running, or `null` when nothing is in
+   * flight. Each call to `generate` is one job with its own id. Pass it to your
+   * own endpoint to cancel or poll the provider job — `stop()` only aborts the
+   * local stream, it does not stop work already running on the provider.
+   */
+  runId: Signal<string | null>
 }
 
 // `TTransformed` infers from the `onResult` return position so the callback
@@ -71,7 +117,6 @@ export function injectGenerateVideo<TTransformed = void>(
 
   const destroyRef = inject(DestroyRef)
   const injector = inject(Injector)
-  const clientId = options.id || `injectGenerateVideo-${nextId++}`
 
   const result = signal<TOutput | null>(null)
   const jobId = signal<string | null>(null)
@@ -79,13 +124,22 @@ export function injectGenerateVideo<TTransformed = void>(
   const isLoading = signal(false)
   const error = signal<Error | undefined>(undefined)
   const status = signal<GenerationClientState>('idle')
+  const runId = signal<string | null>(null)
+  let disposed = false
 
   const bodySource =
     options.body !== undefined ? toReactive(options.body) : undefined
 
   const baseOptions = {
-    id: clientId,
     ...(bodySource !== undefined && { body: bodySource() }),
+    persistence: options.persistence,
+    threadId: options.threadId,
+    ...(options.hydrateGeneration !== undefined && {
+      hydrateGeneration: options.hydrateGeneration,
+    }),
+    ...(options.joinRun !== undefined && { joinRun: options.joinRun }),
+    ...(options.byok !== undefined && { byok: options.byok }),
+    byokProvider: () => options.byokProvider?.(),
     devtoolsBridgeFactory: createVideoDevtoolsBridge,
     devtools: {
       ...options.devtools,
@@ -99,17 +153,21 @@ export function injectGenerateVideo<TTransformed = void>(
     onResult: ((r: VideoGenerateResult) => options.onResult?.(r)) as (
       result: VideoGenerateResult,
     ) => TOutput | null | void,
-    onError: (e: Error) => options.onError?.(e),
-    onProgress: (p: number, m?: string) => options.onProgress?.(p, m),
-    onChunk: (c: StreamChunk) => options.onChunk?.(c),
-    onJobCreated: (id: string) => options.onJobCreated?.(id),
-    onStatusUpdate: (s: VideoStatusInfo) => options.onStatusUpdate?.(s),
-    onResultChange: (r: TOutput | null) => result.set(r),
-    onLoadingChange: (l: boolean) => isLoading.set(l),
-    onErrorChange: (e: Error | undefined) => error.set(e),
-    onStatusChange: (s: GenerationClientState) => status.set(s),
-    onJobIdChange: (id: string | null) => jobId.set(id),
-    onVideoStatusChange: (s: VideoStatusInfo | null) => videoStatus.set(s),
+    onError: (e: Error) => {
+      if (!disposed) options.onError?.(e)
+    },
+    onProgress: (p: number, m?: string) => {
+      if (!disposed) options.onProgress?.(p, m)
+    },
+    onChunk: (c: StreamChunk) => {
+      if (!disposed) options.onChunk?.(c)
+    },
+    onJobCreated: (id: string) => {
+      if (!disposed) options.onJobCreated?.(id)
+    },
+    onStatusUpdate: (s: VideoStatusInfo) => {
+      if (!disposed) options.onStatusUpdate?.(s)
+    },
   }
 
   let client: VideoGenerationClient<TOutput>
@@ -129,17 +187,43 @@ export function injectGenerateVideo<TTransformed = void>(
     )
   }
 
+  const applySnapshot = () => {
+    const next = client.getSnapshot()
+    result.set(next.result)
+    isLoading.set(next.isLoading)
+    error.set(next.error)
+    status.set(next.status)
+    runId.set(next.runId)
+    jobId.set(next.jobId)
+    videoStatus.set(next.videoStatus)
+  }
+  applySnapshot()
+  const unsubscribeSnapshot = client.subscribe(applySnapshot)
+
   if (bodySource) {
     effect(
       () => {
-        client.updateOptions({ body: bodySource() })
+        client.updateOptions({
+          body: bodySource(),
+        })
       },
       { injector },
     )
   }
 
-  afterNextRender(() => client.mountDevtools(), { injector })
-  destroyRef.onDestroy(() => client.dispose())
+  // Mount devtools only. Generation runs are never auto-started after render —
+  // persisted state is read-only for display.
+  afterNextRender(
+    () => {
+      client.mountDevtools()
+    },
+    { injector },
+  )
+  destroyRef.onDestroy(() => {
+    disposed = true
+    unsubscribeSnapshot()
+    client.dispose()
+  })
 
   return {
     generate: (input: VideoGenerateInput) => client.generate(input),
@@ -151,5 +235,6 @@ export function injectGenerateVideo<TTransformed = void>(
     status: status.asReadonly(),
     stop: () => client.stop(),
     reset: () => client.reset(),
+    runId: runId.asReadonly(),
   }
 }

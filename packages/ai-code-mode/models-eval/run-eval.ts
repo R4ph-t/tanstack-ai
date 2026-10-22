@@ -5,7 +5,7 @@
  * Usage (from repo root):
  *   pnpm --filter @tanstack/ai-code-mode-models-eval eval
  *   pnpm --filter @tanstack/ai-code-mode-models-eval eval -- --ollama-only
- *   pnpm --filter @tanstack/ai-code-mode-models-eval eval -- --models openai:gpt-4o,groq:qwen/qwen3-32b
+ *   pnpm --filter @tanstack/ai-code-mode-models-eval eval -- --models openai:gpt-4o,groq:qwen/qwen3.8-27b
  *   cd packages/ai-code-mode/models-eval && pnpm eval -- --no-judge
  *
  * Env:
@@ -35,6 +35,7 @@ import { config as loadDotenv } from 'dotenv'
 import {
   StreamProcessor,
   chat,
+  fromSpecTokenUsage,
   generateMessageId,
   maxIterations,
   normalizeToUIMessage,
@@ -206,7 +207,7 @@ function getTextAdapter(
     case 'grok':
       return grokText(modelId as 'grok-build-0.1')
     case 'groq':
-      return groqText(modelId as 'llama-3.3-70b-versatile')
+      return groqText(modelId as 'openai/gpt-oss-120b')
   }
 }
 
@@ -307,7 +308,7 @@ function parseArgs(argv: Array<string>): {
 @tanstack/ai-code-mode-models-eval (pnpm eval from this folder, or pnpm --filter @tanstack/ai-code-mode-models-eval eval)
 
   --ollama-only   Only run Ollama models from eval-config
-  --models <id>   Comma-separated provider:model ids (e.g. openai:gpt-4o,groq:qwen/qwen3-32b)
+  --models <id>   Comma-separated provider:model ids (e.g. openai:gpt-4o,groq:qwen/qwen3.8-27b)
   --capture-only  Run models and write logs without LLM judging
   --judge-latest  Judge latest captured session from logs (no model runs)
   --rejudge       Re-judge logs even if judge fields already exist
@@ -806,6 +807,7 @@ async function main() {
     try {
       const stream = chat({
         adapter,
+        threadId: 'eval-run',
         messages: [
           {
             role: 'user',
@@ -826,9 +828,16 @@ async function main() {
             ttftMs = Date.now() - t0
           }
           if (chunk.type === 'RUN_FINISHED' && chunk.usage) {
-            promptTokens += chunk.usage.promptTokens
-            completionTokens += chunk.usage.completionTokens
-            totalTokens += chunk.usage.totalTokens
+            // Usage is now either the spec `usage[]` array or a TokenUsage.
+            // Normalize both to TokenUsage before summing.
+            const usage = Array.isArray(chunk.usage)
+              ? fromSpecTokenUsage(chunk.usage)
+              : chunk.usage
+            if (usage) {
+              promptTokens += usage.promptTokens
+              completionTokens += usage.completionTokens
+              totalTokens += usage.totalTokens
+            }
           }
         }),
       )

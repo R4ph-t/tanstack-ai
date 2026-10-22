@@ -8,12 +8,12 @@
 
 ## Adapter Factories
 
-| Factory           | Type      | Description                   |
-| ----------------- | --------- | ----------------------------- |
-| `geminiText`      | Text/Chat | Chat completions              |
-| `geminiImage`     | Image     | Image generation (Imagen)     |
-| `geminiSpeech`    | TTS       | Text-to-speech (experimental) |
-| `geminiSummarize` | Summarize | Text summarization            |
+| Factory           | Type      | Description                    |
+| ----------------- | --------- | ------------------------------ |
+| `geminiText`      | Text/Chat | Chat completions               |
+| `geminiImage`     | Image     | Image generation (Nano Banana) |
+| `geminiSpeech`    | TTS       | Text-to-speech (experimental)  |
+| `geminiSummarize` | Summarize | Text summarization             |
 
 ## Import
 
@@ -38,24 +38,27 @@ Most Gemini text models accept `text`, `image`, `audio`, `video`, and `document`
 ## Provider-Specific modelOptions
 
 ```typescript
+import { chat } from '@tanstack/ai'
+import {
+  geminiText,
+  HarmBlockThreshold,
+  HarmCategory,
+} from '@tanstack/ai-gemini'
+
+const messages = [{ role: 'user' as const, content: 'Hello' }]
+
 chat({
   adapter: geminiText('gemini-2.5-pro'),
   messages,
+  threadId: 'thread-1',
+  // Thinking: a budget on Gemini 2.5, a level on Gemini 3
+  reasoning: { level: 'high', budgetTokens: 4096 },
   modelOptions: {
-    // Thinking (budget-based)
-    thinkingConfig: {
-      includeThoughts: true,
-      thinkingBudget: 4096,
-    },
-    // Thinking (level-based, advanced models)
-    thinkingConfig: {
-      thinkingLevel: 'THINKING_LEVEL_HIGH',
-    },
     // Safety settings
     safetySettings: [
       {
-        category: 'HARM_CATEGORY_HATE_SPEECH',
-        threshold: 'BLOCK_MEDIUM_AND_ABOVE',
+        category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+        threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
       },
     ],
     // Tool config
@@ -94,8 +97,12 @@ Note: `GOOGLE_GENAI_API_KEY` does NOT work.
 ## Gotchas
 
 - All Gemini models are multimodal (text, image, audio, video, document input).
-- Image generation models (`gemini-3-pro-image-preview`, etc.) have smaller
-  input limits (65K tokens) compared to text models (1M tokens).
-- `thinkingConfig.thinkingLevel` (level-based) and `thinkingConfig.thinkingBudget`
-  (budget-based) serve different models. Check which your model supports.
+- Image generation models (`gemini-3-pro-image`, `gemini-3.1-flash-image`, etc.)
+  have smaller input limits (65K tokens) compared to text models (1M tokens).
+- Use the GA image ids: `gemini-3.1-flash-image`, `gemini-3-pro-image`, or
+  `gemini-3.1-flash-lite-image`. The `-preview` ids and `gemini-2.5-flash-image`
+  are not in the type union.
+- `chat({ reasoning })` sends `thinkingConfig.thinkingLevel` on Gemini 3 and
+  `thinkingConfig.thinkingBudget` on Gemini 2.5. Only Gemini 2.5 takes
+  `budgetTokens`.
 - `cachedContent` must follow the format `cachedContents/{id}`.

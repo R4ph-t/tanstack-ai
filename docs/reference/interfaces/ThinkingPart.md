@@ -3,9 +3,7 @@ id: ThinkingPart
 title: ThinkingPart
 ---
 
-# Interface: ThinkingPart
-
-Defined in: [packages/ai/src/types.ts:408](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L408)
+Defined in: packages/ai/src/types.ts:538
 
 ## Properties
 
@@ -15,27 +13,47 @@ Defined in: [packages/ai/src/types.ts:408](https://github.com/TanStack/ai/blob/m
 content: string;
 ```
 
-Defined in: [packages/ai/src/types.ts:410](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L410)
+Defined in: packages/ai/src/types.ts:540
+
+***
+
+### redacted?
+
+```ts
+optional redacted?: boolean;
+```
+
+Defined in: packages/ai/src/types.ts:555
+
+The provider encrypted this thinking block (Anthropic `redacted_thinking`).
+`content` is empty, and `signature` holds the opaque data that goes back
+to the provider unchanged. On the AG-UI wire, the reasoning message id
+starts with `redacted_thinking-` instead.
 
 ***
 
 ### signature?
 
 ```ts
-optional signature: string;
+optional signature?: string;
 ```
 
-Defined in: [packages/ai/src/types.ts:412](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L412)
+Defined in: packages/ai/src/types.ts:548
+
+The provider's opaque reasoning artefact, sent back unchanged: an
+Anthropic signature, Anthropic redacted data, or OpenAI encrypted content.
+TODO(#1581): rename to `encryptedValue` to match AG-UI's `ReasoningMessage`.
+Renaming breaks stored messages, so it needs a read shim for `signature`.
 
 ***
 
 ### stepId?
 
 ```ts
-optional stepId: string;
+optional stepId?: string;
 ```
 
-Defined in: [packages/ai/src/types.ts:411](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L411)
+Defined in: packages/ai/src/types.ts:541
 
 ***
 
@@ -45,4 +63,4 @@ Defined in: [packages/ai/src/types.ts:411](https://github.com/TanStack/ai/blob/m
 type: "thinking";
 ```
 
-Defined in: [packages/ai/src/types.ts:409](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L409)
+Defined in: packages/ai/src/types.ts:539

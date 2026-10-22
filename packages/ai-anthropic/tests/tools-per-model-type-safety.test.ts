@@ -58,7 +58,7 @@ describe('Anthropic per-model tool gating', () => {
         type: 'code_execution_20250825',
       }),
       computerUseTool({
-        type: 'computer_20250124',
+        type: 'computer_20251124',
         name: 'computer',
         display_width_px: 1024,
         display_height_px: 768,
@@ -83,7 +83,7 @@ describe('Anthropic per-model tool gating', () => {
         type: 'code_execution_20250825',
       }),
       computerUseTool({
-        type: 'computer_20250124',
+        type: 'computer_20251124',
         name: 'computer',
         display_width_px: 1024,
         display_height_px: 768,
@@ -108,7 +108,7 @@ describe('Anthropic per-model tool gating', () => {
         type: 'code_execution_20250825',
       }),
       computerUseTool({
-        type: 'computer_20250124',
+        type: 'computer_20251124',
         name: 'computer',
         display_width_px: 1024,
         display_height_px: 768,
@@ -119,6 +119,196 @@ describe('Anthropic per-model tool gating', () => {
         name: 'str_replace_editor',
       }),
       memoryTool(),
+    ])
+  })
+
+  it('claude-opus-5 accepts the full tool superset', () => {
+    const adapter = anthropicText('claude-opus-5')
+    typedTools(adapter, [
+      userTool,
+      webSearchTool({ name: 'web_search', type: 'web_search_20250305' }),
+      webFetchTool(),
+      codeExecutionTool({
+        name: 'code_execution',
+        type: 'code_execution_20250825',
+      }),
+      computerUseTool({
+        type: 'computer_20251124',
+        name: 'computer',
+        display_width_px: 1024,
+        display_height_px: 768,
+      }),
+      bashTool({ name: 'bash', type: 'bash_20250124' }),
+      textEditorTool({
+        type: 'text_editor_20250124',
+        name: 'str_replace_editor',
+      }),
+      memoryTool(),
+    ])
+  })
+
+  it('claude-fable-5-1 accepts the full tool superset', () => {
+    const adapter = anthropicText('claude-fable-5-1')
+    typedTools(adapter, [
+      userTool,
+      webSearchTool({ name: 'web_search', type: 'web_search_20250305' }),
+      webFetchTool(),
+      codeExecutionTool({
+        name: 'code_execution',
+        type: 'code_execution_20250825',
+      }),
+      computerUseTool({
+        type: 'computer_20251124',
+        name: 'computer',
+        display_width_px: 1024,
+        display_height_px: 768,
+      }),
+      bashTool({ name: 'bash', type: 'bash_20250124' }),
+      textEditorTool({
+        type: 'text_editor_20250124',
+        name: 'str_replace_editor',
+      }),
+      memoryTool(),
+    ])
+  })
+
+  it('claude-opus-5-5 accepts the full tool superset with the computer toolset', () => {
+    const adapter = anthropicText('claude-opus-5-5')
+    typedTools(adapter, [
+      userTool,
+      webSearchTool({ name: 'web_search', type: 'web_search_20250305' }),
+      webFetchTool(),
+      codeExecutionTool({
+        name: 'code_execution',
+        type: 'code_execution_20250825',
+      }),
+      computerUseTool({ type: 'computer_toolset_20260801' }),
+      bashTool({ name: 'bash', type: 'bash_20250124' }),
+      textEditorTool({
+        type: 'text_editor_20250124',
+        name: 'str_replace_editor',
+      }),
+      memoryTool(),
+    ])
+  })
+
+  it('claude-opus-5-5 rejects computer_20251124 (only the toolset works)', () => {
+    const adapter = anthropicText('claude-opus-5-5')
+    typedTools(adapter, [
+      // @ts-expect-error - computer_20251124 returns a 400 on claude-opus-5-5
+      computerUseTool({
+        type: 'computer_20251124',
+        name: 'computer',
+        display_width_px: 1024,
+        display_height_px: 768,
+      }),
+    ])
+  })
+
+  it('claude-sonnet-5-5 accepts the full tool superset with the computer toolset', () => {
+    const adapter = anthropicText('claude-sonnet-5-5')
+    typedTools(adapter, [
+      userTool,
+      webSearchTool({ name: 'web_search', type: 'web_search_20250305' }),
+      webFetchTool(),
+      codeExecutionTool({
+        name: 'code_execution',
+        type: 'code_execution_20250825',
+      }),
+      computerUseTool({ type: 'computer_toolset_20260801' }),
+      bashTool({ name: 'bash', type: 'bash_20250124' }),
+      textEditorTool({
+        type: 'text_editor_20250124',
+        name: 'str_replace_editor',
+      }),
+      memoryTool(),
+    ])
+  })
+
+  it('claude-sonnet-5-5 rejects computer_20251124 (only the toolset works)', () => {
+    const adapter = anthropicText('claude-sonnet-5-5')
+    typedTools(adapter, [
+      // @ts-expect-error - computer_20251124 returns a 400 on claude-sonnet-5-5
+      computerUseTool({
+        type: 'computer_20251124',
+        name: 'computer',
+        display_width_px: 1024,
+        display_height_px: 768,
+      }),
+    ])
+  })
+
+  it('claude-haiku-5-5 accepts the full tool superset with the computer toolset', () => {
+    const adapter = anthropicText('claude-haiku-5-5')
+    typedTools(adapter, [
+      userTool,
+      webSearchTool({ name: 'web_search', type: 'web_search_20250305' }),
+      webFetchTool(),
+      codeExecutionTool({
+        name: 'code_execution',
+        type: 'code_execution_20250825',
+      }),
+      computerUseTool({ type: 'computer_toolset_20260801' }),
+      bashTool({ name: 'bash', type: 'bash_20250124' }),
+      textEditorTool({
+        type: 'text_editor_20250124',
+        name: 'str_replace_editor',
+      }),
+      memoryTool(),
+    ])
+  })
+
+  it('claude-haiku-5-5 rejects computer_20251124 (only the toolset works)', () => {
+    const adapter = anthropicText('claude-haiku-5-5')
+    typedTools(adapter, [
+      // @ts-expect-error - computer_20251124 returns a 400 on claude-haiku-5-5
+      computerUseTool({
+        type: 'computer_20251124',
+        name: 'computer',
+        display_width_px: 1024,
+        display_height_px: 768,
+      }),
+    ])
+  })
+
+  it('claude-opus-4-6 rejects computer_20250124 and the computer toolset', () => {
+    const adapter = anthropicText('claude-opus-4-6')
+    typedTools(adapter, [
+      // @ts-expect-error - claude-opus-4-6 takes only computer_20251124
+      computerUseTool({
+        type: 'computer_20250124',
+        name: 'computer',
+        display_width_px: 1024,
+        display_height_px: 768,
+      }),
+      // @ts-expect-error - claude-opus-4-6 takes only computer_20251124
+      computerUseTool({ type: 'computer_toolset_20260801' }),
+    ])
+  })
+
+  it('claude-haiku-4-5 accepts computer_20250124 and rejects computer_20251124', () => {
+    const adapter = anthropicText('claude-haiku-4-5')
+    typedTools(adapter, [
+      computerUseTool({
+        type: 'computer_20250124',
+        name: 'computer',
+        display_width_px: 1024,
+        display_height_px: 768,
+      }),
+      // @ts-expect-error - claude-haiku-4-5 takes only computer_20250124
+      computerUseTool({
+        type: 'computer_20251124',
+        name: 'computer',
+        display_width_px: 1024,
+        display_height_px: 768,
+      }),
+    ])
+  })
+
+  it('claude-opus-5 accepts the computer toolset', () => {
+    const adapter = anthropicText('claude-opus-5')
+    typedTools(adapter, [
+      computerUseTool({ type: 'computer_toolset_20260801' }),
     ])
   })
 
@@ -156,5 +346,17 @@ describe('Anthropic per-model tool gating', () => {
     expectTypeOf<(typeof ANTHROPIC_MODELS)[number]>().toEqualTypeOf<
       keyof AnthropicModelInputModalitiesByName
     >()
+  })
+
+  it('every registered model declares at least one provider tool', () => {
+    type ModelsWithoutProviderTools = {
+      [K in keyof AnthropicChatModelToolCapabilitiesByName]: NonNullable<
+        AnthropicChatModelToolCapabilitiesByName[K]
+      > extends readonly [unknown, ...Array<unknown>]
+        ? never
+        : K
+    }[keyof AnthropicChatModelToolCapabilitiesByName]
+
+    expectTypeOf<ModelsWithoutProviderTools>().toEqualTypeOf<never>()
   })
 })

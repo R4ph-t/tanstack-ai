@@ -33,6 +33,7 @@ describe('GrokSpeechAdapter', () => {
     )
 
     const result = await generateSpeech({
+      threadId: 'thread-1',
       adapter,
       text: 'hello world',
     })
@@ -74,6 +75,7 @@ describe('GrokSpeechAdapter', () => {
       const adapter = new GrokSpeechAdapter({ apiKey: 'xai-test' }, 'grok-tts')
 
       await generateSpeech({
+        threadId: 'thread-1',
         adapter,
         text: 'x',
         format: fmt,
@@ -91,6 +93,7 @@ describe('GrokSpeechAdapter', () => {
     const adapter = new GrokSpeechAdapter({ apiKey: 'xai-test' }, 'grok-tts')
 
     await generateSpeech({
+      threadId: 'thread-1',
       adapter,
       text: 'x',
       format: 'wav',
@@ -128,6 +131,7 @@ describe('GrokSpeechAdapter', () => {
     const adapter = new GrokSpeechAdapter({ apiKey: 'xai-test' }, 'grok-tts')
 
     await generateSpeech({
+      threadId: 'thread-1',
       adapter,
       text: 'x',
       modelOptions: { sample_rate: 44100 },
@@ -144,6 +148,7 @@ describe('GrokSpeechAdapter', () => {
     const adapter = new GrokSpeechAdapter({ apiKey: 'xai-test' }, 'grok-tts')
 
     await generateSpeech({
+      threadId: 'thread-1',
       adapter,
       text: 'x',
       format: 'wav',
@@ -163,6 +168,7 @@ describe('GrokSpeechAdapter', () => {
     const adapter = new GrokSpeechAdapter({ apiKey: 'xai-test' }, 'grok-tts')
 
     await generateSpeech({
+      threadId: 'thread-1',
       adapter,
       text: 'x',
       format: 'pcm',
@@ -179,6 +185,7 @@ describe('GrokSpeechAdapter', () => {
     const adapter = new GrokSpeechAdapter({ apiKey: 'xai-test' }, 'grok-tts')
 
     await generateSpeech({
+      threadId: 'thread-1',
       adapter,
       text: 'x',
       modelOptions: {
@@ -199,6 +206,7 @@ describe('GrokSpeechAdapter', () => {
     const adapter = new GrokSpeechAdapter({ apiKey: 'xai-test' }, 'grok-tts')
 
     const result = await generateSpeech({
+      threadId: 'thread-1',
       adapter,
       text: 'x',
       format: 'pcm',
@@ -217,6 +225,7 @@ describe('GrokSpeechAdapter', () => {
     const adapter = new GrokSpeechAdapter({ apiKey: 'xai-test' }, 'grok-tts')
 
     const result = await generateSpeech({
+      threadId: 'thread-1',
       adapter,
       text: 'x',
       format: 'pcm',
@@ -236,9 +245,9 @@ describe('GrokSpeechAdapter', () => {
 
     const adapter = new GrokSpeechAdapter({ apiKey: 'xai-test' }, 'grok-tts')
 
-    await expect(generateSpeech({ adapter, text: 'x' })).rejects.toThrow(
-      'Grok TTS request failed: 500 upstream boom',
-    )
+    await expect(
+      generateSpeech({ threadId: 'thread-1', adapter, text: 'x' }),
+    ).rejects.toThrow('Grok TTS request failed: 500 upstream boom')
   })
 })
 
@@ -275,6 +284,7 @@ describe('GrokTranscriptionAdapter', () => {
       type: 'audio/mpeg',
     })
     const result = await generateTranscription({
+      threadId: 'thread-1',
       adapter,
       audio: audioBlob,
       language: 'en',
@@ -300,6 +310,14 @@ describe('GrokTranscriptionAdapter', () => {
     expect(result.text).toBe('hello world')
     expect(result.language).toBe('en')
     expect(result.duration).toBe(1.23)
+    // STT is duration-billed: the audio duration doubles as the billed
+    // quantity, self-described in seconds.
+    expect(result.usage).toEqual({
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      billed: { quantity: 1.23, unit: 'seconds' },
+    })
     // Grok returns `confidence` per word when the model provides one; we
     // surface it under `GrokTranscriptionWord` so callers that know they're
     // using Grok can narrow the result via `as Array<GrokTranscriptionWord>`.
@@ -322,6 +340,7 @@ describe('GrokTranscriptionAdapter', () => {
     )
 
     const result = await generateTranscription({
+      threadId: 'thread-1',
       adapter,
       audio: new Blob([new Uint8Array([1])], { type: 'audio/mpeg' }),
     })
@@ -344,6 +363,7 @@ describe('GrokTranscriptionAdapter', () => {
 
     await expect(
       generateTranscription({
+        threadId: 'thread-1',
         adapter,
         audio: new Blob([new Uint8Array([1])], { type: 'audio/mpeg' }),
       }),
@@ -362,6 +382,7 @@ describe('GrokTranscriptionAdapter', () => {
     )
 
     await generateTranscription({
+      threadId: 'thread-1',
       adapter,
       audio: new Blob([new Uint8Array([1])], { type: 'audio/mpeg' }),
       language: 'en',
@@ -388,6 +409,7 @@ describe('GrokTranscriptionAdapter', () => {
     const base64 = Buffer.from([1, 2, 3]).toString('base64')
 
     await generateTranscription({
+      threadId: 'thread-1',
       adapter,
       audio: base64,
       modelOptions: { audio_format: 'wav' },

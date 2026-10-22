@@ -3,17 +3,44 @@ import { generateId as _generateId, getApiKeyFromEnv } from '@tanstack/ai-utils'
 import type { GoogleGenAIOptions } from '@google/genai'
 
 export interface GeminiClientConfig extends GoogleGenAIOptions {
-  apiKey: string
+  /**
+   * Base URL for every request. Maps onto `httpOptions.baseUrl` and wins
+   * over it when both are set. Same option name as the other adapters, so a
+   * gateway config can be spread into any of them.
+   */
+  baseURL?: string
+  /**
+   * Headers sent with every request. Maps onto `httpOptions.headers` and wins
+   * over it when both are set. Same option name as the other adapters.
+   */
+  defaultHeaders?: Record<string, string>
 }
 
 /**
- * Creates a Google Generative AI client instance
+ * Creates a Google Generative AI client instance.
+ *
+ * AI Studio mode needs `apiKey`. Vertex / Enterprise mode (`vertexai` or
+ * `enterprise`) uses project, location, and Google Cloud credentials instead.
  */
 export function createGeminiClient(config: GeminiClientConfig): GoogleGenAI {
-  return new GoogleGenAI({
-    ...config,
-    apiKey: config.apiKey,
-  })
+  const vertexMode = config.vertexai === true || config.enterprise === true
+  if (
+    !vertexMode &&
+    (config.apiKey === undefined || config.apiKey.length === 0)
+  ) {
+    throw new Error(
+      'A Gemini API key is required when vertexai and enterprise are not set. Pass apiKey, or set GOOGLE_API_KEY or GEMINI_API_KEY.',
+    )
+  }
+  const { baseURL, defaultHeaders, ...options } = config
+  if (baseURL !== undefined || defaultHeaders !== undefined) {
+    options.httpOptions = {
+      ...options.httpOptions,
+      ...(baseURL !== undefined ? { baseUrl: baseURL } : {}),
+      ...(defaultHeaders !== undefined ? { headers: defaultHeaders } : {}),
+    }
+  }
+  return new GoogleGenAI(options)
 }
 
 /**
@@ -39,4 +66,21 @@ export function getGeminiApiKeyFromEnv(): string {
  */
 export function generateId(prefix: string): string {
   return _generateId(prefix)
+}
+
+/**
+ * True when a Gemini API error says the input does not fit in the model's
+ * context window. The API has no error status for it. It answers 400
+ * `INVALID_ARGUMENT`, the same as every bad request, so the message text is
+ * the only signal.
+ */
+export function isGeminiContextOverflow(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    'status' in error &&
+    error.status === 400 &&
+    /input token count.*exceeds the maximum number of tokens/.test(
+      error.message,
+    )
+  )
 }

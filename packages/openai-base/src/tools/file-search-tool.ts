@@ -1,3 +1,7 @@
+import {
+  getOpenAIProviderToolMetadata,
+  openAIProviderTool,
+} from './openai-provider-tool'
 import type { FileSearchTool as FileSearchToolConfig } from 'openai/resources/responses/responses'
 import type { Tool } from '@tanstack/ai'
 
@@ -12,16 +16,13 @@ const validateMaxNumResults = (maxNumResults: number | undefined) => {
   }
 }
 
-/** @deprecated Renamed to `FileSearchToolConfig`. Will be removed in a future release. */
-export type FileSearchTool = FileSearchToolConfig
-
 /**
  * Converts a standard Tool to OpenAI FileSearchTool format
  */
 export function convertFileSearchToolToAdapterFormat(
   tool: Tool,
 ): FileSearchToolConfig {
-  const metadata = tool.metadata as FileSearchToolConfig
+  const metadata = getOpenAIProviderToolMetadata(tool) as FileSearchToolConfig
   // Conditional spread: SDK's `FileSearchToolConfig` declares the
   // optional fields without `| undefined`, so we omit absent values
   // rather than passing them through as explicit `undefined`.
@@ -46,13 +47,16 @@ export function convertFileSearchToolToAdapterFormat(
  */
 export function fileSearchTool(toolData: FileSearchToolConfig): Tool {
   validateMaxNumResults(toolData.max_num_results)
-  return {
-    name: 'file_search',
-    description: 'Search files in vector stores',
-    metadata: {
-      ...toolData,
+  return openAIProviderTool(
+    {
+      name: 'file_search',
+      description: 'Search files in vector stores',
+      metadata: {
+        ...toolData,
+      },
     },
-  }
+    'file_search',
+  )
 }
 
 export { validateMaxNumResults }

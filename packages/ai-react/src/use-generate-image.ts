@@ -1,4 +1,5 @@
-import { useGeneration } from './use-generation'
+import { useGenerationWithDevtoolsIdentity } from './use-generation'
+import { reconstructImageResult } from '@tanstack/ai-client'
 import type { ImageGenerationResult, StreamChunk } from '@tanstack/ai'
 import type {
   AIDevtoolsDisplayOptions,
@@ -8,6 +9,8 @@ import type {
   ImageGenerateInput,
   InferGenerationOutputFromReturn,
 } from '@tanstack/ai-client'
+import type { ByokClient } from '@tanstack/ai-client/byok'
+import type { ProviderId } from '@tanstack/ai/byok'
 
 /**
  * Options for the useGenerateImage hook.
@@ -19,12 +22,50 @@ export interface UseGenerateImageOptions<TOutput = ImageGenerationResult> {
   connection?: ConnectConnectionAdapter
   /** Direct async function for image generation */
   fetcher?: GenerationFetcher<ImageGenerateInput, ImageGenerationResult>
-  /** Unique identifier for this generation instance */
-  id?: string
   /** Additional body parameters to send with connect-based adapter requests */
   body?: Record<string, any>
+  /** Optional BYOK keyring. Keys go in `x-byok-*` headers, never the body. */
+  byok?: ByokClient
+  /** Optional provider id. If it returns a slug, only that key is sent. If no slug resolves (`byokProvider`, then `body.provider`), generate throws. */
+  byokProvider?: () => ProviderId | undefined
   /** Display options for TanStack AI Devtools. */
   devtools?: AIDevtoolsDisplayOptions
+  /**
+   * How this generation persists across reloads.
+   * - Omit / `false`: ephemeral, in-memory only.
+   * - `true`: server-driven — on mount the client hydrates the last generation
+   *   for its `threadId` from the server (needs a connection with a
+   *   `hydrateGeneration` handler) and repaints it; it never auto-starts a run.
+   */
+  persistence?: boolean
+  /**
+   * The **scope** this generation belongs to: a stable, app-chosen name for the
+   * slot successive runs fill — not a link to a chat conversation.
+   *
+   * The hook starts empty and produces many runs over its life; each gets its
+   * own `runId`, but all belong to one scope. Persistence keys on this, so
+   * derive it from your own domain and keep it identical across reloads (e.g.
+   * `` `video-${videoId}-start-frame` ``). It is also sent as the AG-UI thread
+   * id on the wire, which the protocol requires.
+   *
+   * Required. A generated id would change on every reload, so persistence
+   * would restore nothing.
+   */
+  threadId: string
+  /**
+   * Server-driven hydration handler for `persistence: true` when the
+   * connection doesn't carry one (e.g. alongside `fetcher`, or a `stream()` /
+   * `rpcStream()` adapter built without handlers) — typically a one-line
+   * server-function call. The connection's own handler takes precedence.
+   */
+  hydrateGeneration?: ConnectConnectionAdapter['hydrateGeneration']
+  /**
+   * Re-attach handler that replays a run still generating to completion on
+   * mount, when the connection doesn't carry one. Without it, a restored
+   * `running` snapshot surfaces as an (interrupted) error. The connection's
+   * own handler takes precedence.
+   */
+  joinRun?: ConnectConnectionAdapter['joinRun']
   /**
    * Callback when images are generated. Can optionally return a transformed value.
    *
@@ -61,6 +102,13 @@ export interface UseGenerateImageReturn<TOutput = ImageGenerationResult> {
   stop: () => void
   /** Clear result, error, and return to idle */
   reset: () => void
+  /**
+   * The id of the generation job currently running, or `null` when nothing is in
+   * flight. Each call to `generate` is one job with its own id. Pass it to your
+   * own endpoint to cancel or poll the provider job — `stop()` only aborts the
+   * local stream, it does not stop work already running on the provider.
+   */
+  runId: string | null
 }
 
 /**
@@ -77,6 +125,7 @@ export interface UseGenerateImageReturn<TOutput = ImageGenerationResult> {
  *
  * function ImageGenerator() {
  *   const { generate, result, isLoading, error, reset } = useGenerateImage({
+ *     threadId: 'hero-image',
  *     connection: fetchServerSentEvents('/api/generate/image'),
  *   })
  *
@@ -102,25 +151,17 @@ export function useGenerateImage<TTransformed = void>(
 ): UseGenerateImageReturn<
   InferGenerationOutputFromReturn<ImageGenerationResult, TTransformed>
 > {
-  const devtools = {
-    ...options.devtools,
-    framework: 'react',
-    hookName: 'useGenerateImage',
-    outputKind: 'image' as const,
-  }
-  const { generate, result, isLoading, error, status, stop, reset } =
-    useGeneration<ImageGenerateInput, ImageGenerationResult, TTransformed>({
-      ...options,
-      devtools,
-    })
+  const generation = useGenerationWithDevtoolsIdentity<
+    ImageGenerateInput,
+    ImageGenerationResult,
+    TTransformed
+  >(
+    { ...options, reconstructResult: reconstructImageResult },
+    {
+      hookName: 'useGenerateImage',
+      outputKind: 'image',
+    },
+  )
 
-  return {
-    generate: generate as (input: ImageGenerateInput) => Promise<void>,
-    result,
-    isLoading,
-    error,
-    status,
-    stop,
-    reset,
-  }
+  return generation
 }

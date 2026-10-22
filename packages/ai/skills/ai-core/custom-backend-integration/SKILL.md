@@ -9,9 +9,12 @@ description: >
   not @tanstack/ai-client.
 type: composition
 library: tanstack-ai
-library_version: '0.10.0'
+library_version: '0.42.0'
 sources:
-  - 'TanStack/ai:docs/chat/connection-adapters.md'
+  - 'TanStack/ai:docs/transports/sse.md'
+  - 'TanStack/ai:docs/transports/http-stream.md'
+  - 'TanStack/ai:docs/transports/request-options.md'
+  - 'TanStack/ai:docs/transports/custom.md'
 ---
 
 # Custom Backend Integration
@@ -22,8 +25,9 @@ This skill builds on ai-core and ai-core/chat-experience. Read them first.
 
 Connect `useChat` to a custom SSE backend with auth headers:
 
-```typescript
+```tsx
 import { useChat, fetchServerSentEvents } from '@tanstack/ai-react'
+import { token } from './auth'
 
 function Chat() {
   const { messages, sendMessage, isLoading } = useChat({
@@ -32,6 +36,7 @@ function Chat() {
         Authorization: `Bearer ${token}`,
       },
     }),
+    threadId: 'support-42',
   })
 
   return (
@@ -69,6 +74,7 @@ framing. This is the recommended default.
 
 ```typescript
 import { useChat, fetchServerSentEvents } from '@tanstack/ai-react'
+import { token, tenantId } from './auth'
 
 const { messages, sendMessage } = useChat({
   connection: fetchServerSentEvents('https://my-api.com/chat', {
@@ -78,6 +84,7 @@ const { messages, sendMessage } = useChat({
     },
     credentials: 'include',
   }),
+  threadId: 'support-42',
 })
 ```
 
@@ -85,6 +92,7 @@ const { messages, sendMessage } = useChat({
 
 ```typescript
 import { useChat, fetchServerSentEvents } from '@tanstack/ai-react'
+import { sessionId, getAccessToken } from './auth'
 
 const { messages, sendMessage } = useChat({
   connection: fetchServerSentEvents(
@@ -95,25 +103,32 @@ const { messages, sendMessage } = useChat({
       },
       body: {
         provider: 'openai',
-        model: 'gpt-4o',
+        model: 'gpt-5.5',
       },
     }),
   ),
+  threadId: 'support-42',
 })
 ```
 
-The `body` field in options is merged into the POST request body alongside
-`messages` and `data`, so the server receives `{ messages, data, provider, model }`.
+The `body` field in the connection options is merged into AG-UI
+`forwardedProps`, so the server reads `params.forwardedProps.provider` and
+`params.forwardedProps.model`.
 
 **Custom fetch client (for proxies, interceptors, retries):**
 
 ```typescript
 import { useChat, fetchServerSentEvents } from '@tanstack/ai-react'
 
+// Same signature as globalThis.fetch — wrap it however you need.
+const myCustomFetch: typeof fetch = (input, init) =>
+  fetch(input, { ...init, credentials: 'include' })
+
 const { messages, sendMessage } = useChat({
   connection: fetchServerSentEvents('/api/chat', {
     fetchClient: myCustomFetch,
   }),
+  threadId: 'support-42',
 })
 ```
 
@@ -124,6 +139,7 @@ instead of SSE. Each line is one JSON-encoded `StreamChunk` followed by `\n`.
 
 ```typescript
 import { useChat, fetchHttpStream } from '@tanstack/ai-react'
+import { token } from './auth'
 
 const { messages, sendMessage } = useChat({
   connection: fetchHttpStream('https://my-api.com/chat', {
@@ -131,6 +147,7 @@ const { messages, sendMessage } = useChat({
       Authorization: `Bearer ${token}`,
     },
   }),
+  threadId: 'support-42',
 })
 ```
 
@@ -143,6 +160,7 @@ JSON object per line.
 
 ```typescript
 import { useChat, fetchHttpStream } from '@tanstack/ai-react'
+import { region, refreshToken } from './auth'
 
 const { messages, sendMessage } = useChat({
   connection: fetchHttpStream(
@@ -151,6 +169,7 @@ const { messages, sendMessage } = useChat({
       headers: { Authorization: `Bearer ${await refreshToken()}` },
     }),
   ),
+  threadId: 'support-42',
 })
 ```
 
@@ -168,15 +187,11 @@ This is the simpler model and covers most HTTP-based protocols.
 
 ```typescript
 import { useChat } from '@tanstack/ai-react'
-import type { ConnectionAdapter } from '@tanstack/ai-react'
-import type { StreamChunk, UIMessage } from '@tanstack/ai'
+import type { ConnectConnectionAdapter } from '@tanstack/ai-react'
+import type { StreamChunk } from '@tanstack/ai'
 
-const websocketAdapter: ConnectionAdapter = {
-  async *connect(
-    messages: Array<UIMessage>,
-    data?: Record<string, any>,
-    abortSignal?: AbortSignal,
-  ): AsyncGenerator<StreamChunk> {
+const websocketAdapter: ConnectConnectionAdapter = {
+  async *connect(messages, data, abortSignal, runContext) {
     const ws = new WebSocket('wss://my-api.com/chat')
 
     // Wait for connection
@@ -186,7 +201,15 @@ const websocketAdapter: ConnectionAdapter = {
     })
 
     // Send messages
-    ws.send(JSON.stringify({ messages, ...data }))
+    // Send the run ids the client made. Never make up your own.
+    ws.send(
+      JSON.stringify({
+        threadId: runContext.threadId,
+        runId: runContext.runId,
+        messages,
+        ...data,
+      }),
+    )
 
     // Create an async queue to bridge WebSocket events to an async iterable
     const queue: Array<StreamChunk> = []
@@ -229,6 +252,7 @@ const websocketAdapter: ConnectionAdapter = {
 function Chat() {
   const { messages, sendMessage } = useChat({
     connection: websocketAdapter,
+    threadId: 'support-42',
   })
 
   // ... render messages
@@ -243,31 +267,65 @@ returns an `AsyncIterable<StreamChunk>` that stays open, and `send` dispatches
 messages through it.
 
 ```typescript
-import type { StreamChunk, UIMessage } from '@tanstack/ai'
+import { useChat } from '@tanstack/ai-react'
+import type { SubscribeConnectionAdapter } from '@tanstack/ai-react'
+import type { StreamChunk } from '@tanstack/ai'
 
-// SubscribeConnectionAdapter is exported from @tanstack/ai-client
-// (not re-exported by framework packages -- use ConnectionAdapter
-//  union type from @tanstack/ai-react for typing)
-const pushAdapter = {
-  subscribe(abortSignal?: AbortSignal): AsyncIterable<StreamChunk> {
-    // Return a long-lived async iterable that yields chunks
-    // whenever the server pushes them
-    return createPersistentStream(abortSignal)
+// One socket for the lifetime of the client; every run's chunks arrive on it.
+const ws = new WebSocket('wss://my-api.com/chat')
+const ready = new Promise<void>((resolve) => {
+  ws.addEventListener('open', () => resolve(), { once: true })
+})
+
+const pushAdapter: SubscribeConnectionAdapter = {
+  async *subscribe(abortSignal) {
+    // Long-lived async iterable: yields chunks whenever the server pushes
+    // them, until the socket closes or the signal aborts
+    const queue: Array<StreamChunk> = []
+    let wake: (() => void) | null = null
+    let closed = false
+
+    ws.addEventListener('message', (event) => {
+      const chunk: StreamChunk = JSON.parse(event.data)
+      queue.push(chunk)
+      wake?.()
+    })
+    ws.addEventListener('close', () => {
+      closed = true
+      wake?.()
+    })
+    abortSignal?.addEventListener('abort', () => ws.close())
+
+    while (!closed || queue.length > 0) {
+      const next = queue.shift()
+      if (next !== undefined) {
+        yield next
+        continue
+      }
+      await new Promise<void>((r) => {
+        wake = r
+      })
+    }
   },
 
-  async send(
-    messages: Array<UIMessage>,
-    data?: Record<string, any>,
-    abortSignal?: AbortSignal,
-  ): Promise<void> {
+  async send(messages, data, _abortSignal, runContext) {
     // Dispatch messages; chunks arrive through subscribe()
-    await persistentConnection.send(JSON.stringify({ messages, ...data }))
+    await ready
+    ws.send(
+      JSON.stringify({
+        threadId: runContext.threadId,
+        runId: runContext.runId,
+        messages,
+        ...data,
+      }),
+    )
   },
 }
 
 function Chat() {
   const { messages, sendMessage } = useChat({
     connection: pushAdapter,
+    threadId: 'support-42',
   })
 
   // ... render messages
@@ -279,16 +337,16 @@ a shorthand for creating a `ConnectConnectionAdapter` from an async generator:
 
 ```typescript
 import { useChat, stream } from '@tanstack/ai-react'
-import type { StreamChunk, UIMessage } from '@tanstack/ai'
+import type { StreamChunk } from '@tanstack/ai'
 
-const directAdapter = stream(async function* (
-  messages: Array<UIMessage>,
-  data?: Record<string, any>,
-): AsyncGenerator<StreamChunk> {
+// The 4th argument is the AG-UI RunAgentInput for this run: threadId, runId,
+// resume, client tools, and forwardedProps. Send it as the request body.
+const directAdapter = stream(async function* (_messages, _data, signal, input) {
   const response = await fetch('https://my-api.com/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, ...data }),
+    body: JSON.stringify(input),
+    signal,
   })
 
   const reader = response.body!.getReader()
@@ -305,7 +363,8 @@ const directAdapter = stream(async function* (
 
     for (const line of lines) {
       if (line.trim()) {
-        yield JSON.parse(line) as StreamChunk
+        const chunk: StreamChunk = JSON.parse(line)
+        yield chunk
       }
     }
   }
@@ -313,6 +372,7 @@ const directAdapter = stream(async function* (
 
 const { messages, sendMessage } = useChat({
   connection: directAdapter,
+  threadId: 'support-42',
 })
 ```
 
@@ -324,35 +384,51 @@ The `ConnectionAdapter` interface has two mutually exclusive modes. Providing
 both throws at runtime.
 
 ```typescript
-// WRONG -- throws "Connection adapter must provide either connect or both
-// subscribe and send, not both modes"
-const adapter = {
+import type {
+  ConnectConnectionAdapter,
+  ConnectionAdapter,
+  SubscribeConnectionAdapter,
+} from '@tanstack/ai-react'
+import { channel } from './channel'
+
+// WRONG -- type-checks (ConnectionAdapter is a union) but throws at runtime:
+// "Connection adapter must provide either connect or both subscribe and
+// send, not both modes"
+const adapter: ConnectionAdapter = {
   async *connect(messages) {
     /* ... */
   },
   subscribe(signal) {
-    /* ... */
+    return channel.chunks(signal)
   },
   async send(messages) {
-    /* ... */
+    await channel.send(messages)
   },
 }
 
 // CORRECT -- pick one mode
 // Option A: ConnectConnectionAdapter (pull-based)
-const pullAdapter = {
+const pullAdapter: ConnectConnectionAdapter = {
   async *connect(messages, data, abortSignal) {
     // ... yield StreamChunks
   },
 }
 
 // Option B: SubscribeConnectionAdapter (push-based)
-const pushAdapter = {
+const pushAdapter: SubscribeConnectionAdapter = {
   subscribe(abortSignal) {
-    return longLivedAsyncIterable
+    return channel.chunks(abortSignal)
   },
-  async send(messages, data, abortSignal) {
-    await connection.dispatch({ messages, ...data })
+  async send(messages, data, abortSignal, runContext) {
+    await channel.send(
+      {
+        threadId: runContext.threadId,
+        runId: runContext.runId,
+        messages,
+        ...data,
+      },
+      abortSignal,
+    )
   },
 }
 ```
@@ -375,7 +451,7 @@ Mitigations:
 - Use a single persistent WebSocket via `SubscribeConnectionAdapter` instead of
   per-request SSE connections
 
-Source: `docs/chat/connection-adapters.md`
+Source: `docs/transports/custom.md`
 
 ### c. MEDIUM: HTTP stream without implementing reconnection
 
@@ -388,15 +464,11 @@ streaming, implement retry logic in your connection adapter:
 
 ```typescript
 import { useChat } from '@tanstack/ai-react'
-import type { ConnectionAdapter } from '@tanstack/ai-react'
-import type { StreamChunk, UIMessage } from '@tanstack/ai'
+import type { ConnectConnectionAdapter } from '@tanstack/ai-react'
+import type { StreamChunk } from '@tanstack/ai'
 
-const resilientAdapter: ConnectionAdapter = {
-  async *connect(
-    messages: Array<UIMessage>,
-    data?: Record<string, any>,
-    abortSignal?: AbortSignal,
-  ): AsyncGenerator<StreamChunk> {
+const resilientAdapter: ConnectConnectionAdapter = {
+  async *connect(messages, data, abortSignal, runContext) {
     const maxRetries = 3
     let attempt = 0
 
@@ -405,7 +477,12 @@ const resilientAdapter: ConnectionAdapter = {
         const response = await fetch('https://my-api.com/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messages, ...data }),
+          body: JSON.stringify({
+            threadId: runContext.threadId,
+            runId: runContext.runId,
+            messages,
+            ...data,
+          }),
           signal: abortSignal,
         })
 
@@ -427,7 +504,8 @@ const resilientAdapter: ConnectionAdapter = {
 
           for (const line of lines) {
             if (line.trim()) {
-              yield JSON.parse(line) as StreamChunk
+              const chunk: StreamChunk = JSON.parse(line)
+              yield chunk
             }
           }
         }
@@ -446,6 +524,7 @@ const resilientAdapter: ConnectionAdapter = {
 
 const { messages, sendMessage } = useChat({
   connection: resilientAdapter,
+  threadId: 'support-42',
 })
 ```
 

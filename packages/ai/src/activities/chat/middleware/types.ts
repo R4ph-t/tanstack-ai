@@ -1,12 +1,33 @@
 import type {
+  StandardJSONSchemaV1,
+  StandardSchemaV1,
+} from '@standard-schema/spec'
+import type {
+  ActivityRecord,
+  AgentLoopState,
+  EmitCustomEventOptions,
+  Interrupt,
   JSONSchema,
   ModelMessage,
+  ResolvedPromptCache,
+  UIMessage,
+  RunAgentResumeItem,
+  RunErrorEvent,
   StreamChunk,
+  TanStackMessageMetadata,
   TokenUsage,
   Tool,
   ToolCall,
+  ToolChoice,
+  FetchWrapper,
 } from '../../../types'
 import type { SystemPrompt } from '../../../system-prompts'
+import type { ToolApprovalResolution } from '../../../interrupts'
+import type { ReasoningRequest } from '../../../reasoning'
+import type {
+  GenericInterruptRequest,
+  InterruptDefinition,
+} from '../../../interrupt-definition'
 import type {
   Capability,
   CapabilityHandle,
@@ -65,6 +86,7 @@ export interface ChatSandboxHooks<TContext = unknown> {
  * Phase of the chat middleware lifecycle.
  * - 'init': Initial config transform before the chat engine starts
  * - 'beforeModel': Before each adapter chatStream call (per agent iteration)
+ * - 'afterModel': After each adapter chatStream call (per agent iteration)
  * - 'modelStream': During model streaming
  * - 'beforeTools': Before tool execution phase
  * - 'afterTools': After tool execution phase
@@ -74,10 +96,96 @@ export interface ChatSandboxHooks<TContext = unknown> {
 export type ChatMiddlewarePhase =
   | 'init'
   | 'beforeModel'
+  | 'afterModel'
   | 'modelStream'
   | 'beforeTools'
   | 'afterTools'
   | 'structuredOutput'
+
+export const INTERRUPT_BOUNDARY_PHASES = [
+  'beforeModel',
+  'afterModel',
+  'beforeTools',
+  'afterTools',
+] as const
+
+export type InterruptBoundaryPhase = (typeof INTERRUPT_BOUNDARY_PHASES)[number]
+
+export const INTERRUPT_TOOL_RESUMES = ['continue', 'cancel', 'stop'] as const
+
+export type InterruptToolResume = (typeof INTERRUPT_TOOL_RESUMES)[number]
+
+type AnyInterruptDefinition = InterruptDefinition<any, any, any, any>
+
+type InterruptResponse<TDefinition> =
+  TDefinition extends InterruptDefinition<any, any, infer TResponseSchema, any>
+    ? TResponseSchema extends StandardSchemaV1<any, infer TResponse>
+      ? TResponse
+      : TResponseSchema extends StandardJSONSchemaV1<any, infer TResponse>
+        ? TResponse
+        : unknown
+    : unknown
+
+export type GenericInterruptResolution<
+  TDefinition extends AnyInterruptDefinition,
+> = TDefinition extends AnyInterruptDefinition
+  ?
+      | {
+          readonly request: GenericInterruptRequest<TDefinition>
+          readonly status: 'resolved'
+          readonly response: InterruptResponse<TDefinition>
+        }
+      | {
+          readonly request: GenericInterruptRequest<TDefinition>
+          readonly status: 'cancelled'
+          readonly response?: never
+        }
+  : never
+
+export interface InterruptResolutionCollection<
+  TDefinitions extends AnyInterruptDefinition = AnyInterruptDefinition,
+> {
+  for: <
+    TDefinition extends ([TDefinitions] extends [never]
+      ? AnyInterruptDefinition
+      : TDefinitions),
+  >(
+    definition: TDefinition,
+  ) => ReadonlyArray<GenericInterruptResolution<TDefinition>>
+  all: {
+    (): ReadonlyArray<GenericInterruptResolution<TDefinitions>>
+    <const TSelected extends ReadonlyArray<TDefinitions>>(
+      ...definitions: TSelected
+    ): ReadonlyArray<GenericInterruptResolution<TSelected[number]>>
+  }
+}
+
+type BivariantInterruptResolutionHook<
+  TContext,
+  TDefinitions extends AnyInterruptDefinition,
+> = InterruptResolutionHookSignature<TContext, TDefinitions>['call']
+
+declare abstract class InterruptResolutionHookSignature<
+  TContext,
+  TDefinitions extends AnyInterruptDefinition,
+> {
+  abstract call(
+    ctx: ChatMiddlewareContext<TContext>,
+    resolutions: InterruptResolutionCollection<TDefinitions>,
+  ): InterruptResolutionResult | Promise<InterruptResolutionResult>
+}
+
+export type InterruptBoundaryResult<
+  TDefinitions extends AnyInterruptDefinition = AnyInterruptDefinition,
+> =
+  | undefined
+  | {
+      readonly interrupts: ReadonlyArray<GenericInterruptRequest<TDefinitions>>
+    }
+
+export type InterruptResolutionResult = void | {
+  readonly toolResume: InterruptToolResume
+}
 
 /**
  * Stable context object passed to all middleware hooks.
@@ -90,29 +198,62 @@ export interface ChatMiddlewareContext<TContext = unknown> {
   streamId: string
   /** AG-UI run identifier for correlating client and server events */
   runId: string
+  /** Interrupted or parent run correlated with this continuation. */
+  parentRunId?: string
+  /**
+   * Set when this run is a subagent. The id on the child's `SUBAGENT_STARTED`
+   * and on every chunk it streams. Absent on a top-level run.
+   */
+  subagentRunId?: string
+  /** The agent name when this run is a subagent. */
+  subagentName?: string
+  /** The subagentRunId of the child that started this one, for a nested child. */
+  parentSubagentRunId?: string
+  /**
+   * Interrupt ids in `resume` that a subagent tool call of this run answers.
+   * This run does not answer them itself. They come from the subagent cards in
+   * the messages the client sent. `undefined` when no child is resumed, and
+   * for a router turn.
+   */
+  childResumeIds?: ReadonlySet<string>
   /**
    * AG-UI thread identifier — a stable per-conversation ID used to
-   * correlate client and server devtools events. Resolves to the
-   * caller-provided `threadId` (or legacy `conversationId`), or an
-   * auto-generated value when neither is supplied.
+   * correlate client and server devtools events. It is the caller's
+   * `threadId`.
    */
   threadId: string
-  /**
-   * @deprecated Use `threadId` instead. Retained as an alias of
-   * `threadId` so middleware written before the AG-UI rename keeps
-   * working unchanged. Will be removed in a future major release.
-   */
-  conversationId?: string
   /** Current lifecycle phase */
   phase: ChatMiddlewarePhase
   /** Current agent loop iteration (0-indexed) */
   iteration: number
   /** Running count of chunks yielded so far */
   chunkIndex: number
+  /**
+   * The `metadata.tanstack` of the current model call: source, stop reason,
+   * response id, and so on. It changes as chunks arrive. Each assistant
+   * message of the call gets a copy of it.
+   */
+  callMetadata: Readonly<TanStackMessageMetadata>
   /** Abort signal from the chat request */
   signal?: AbortSignal
   /** Abort the chat run with a reason */
   abort: (reason?: string) => void
+  /**
+   * Call the model again. Works only in `onModelError`, and throws in any
+   * other hook. `onConfig` runs again before the new call.
+   */
+  retry: () => void
+  /**
+   * Push a `CUSTOM` chunk onto the chat stream immediately.
+   * The engine yields it as soon as it can (including while `onConfig`
+   * is still awaiting work such as a summarize call). Durability then
+   * flushes the event on its own, unless you pass `{ batch: true }`.
+   */
+  emitCustomEvent: (
+    name: string,
+    value: Record<string, any>,
+    options?: EmitCustomEventOptions,
+  ) => void
   /** Runtime context provided by chat() options */
   context: TContext
   /**
@@ -133,7 +274,7 @@ export interface ChatMiddlewareContext<TContext = unknown> {
   activity: 'chat'
   /** Provider name (e.g., 'openai', 'anthropic') */
   provider: string
-  /** Model identifier (e.g., 'gpt-4o') */
+  /** Model identifier (e.g., 'gpt-5.5') */
   model: string
   /** Source of the chat invocation — always 'server' for server-side chat */
   source: 'client' | 'server'
@@ -169,6 +310,12 @@ export interface ChatMiddlewareContext<TContext = unknown> {
 
   /** Current messages array (read-only view) */
   messages: ReadonlyArray<ModelMessage>
+  /**
+   * Frontend-only AG-UI activity sidecar. Never model input. Persistence
+   * writes this when an ActivityStore is configured. Optional so code that
+   * builds its own context keeps working; the engine always sets it.
+   */
+  activities?: ReadonlyArray<ActivityRecord>
   /** Generate a unique ID with the given prefix */
   createId: (prefix: string) => string
   /**
@@ -205,26 +352,83 @@ export interface ChatMiddlewareContext<TContext = unknown> {
  * that middleware is allowed to modify.
  */
 export interface ChatMiddlewareConfig {
+  /** Canonical conversation history. Middleware and persistence read this. */
   messages: Array<ModelMessage>
+  /**
+   * Frontend-only AG-UI activity sidecar. Persistence loads and saves this
+   * when an ActivityStore is configured. Never model input.
+   */
+  activities?: Array<ActivityRecord>
+  /** Provider-only context. Defaults to `messages` when it is not set. */
+  providerMessages?: Array<ModelMessage> | undefined
   systemPrompts: Array<SystemPrompt>
   tools: Array<Tool>
+  resume?: Array<RunAgentResumeItem> | undefined
+  resumeToolState?: ChatResumeToolState | undefined
   metadata?: Record<string, unknown> | undefined
   modelOptions?: Record<string, unknown> | undefined
+  /** How hard the model thinks at this call. A middleware can set or change it. */
+  reasoning?: ReasoningRequest | undefined
+  /**
+   * How the model uses the tools of the next model call. A returned value
+   * applies to that call only. The next call starts again from the `chat()`
+   * option. A call with no tools sends no tool choice.
+   */
+  toolChoice?: ToolChoice | undefined
+  /**
+   * The prompt cache of the next model call. A returned value stays until a
+   * middleware changes it.
+   */
+  promptCache?: ResolvedPromptCache | undefined
+  /**
+   * Wraps the fetch of the next model call. A returned wrapper chains inside
+   * the wrappers before it, so it does not replace them. It applies to that
+   * call only. The next call starts again from the `chat()` option.
+   */
+  wrapFetch?: FetchWrapper | undefined
 }
+
+/**
+ * Tool decisions reconstructed by server-side middleware from validated resume
+ * entries. This lets empty-message interrupt resumes continue tool execution
+ * without relying on client message history.
+ */
+export interface ChatResumeToolState {
+  approvals?: ReadonlyMap<string, ToolApprovalResolution> | undefined
+  clientToolResults?: ReadonlyMap<string, unknown> | undefined
+  clientToolErrors?: ReadonlyMap<string, string> | undefined
+  genericInterrupts?:
+    | ReadonlyMap<string, ChatResumeGenericResolution>
+    | undefined
+  /** Durable generic requests reconstructed by server middleware. */
+  genericInterruptRequests?:
+    | ReadonlyMap<
+        string,
+        GenericInterruptRequest<InterruptDefinition<any, any, any, any>>
+      >
+    | undefined
+  deniedToolResults?: ReadonlyMap<string, unknown> | undefined
+  cancelledToolCallIds?: ReadonlySet<string> | undefined
+}
+
+export type ChatResumeGenericResolution =
+  | { interruptId: string; status: 'resolved'; payload: unknown }
+  | { interruptId: string; status: 'cancelled'; payload?: never }
 
 /**
  * Config passed to onStructuredOutputConfig.
  *
- * Mirrors ChatMiddlewareConfig minus `tools` (the final structured-output call
- * is a single typed-response request, not an agentic loop — tools cannot be
- * forwarded to it), plus the `outputSchema` being sent to the provider.
+ * Mirrors ChatMiddlewareConfig minus `tools` and `toolChoice` (the final
+ * structured-output call is a single typed-response request, not an agentic
+ * loop — tools cannot be forwarded to it), plus the `outputSchema` being sent
+ * to the provider.
  * Middleware may transform the schema (e.g., inject $defs, strip
  * vendor-incompatible keywords) by returning a partial that includes
  * `outputSchema`.
  */
 export interface StructuredOutputMiddlewareConfig extends Omit<
   ChatMiddlewareConfig,
-  'tools'
+  'tools' | 'toolChoice'
 > {
   /** JSON Schema being sent to the provider for structured output. */
   outputSchema: JSONSchema
@@ -242,7 +446,10 @@ export interface ToolCallHookContext {
   toolCall: ToolCall
   /** The resolved tool definition, if found */
   tool: Tool | undefined
-  /** Parsed arguments for the tool call */
+  /**
+   * Parsed arguments for the tool call, before the `inputSchema` check: no
+   * schema defaults or transforms yet, and possibly invalid.
+   */
   args: unknown
   /** Name of the tool */
   toolName: string
@@ -284,6 +491,18 @@ export interface AfterToolCallInfo {
   /** The result (if ok) or error (if not ok) */
   result?: unknown
   error?: unknown
+}
+
+/**
+ * Decision returned from onAfterToolCall.
+ * - undefined/void: keep the current result
+ * - { type: 'replaceResult', result }: use this result instead. The model and
+ *   the stream see it. The next middleware gets it as `info.result`. An error
+ *   result stays an error.
+ */
+export type AfterToolCallDecision = void | {
+  type: 'replaceResult'
+  result: unknown
 }
 
 // ===========================
@@ -373,6 +592,22 @@ export interface AbortInfo {
   reason?: string
   /** Duration until abort in milliseconds */
   duration: number
+  /**
+   * True only when the abort came from an explicit, out-of-band cancel (e.g. a
+   * cancel endpoint setting `RunRecord.cancelRequested`), never from a mere
+   * client disconnect.
+   *
+   * A disconnect and a user pressing "stop" are the SAME connection close on
+   * the wire, so consumers must not infer intent from an abort alone. Middleware
+   * that tears down expensive resources reads this to distinguish "the viewer
+   * left, keep going" from "the user wants this stopped". Populated from the
+   * abort reason: `true` exactly when the run was aborted with `RUN_CANCEL_REASON`
+   * (matched with `===`, so an arbitrary error message can never be read as a
+   * deliberate cancel), `false` for every other abort. The durable channel is
+   * separate — middleware that must also catch a cancel recorded on a different
+   * host reads `RunRecord.cancelRequested` in addition to this flag.
+   */
+  cancelRequested?: boolean
 }
 
 /**
@@ -383,6 +618,40 @@ export interface ErrorInfo {
   error: unknown
   /** Duration until error in milliseconds */
   duration: number
+}
+
+/**
+ * Saves subagent runs while a router owns the turn.
+ * `withPersistence` sets this. `chat()` calls it. Apps do not.
+ */
+export interface RoutedSubagentPersistence {
+  start: (input: {
+    threadId: string
+    runId: string
+    messages: ReadonlyArray<UIMessage | ModelMessage>
+    /**
+     * The run's resume entries: answers to earlier child interrupts, plus any
+     * the parent answers itself.
+     */
+    resume?: ReadonlyArray<RunAgentResumeItem>
+  }) => Promise<void>
+  chunk: (input: {
+    threadId: string
+    runId: string
+    chunk: StreamChunk
+  }) => Promise<void>
+  finish: (input: { threadId: string; runId: string }) => Promise<void>
+  /** The run stopped because a child waits for outside input. */
+  suspend?: (input: {
+    threadId: string
+    runId: string
+    interrupts: ReadonlyArray<Interrupt>
+  }) => Promise<void>
+  abort: (input: {
+    threadId: string
+    runId: string
+    error?: unknown
+  }) => Promise<void>
 }
 
 // ===========================
@@ -418,9 +687,37 @@ export interface ErrorInfo {
  * }
  * ```
  */
-export interface ChatMiddleware<TContext = unknown> {
+export interface ChatMiddleware<
+  TContext = unknown,
+  TInterruptDefinitions extends AnyInterruptDefinition = never,
+> {
   /** Optional name for debugging and identification */
   name?: string
+
+  /**
+   * Present when this middleware stores subagent runs.
+   * The router calls it. An app does not set it.
+   */
+  routedSubagentPersistence?: RoutedSubagentPersistence
+
+  /**
+   * Called at a lifecycle boundary. Return interrupt requests to pause the run.
+   * Requests from every middleware in the same boundary form one batch.
+   */
+  onInterruptBoundary?: (
+    ctx: ChatMiddlewareContext<TContext> & { phase: InterruptBoundaryPhase },
+  ) =>
+    | InterruptBoundaryResult<TInterruptDefinitions>
+    | Promise<InterruptBoundaryResult<TInterruptDefinitions>>
+
+  /**
+   * Called on a continuation run after the client answers registered interrupts.
+   * Return `toolResume` to decide whether pending tools continue, cancel, or stop.
+   */
+  onInterruptResolution?: BivariantInterruptResolutionHook<
+    TContext,
+    TInterruptDefinitions
+  >
 
   /**
    * Capabilities this middleware requires. `chat()` validates that some
@@ -507,6 +804,41 @@ export interface ChatMiddleware<TContext = unknown> {
   ) => void | Promise<void>
 
   /**
+   * Called when the engine is deciding whether to start another agent-loop
+   * iteration (after a tool phase or between model turns).
+   *
+   * Return `false` to stop further iterations. Return `true`, `void`, or
+   * `undefined` to allow continuation. Combined with AND semantics across
+   * middleware and with `agentLoopStrategy` — any `false` stops the loop.
+   *
+   * Does not abort the run: the stream finishes normally with the current
+   * messages. Use `ctx.abort()` only when you need a hard abort.
+   *
+   * Receives the same {@link AgentLoopState} passed to strategies
+   * (`iterationCount`, `toolCallCount`, `lastTurnToolCallCount`, etc.).
+   */
+  onShouldContinue?: (
+    ctx: ChatMiddlewareContext<TContext>,
+    state: AgentLoopState,
+  ) => boolean | void | Promise<boolean | void>
+
+  /**
+   * Called when the adapter sends a `RUN_ERROR` before any output of the
+   * model call. The error does not reach `onChunk` or the caller yet. An
+   * exception that the adapter throws goes to `onError`, not here.
+   *
+   * Call `ctx.retry()` to call the model again. Then `onConfig` runs again
+   * (phase `beforeModel`), so the middleware can change the request first,
+   * and the failed call is dropped from the stream. Without `ctx.retry()`,
+   * the error goes on as usual. A model call retries at most 2 times this
+   * way. The structured-output call is not retried.
+   */
+  onModelError?: (
+    ctx: ChatMiddlewareContext<TContext>,
+    error: RunErrorEvent,
+  ) => void | Promise<void>
+
+  /**
    * Called for every chunk yielded by chat().
    * Can observe, transform, expand, or drop chunks.
    *
@@ -523,8 +855,10 @@ export interface ChatMiddleware<TContext = unknown> {
     | Promise<void | StreamChunk | Array<StreamChunk> | null>
 
   /**
-   * Called before a tool is executed.
+   * Called before a server tool runs and before a client tool is sent to the
+   * client. Not called while the call waits for approval.
    * Can observe, transform args, skip execution, or abort the run.
+   * The tool's `inputSchema` checks the args after this hook.
    */
   onBeforeToolCall?: (
     ctx: ChatMiddlewareContext<TContext>,
@@ -533,11 +867,18 @@ export interface ChatMiddleware<TContext = unknown> {
 
   /**
    * Called after a tool execution completes (success or failure).
+   * Return `{ type: 'replaceResult', result }` to change the result that the
+   * model and the stream see. Middleware run in order. Each one sees the
+   * result of the one before it.
+   *
+   * Also called for a tool call that did not run because the output limit
+   * cut its answer. Then `ok` is false, and `error` is an `Error` with the
+   * code `'max_tokens'`.
    */
   onAfterToolCall?: (
     ctx: ChatMiddlewareContext<TContext>,
     info: AfterToolCallInfo,
-  ) => void | Promise<void>
+  ) => AfterToolCallDecision | Promise<AfterToolCallDecision>
 
   /**
    * Called after all tool calls in an iteration have been processed.
@@ -592,4 +933,5 @@ export interface ChatMiddleware<TContext = unknown> {
 }
 
 /** A `ChatMiddleware` with a permissive context — for use as a constraint. */
-export type AnyChatMiddleware = ChatMiddleware<any>
+/** A permissive middleware constraint that retains the definition parameter. */
+export type AnyChatMiddleware = ChatMiddleware<any, any>

@@ -1,14 +1,20 @@
 import type {
   AnyClientTool,
+  InterruptDefinition,
   InferSchemaType,
   ModelMessage,
+  RunAgentResumeItem,
   SchemaInput,
 } from '@tanstack/ai'
 import type {
   AIDevtoolsDisplayOptions,
+  BoundInterrupts,
   ChatClientOptions,
   ChatClientState,
+  ResolvableChatInterrupt,
+  ChatInterruptState,
   ChatRequestBody,
+  ChatResumeState,
   ClientContextOptionFromTools,
   ConnectionStatus,
   DistributedOmit,
@@ -67,15 +73,17 @@ export type DeepPartial<T> =
  * validation still runs against the schema passed to `chat({ outputSchema })`
  * on the server route.
  *
- * Note: Connection and body changes will recreate the ChatClient instance.
+ * Note: Connection changes will recreate the ChatClient instance.
  * To update these options, remount the component or use a key prop.
  */
 export type UseChatOptions<
   TTools extends ReadonlyArray<AnyClientTool> = any,
   TSchema extends SchemaInput | undefined = undefined,
   TContext = InferredClientContext<TTools>,
+  TInterrupts extends ReadonlyArray<InterruptDefinition<any, any, any, any>> =
+    readonly [],
 > = DistributedOmit<
-  ChatClientOptions<TTools, TContext>,
+  ChatClientOptions<TTools, TContext, TInterrupts>,
   | 'onMessagesChange'
   | 'onLoadingChange'
   | 'onErrorChange'
@@ -83,7 +91,10 @@ export type UseChatOptions<
   | 'onSubscriptionChange'
   | 'onConnectionStatusChange'
   | 'onSessionGeneratingChange'
+  | 'onHydratingChange'
   | 'onQueueChange'
+  | 'onResumeStateChange'
+  | 'onRunIdChange'
   | 'context'
   | 'devtools'
 > & {
@@ -104,9 +115,12 @@ export type UseChatOptions<
 export type UseChatReturn<
   TTools extends ReadonlyArray<AnyClientTool> = any,
   TSchema extends SchemaInput | undefined = undefined,
+  TInterrupts extends ReadonlyArray<InterruptDefinition<any, any, any, any>> =
+    readonly [],
 > = BaseUseChatReturn<
   TTools,
-  TSchema extends SchemaInput ? InferSchemaType<TSchema> : unknown
+  TSchema extends SchemaInput ? InferSchemaType<TSchema> : unknown,
+  TInterrupts
 > &
   (TSchema extends SchemaInput
     ? {
@@ -126,19 +140,21 @@ export type UseChatReturn<
 interface BaseUseChatReturn<
   TTools extends ReadonlyArray<AnyClientTool> = any,
   TData = unknown,
+  TInterrupts extends ReadonlyArray<InterruptDefinition<any, any, any, any>> =
+    readonly [],
 > {
   /**
    * Current messages in the conversation. When `outputSchema` is supplied,
    * `messages()[i].parts.find(p => p.type === 'structured-output')` is typed
    * by the schema — `data: T`, `partial: DeepPartial<T>`.
    */
-  messages: Accessor<Array<UIMessage<TTools, TData>>>
+  messages: Accessor<ReadonlyArray<UIMessage<TTools, TData>>>
 
   /**
    * Pending messages queued while the client is busy (streaming, claiming a
    * send, or draining). Separate from `messages` until they drain.
    */
-  queue: Accessor<Array<QueuedMessage>>
+  queue: Accessor<ReadonlyArray<QueuedMessage>>
 
   /**
    * Cancel a queued message before it drains. No-op if already sent.
@@ -150,7 +166,8 @@ interface BaseUseChatReturn<
    * Can be a simple string or multimodal content with images, audio, etc.
    * By default, sends while busy are queued until the run settles successfully
    * (`queue: 'drop'` restores the old drop-while-busy behavior).
-   * Pass `{ whenBusy }` to override the policy for a single send.
+   * Pass `{ whenBusy }` to override the policy for a single send, or
+   * `{ body }` to merge per-call JSON into this request's `forwardedProps`.
    */
   sendMessage: (
     content: string | MultimodalContent,
@@ -174,12 +191,36 @@ interface BaseUseChatReturn<
   }) => Promise<void>
 
   /**
-   * Respond to a tool approval request
+   * The id of the run this client has in flight — one it started or rejoined —
+   * or `null` when there is none (including while a run sits paused on an
+   * interrupt, waiting on approval).
+   *
+   * A run is one turn of the conversation, so this changes from turn to turn. A
+   * whole tool loop stays inside one run, while resuming after an interrupt
+   * continues the turn under a new id — so one user message can produce several
+   * run ids. Use it to talk to your own server about that run (cancel it, poll
+   * it, correlate a log line).
    */
-  addToolApprovalResponse: (response: {
-    id: string // approval.id, not toolCallId
-    approved: boolean
-  }) => Promise<void>
+  runId: Accessor<string | null>
+  interrupts: Accessor<BoundInterrupts<TTools, TInterrupts>>
+  interruptErrors: Accessor<
+    ChatInterruptState<TTools, TInterrupts>['interruptErrors']
+  >
+  resuming: Accessor<boolean>
+  resolveInterrupts: {
+    (approved: boolean): void
+    (
+      resolver: (
+        interrupt: ResolvableChatInterrupt<TTools, TInterrupts>,
+      ) => undefined,
+    ): void
+  }
+  cancelInterrupts: () => void
+  retryInterrupts: () => void
+  resumeInterruptsUnsafe: (
+    resume: Array<RunAgentResumeItem>,
+    state?: ChatResumeState,
+  ) => Promise<boolean>
 
   /**
    * Reload the last assistant message
@@ -197,6 +238,16 @@ interface BaseUseChatReturn<
   isLoading: Accessor<boolean>
 
   /**
+   * True when the last hydrate or older-page response said more messages exist.
+   */
+  hasOlderMessages: Accessor<boolean>
+
+  /**
+   * Fetch the next older window and put it in front of the painted messages.
+   */
+  loadOlderMessages: () => Promise<void>
+
+  /**
    * Current error, if any
    */
   error: Accessor<Error | undefined>
@@ -204,7 +255,7 @@ interface BaseUseChatReturn<
   /**
    * Set messages manually
    */
-  setMessages: (messages: Array<UIMessage<TTools, TData>>) => void
+  setMessages: (messages: ReadonlyArray<UIMessage<TTools, TData>>) => void
 
   /**
    * Clear all messages
@@ -233,6 +284,14 @@ interface BaseUseChatReturn<
    * activity visible to all subscribers (e.g. across tabs/devices).
    */
   sessionGenerating: Accessor<boolean>
+
+  /**
+   * Whether the chat is being rebuilt from persistence (the server hydrate, or
+   * an async storage adapter). While it is true, show a loading state instead
+   * of an empty chat. It turns false when the transcript is in place and any
+   * in-flight run is re-joined. From then on `isLoading` covers the stream.
+   */
+  isHydrating: Accessor<boolean>
 }
 
 // Note: createChatClientOptions and InferChatMessages are now in @tanstack/ai-client

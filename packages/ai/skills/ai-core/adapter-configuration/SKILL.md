@@ -3,16 +3,19 @@ name: ai-core/adapter-configuration
 description: >
   Provider adapter selection and configuration: openaiText, anthropicText,
   geminiText, ollamaText, grokText, groqText, openRouterText, bedrockText,
-  openaiCompatible. Per-model type safety with modelOptions, reasoning/thinking configuration,
+  byteplusText, openaiCompatible. Per-model type safety with modelOptions,
+  reasoning/thinking configuration,
   runtime adapter switching, extendAdapter() for custom models, createModel().
   Generic OpenAI-compatible providers (DeepSeek, Together, Fireworks, etc.) via
   openaiCompatible({ baseURL, apiKey, models }) from @tanstack/ai-openai/compatible.
   API key env vars: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY/GEMINI_API_KEY,
   XAI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY, OLLAMA_HOST,
-  BEDROCK_API_KEY (or AWS_BEARER_TOKEN_BEDROCK).
+  BEDROCK_API_KEY (or AWS_BEARER_TOKEN_BEDROCK). BytePlus needs TWO keys:
+  ARK_API_KEY (ModelArk — chat/video/image) and BYTEPLUS_VOICE_API_KEY
+  (Seed Speech — TTS/transcription); neither is a fallback for the other.
 type: sub-skill
 library: tanstack-ai
-library_version: '0.10.0'
+library_version: '0.42.0'
 sources:
   - 'TanStack/ai:docs/adapters/openai.md'
   - 'TanStack/ai:docs/adapters/anthropic.md'
@@ -42,16 +45,21 @@ Create an adapter and use it with `chat()`:
 import { chat, toServerSentEventsResponse } from '@tanstack/ai'
 import { openaiText } from '@tanstack/ai-openai'
 
-const stream = chat({
-  adapter: openaiText('gpt-5.2'),
-  messages,
-  modelOptions: {
-    temperature: 0.7,
-    max_output_tokens: 1000,
-  },
-})
+export async function POST(request: Request) {
+  const { messages, threadId } = await request.json()
 
-return toServerSentEventsResponse(stream)
+  const stream = chat({
+    adapter: openaiText('gpt-5.2'),
+    messages,
+    threadId,
+    modelOptions: {
+      temperature: 0.7,
+      max_output_tokens: 1000,
+    },
+  })
+
+  return toServerSentEventsResponse(stream)
+}
 ```
 
 The adapter factory function takes the model name as a string literal and an
@@ -70,21 +78,29 @@ top-level options on `chat()`. See the per-provider table in
 Each provider has a dedicated package with tree-shakeable adapter factories.
 The text adapter is the primary one for chat/completions:
 
-| Provider          | Package                          | Factory                                     | Env Var                                           |
-| ----------------- | -------------------------------- | ------------------------------------------- | ------------------------------------------------- |
-| OpenAI            | `@tanstack/ai-openai`            | `openaiText`                                | `OPENAI_API_KEY`                                  |
-| Anthropic         | `@tanstack/ai-anthropic`         | `anthropicText`                             | `ANTHROPIC_API_KEY`                               |
-| Gemini            | `@tanstack/ai-gemini`            | `geminiText`                                | `GOOGLE_API_KEY` or `GEMINI_API_KEY`              |
-| Grok (xAI)        | `@tanstack/ai-grok`              | `grokText`                                  | `XAI_API_KEY`                                     |
-| Groq              | `@tanstack/ai-groq`              | `groqText`                                  | `GROQ_API_KEY`                                    |
-| OpenRouter        | `@tanstack/ai-openrouter`        | `openRouterText`                            | `OPENROUTER_API_KEY`                              |
-| Ollama            | `@tanstack/ai-ollama`            | `ollamaText`                                | `OLLAMA_HOST` (default: `http://localhost:11434`) |
-| Bedrock           | `@tanstack/ai-bedrock`           | `bedrockText`                               | `BEDROCK_API_KEY` or `AWS_BEARER_TOKEN_BEDROCK`   |
-| OpenAI-compatible | `@tanstack/ai-openai/compatible` | `openaiCompatible` / `openaiCompatibleText` | provider-specific (passed via `apiKey`)           |
+| Provider          | Package                          | Factory                                     | Env Var                                                                                |
+| ----------------- | -------------------------------- | ------------------------------------------- | -------------------------------------------------------------------------------------- |
+| OpenAI            | `@tanstack/ai-openai`            | `openaiText`                                | `OPENAI_API_KEY`                                                                       |
+| Anthropic         | `@tanstack/ai-anthropic`         | `anthropicText`                             | `ANTHROPIC_API_KEY`                                                                    |
+| Gemini            | `@tanstack/ai-gemini`            | `geminiText`                                | `GOOGLE_API_KEY` or `GEMINI_API_KEY`                                                   |
+| Grok (xAI)        | `@tanstack/ai-grok`              | `grokText`                                  | `XAI_API_KEY`                                                                          |
+| Groq              | `@tanstack/ai-groq`              | `groqText`                                  | `GROQ_API_KEY`                                                                         |
+| OpenRouter        | `@tanstack/ai-openrouter`        | `openRouterText`                            | `OPENROUTER_API_KEY`                                                                   |
+| Ollama            | `@tanstack/ai-ollama`            | `ollamaText`                                | `OLLAMA_HOST` (default: `http://localhost:11434`)                                      |
+| Bedrock           | `@tanstack/ai-bedrock`           | `bedrockText`                               | `BEDROCK_API_KEY` or `AWS_BEARER_TOKEN_BEDROCK`                                        |
+| BytePlus          | `@tanstack/ai-byteplus`          | `byteplusText`                              | `ARK_API_KEY` (falls back to `BYTEPLUS_API_KEY`)                                       |
+| OpenAI-compatible | `@tanstack/ai-openai/compatible` | `openaiCompatible` / `openaiCompatibleText` | provider-specific (passed via `apiKey`)                                                |
+| Cloudflare        | `@tanstack/ai-cloudflare`        | `cloudflareText`                            | `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`, or `{ binding: env.AI }` in a Worker |
+
+> **BytePlus uses two keys.** `byteplusText` / `byteplusVideo` /
+> `byteplusImage` read `ARK_API_KEY` (ModelArk, `Authorization: Bearer`), but
+> `byteplusSpeech` / `byteplusTranscription` are a separate product and read
+> **`BYTEPLUS_VOICE_API_KEY`** (Seed Speech, `X-Api-Key`). Ark keys are also
+> region-isolated — the default base URL is the ap-southeast endpoint.
 
 ```typescript
 // Each factory takes model as first arg, optional config as second
-import { openaiText } from '@tanstack/ai-openai'
+import { openaiText, createOpenaiChat } from '@tanstack/ai-openai'
 import { anthropicText } from '@tanstack/ai-anthropic'
 import { geminiText } from '@tanstack/ai-gemini'
 import { grokText } from '@tanstack/ai-grok'
@@ -92,28 +108,29 @@ import { groqText } from '@tanstack/ai-groq'
 import { openRouterText } from '@tanstack/ai-openrouter'
 import { ollamaText } from '@tanstack/ai-ollama'
 import { bedrockText } from '@tanstack/ai-bedrock'
+import { byteplusText } from '@tanstack/ai-byteplus'
 
 // Model string is passed to the factory, NOT to chat()
 const adapter = openaiText('gpt-5.2')
 const adapter2 = anthropicText('claude-sonnet-4-6')
 const adapter3 = geminiText('gemini-2.5-pro')
-const adapter4 = grokText('grok-4')
-const adapter5 = groqText('llama-3.3-70b-versatile')
+const adapter4 = grokText('grok-4.6')
+const adapter5 = groqText('openai/gpt-oss-120b')
 const adapter6 = openRouterText('anthropic/claude-sonnet-4')
-const adapter7 = ollamaText('llama3.3')
+const adapter7 = ollamaText('llama3.3:latest')
 const adapter8 = bedrockText('us.anthropic.claude-3-7-sonnet-20250219-v1:0')
+const adapter9 = byteplusText('seed-2-0-lite-260428')
 
-// Optional: pass explicit API key
-const adapterWithKey = openaiText('gpt-5.2', {
-  apiKey: 'sk-...',
-})
+// Optional: pass an explicit API key via the create* sibling
+// (the plain factory reads it from the environment)
+const adapterWithKey = createOpenaiChat('gpt-5.2', 'sk-...')
 ```
 
 `@tanstack/ai-bedrock` (Amazon Bedrock) branches on `config.api`:
 
 - `bedrockText(model)` or `bedrockText(model, { api: 'converse' })` (the default) — Bedrock's native Converse API via `@aws-sdk/client-bedrock-runtime` (adapter name `bedrock-converse`). Reaches the broad catalog: Claude, Nova, Llama, Mistral, DeepSeek, and more.
 - `bedrockText(model, { api: 'chat' })` — OpenAI-compatible Chat Completions endpoint (adapter name `bedrock`). Open-weight models only (gpt-oss, DeepSeek V3.x, Gemma, Qwen, etc.). Does NOT reach Claude, Nova, or Llama.
-- `bedrockText(model, { api: 'responses' })` — OpenAI-compatible Responses API, mantle-only (adapter name `bedrock-responses`). Currently gpt-oss family.
+- `bedrockText(model, { api: 'responses' })` — OpenAI-compatible Responses API, mantle-only (adapter name `bedrock-responses`). Currently gpt-oss and Gemma 4.
 
 Use `createBedrockText(model, apiKey, config?)` to pass the key explicitly. Auth resolves from `BEDROCK_API_KEY` / `AWS_BEARER_TOKEN_BEDROCK`, or SigV4 via the standard AWS credential chain (no extra packages needed — handled by `@aws-sdk/client-bedrock-runtime`).
 
@@ -124,27 +141,36 @@ input or configuration:
 
 ```typescript
 import { chat, toServerSentEventsResponse } from '@tanstack/ai'
-import type { TextAdapter } from '@tanstack/ai/adapters'
+import type { ModelMessage } from '@tanstack/ai'
 import { openaiText } from '@tanstack/ai-openai'
 import { anthropicText } from '@tanstack/ai-anthropic'
 import { geminiText } from '@tanstack/ai-gemini'
 
 // Define a map of provider+model to adapter factory calls
-const adapters: Record<string, () => TextAdapter> = {
+const adapters = {
   'openai/gpt-5.2': () => openaiText('gpt-5.2'),
   'anthropic/claude-sonnet-4-6': () => anthropicText('claude-sonnet-4-6'),
   'gemini/gemini-2.5-pro': () => geminiText('gemini-2.5-pro'),
 }
 
-export function handleChat(providerModel: string, messages: Array<any>) {
-  const createAdapter = adapters[providerModel]
-  if (!createAdapter) {
+function isKnownProviderModel(key: string): key is keyof typeof adapters {
+  return key in adapters
+}
+
+export function handleChat(
+  providerModel: string,
+  messages: Array<ModelMessage>,
+  // The conversation id from the request. Never share one across users.
+  threadId: string,
+) {
+  if (!isKnownProviderModel(providerModel)) {
     throw new Error(`Unknown provider/model: ${providerModel}`)
   }
 
   const stream = chat({
-    adapter: createAdapter(),
+    adapter: adapters[providerModel](),
     messages,
+    threadId,
   })
 
   return toServerSentEventsResponse(stream)
@@ -153,7 +179,7 @@ export function handleChat(providerModel: string, messages: Array<any>) {
 
 ### 3. Configuring Reasoning / Thinking
 
-Different providers expose reasoning/thinking through their `modelOptions`:
+Set reasoning/thinking with the `reasoning` option on `chat()`. It is the same on every provider, and the types take only the levels of the selected model:
 
 ```typescript
 import { chat } from '@tanstack/ai'
@@ -161,54 +187,43 @@ import { openaiText } from '@tanstack/ai-openai'
 import { anthropicText } from '@tanstack/ai-anthropic'
 import { geminiText } from '@tanstack/ai-gemini'
 
-// OpenAI: reasoning with effort and summary
+const messages = [
+  { role: 'user' as const, content: 'Plan a database migration.' },
+]
+
+// OpenAI: the level goes out as reasoning.effort, with a summary
 const openaiStream = chat({
   adapter: openaiText('gpt-5.2'),
   messages,
-  modelOptions: {
-    reasoning: {
-      effort: 'high',
-      summary: 'auto',
-    },
-  },
+  threadId: 'thread-1',
+  reasoning: { level: 'high', summary: true },
 })
 
-// Anthropic: extended thinking with budget_tokens
+// Anthropic: extended thinking with a token budget
 const anthropicStream = chat({
   adapter: anthropicText('claude-sonnet-4-6'),
   messages,
-  modelOptions: {
-    max_tokens: 16000,
-    thinking: {
-      type: 'enabled',
-      budget_tokens: 8000, // must be >= 1024 and < max_tokens
-    },
-  },
+  threadId: 'thread-1',
+  modelOptions: { max_tokens: 16000 },
+  reasoning: { level: 'high', budgetTokens: 8000 },
 })
 
-// Anthropic: adaptive thinking (claude-sonnet-4-6 and newer)
+// Anthropic: adaptive thinking (Sonnet 5, Fable 5, Opus 4.7+) — the level
+// goes out as output_config.effort
 const adaptiveStream = chat({
-  adapter: anthropicText('claude-sonnet-4-6'),
+  adapter: anthropicText('claude-sonnet-5'),
   messages,
-  modelOptions: {
-    max_tokens: 16000,
-    thinking: {
-      type: 'adaptive',
-    },
-    effort: 'high', // 'max' | 'high' | 'medium' | 'low'
-  },
+  threadId: 'thread-1',
+  modelOptions: { max_tokens: 16000 },
+  reasoning: 'high', // 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 })
 
-// Gemini: thinking config with budget or level
+// Gemini: a thinking budget on Gemini 2.5, a thinking level on Gemini 3
 const geminiStream = chat({
   adapter: geminiText('gemini-2.5-pro'),
   messages,
-  modelOptions: {
-    thinkingConfig: {
-      includeThoughts: true,
-      thinkingBudget: 4096,
-    },
-  },
+  threadId: 'thread-1',
+  reasoning: { level: 'high', budgetTokens: 4096 },
 })
 ```
 
@@ -250,10 +265,19 @@ inside `modelOptions` using each provider's **native** key. They are not
 top-level fields on `chat()`/`ai()`/`generate()`.
 
 ```typescript
+import { chat } from '@tanstack/ai'
+import { openaiText } from '@tanstack/ai-openai'
+import { anthropicText } from '@tanstack/ai-anthropic'
+import { geminiText } from '@tanstack/ai-gemini'
+import { ollamaText } from '@tanstack/ai-ollama'
+
+const messages = [{ role: 'user' as const, content: 'Hello' }]
+
 // OpenAI — native keys
 chat({
   adapter: openaiText('gpt-5.2'),
   messages,
+  threadId: 'thread-1',
   modelOptions: { temperature: 0.7, top_p: 0.9, max_output_tokens: 1000 },
 })
 
@@ -261,6 +285,7 @@ chat({
 chat({
   adapter: anthropicText('claude-sonnet-4-6'),
   messages,
+  threadId: 'thread-1',
   modelOptions: { temperature: 0.7, top_p: 0.9, max_tokens: 1000 },
 })
 
@@ -268,13 +293,16 @@ chat({
 chat({
   adapter: geminiText('gemini-2.5-pro'),
   messages,
+  threadId: 'thread-1',
   modelOptions: { temperature: 0.7, topP: 0.9, maxOutputTokens: 1000 },
 })
 
 // Ollama — NESTED under modelOptions.options
+// (use the `family:tag` id — a bare `llama3.3` falls back to untyped options)
 chat({
-  adapter: ollamaText('llama3.3'),
+  adapter: ollamaText('llama3.3:latest'),
   messages,
+  threadId: 'thread-1',
   modelOptions: {
     options: { temperature: 0.7, top_p: 0.9, num_predict: 1000 },
   },
@@ -283,15 +311,16 @@ chat({
 
 Per-provider sampling keys (all live inside `modelOptions`):
 
-| Provider          | Temperature   | Nucleus | Max output tokens                   |
-| ----------------- | ------------- | ------- | ----------------------------------- |
-| OpenAI            | `temperature` | `top_p` | `max_output_tokens`                 |
-| Anthropic         | `temperature` | `top_p` | `max_tokens`                        |
-| Gemini            | `temperature` | `topP`  | `maxOutputTokens`                   |
-| Grok (xAI)        | `temperature` | `top_p` | `max_tokens`                        |
-| Groq              | `temperature` | `top_p` | `max_completion_tokens`             |
-| OpenRouter (chat) | `temperature` | `topP`  | `maxCompletionTokens`               |
-| Ollama            | `temperature` | `top_p` | `num_predict` (nested in `options`) |
+| Provider          | Temperature   | Nucleus | Max output tokens                         |
+| ----------------- | ------------- | ------- | ----------------------------------------- |
+| OpenAI            | `temperature` | `top_p` | `max_output_tokens`                       |
+| Anthropic         | `temperature` | `top_p` | `max_tokens`                              |
+| Gemini            | `temperature` | `topP`  | `maxOutputTokens`                         |
+| Grok (xAI)        | `temperature` | `top_p` | `max_output_tokens`                       |
+| Groq              | `temperature` | `top_p` | `max_completion_tokens`                   |
+| OpenRouter (chat) | `temperature` | `topP`  | `maxCompletionTokens`                     |
+| Ollama            | `temperature` | `top_p` | `num_predict` (nested in `options`)       |
+| BytePlus          | `temperature` | `top_p` | `max_tokens` (or `max_completion_tokens`) |
 
 `temperature` is the one key every provider names identically; token limits and
 some sampling options use provider-native names. Ollama nests all sampling under
@@ -312,7 +341,16 @@ some sampling options use provider-native names. Ollama nests all sampling under
 Adapters can declare an optional capability method:
 
 ```ts
-supportsCombinedToolsAndSchema?(modelOptions?: TProviderOptions): boolean
+import { AnthropicTextAdapter } from '@tanstack/ai-anthropic'
+
+// The TextAdapter contract:
+//   supportsCombinedToolsAndSchema?: (modelOptions?: TProviderOptions) => boolean
+// Subclasses override it to narrow the capability:
+class LegacyPathAnthropic extends AnthropicTextAdapter<'claude-sonnet-4-6'> {
+  override supportsCombinedToolsAndSchema(): boolean {
+    return false
+  }
+}
 ```
 
 When `true`, the engine wires `outputSchema` into the regular
@@ -324,19 +362,42 @@ runs.
 
 Current per-adapter status (#605):
 
-| Adapter                                      | Returns                                                                                           |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `openaiText` / `openaiChatCompletions`       | `true` (all supported models)                                                                     |
-| `anthropicText`                              | `true` for Claude 4.5+ (gated by `ANTHROPIC_COMBINED_TOOLS_AND_SCHEMA_MODELS`), `false` otherwise |
-| `geminiText`                                 | `true` for Gemini 3.x (gated by `GEMINI_COMBINED_TOOLS_AND_SCHEMA_MODELS`), `false` otherwise     |
-| `grokText`                                   | `true` for Grok 4 family (gated by `GROK_COMBINED_TOOLS_AND_SCHEMA_MODELS`), `false` otherwise    |
-| `groqText`                                   | `false` (Groq API rejects schema + tools + stream)                                                |
-| `openRouterText` / `openRouterResponsesText` | `false` (per-call resolution is a follow-up)                                                      |
-| `ollamaText`                                 | `false` (constrained-decoding vs tool-call grammar conflict)                                      |
+| Adapter                                      | Returns                                                                                                                              |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `openaiText` / `openaiChatCompletions`       | `true` (all supported models)                                                                                                        |
+| `anthropicText`                              | `true` for Claude 4.5+ (gated by `ANTHROPIC_COMBINED_TOOLS_AND_SCHEMA_MODELS`), `false` otherwise                                    |
+| `geminiText`                                 | `true` for Gemini 3.x (gated by `GEMINI_COMBINED_TOOLS_AND_SCHEMA_MODELS`), `false` otherwise                                        |
+| `grokText`                                   | `true` (all chat models — inherits the OpenAI Responses base; no per-model gate)                                                     |
+| `groqText`                                   | `false` (Groq API rejects schema + tools + stream)                                                                                   |
+| `openRouterText` / `openRouterResponsesText` | Per model — `true` only when the model and every `modelOptions.models` fallback are in `OPENROUTER_COMBINED_TOOLS_AND_SCHEMA_MODELS` |
+| `ollamaText`                                 | `false` (constrained-decoding vs tool-call grammar conflict)                                                                         |
+| `byteplusText`                               | Per model — `true` only for the 10 ids in `BYTEPLUS_STRUCTURED_OUTPUT_CHAT_MODELS`, `false` otherwise                                |
 
 Subclasses can override to narrow the capability. When extending an
 adapter for a custom model that doesn't support the combination, return
 `false` explicitly.
+
+> **BytePlus has no JSON-mode fallback.** On the 8 chat models outside
+> `BYTEPLUS_STRUCTURED_OUTPUT_CHAT_MODELS`, Ark rejects `json_schema` _and_
+> `json_object`, so `false` here does not buy a degraded path — it only keeps
+> `response_format` out of the streaming chat request. `structuredOutput()`
+> throws and `structuredOutputStream()` emits `RUN_ERROR` on those models.
+> Note `seed-2-0-lite-260428` (the obvious default) is one of them; use
+> `seed-2-0-lite-260228` or `dola-seed-2-1-turbo-260628` for typed output.
+
+> **JSON mode (`json_object`) is never combined.** Some OpenRouter and Groq
+> models reject strict `json_schema` and accept only `json_object`
+> (`OPENROUTER_JSON_OBJECT_ONLY_MODELS`, Groq models whose `features` list
+> `json_object` without `json_schema`). For these, structured output sends
+> `json_object` and adds the schema as a system prompt. A caller can also
+> set JSON mode in `modelOptions` (`responseFormat` / `text.format` on
+> OpenRouter, `response_format` / `text.format` on OpenAI-base adapters).
+> In JSON mode `supportsCombinedToolsAndSchema()` returns `false`, so the
+> schema prompt goes only on the separate finalization request. A subclass
+> of the OpenAI-base adapters marks its own JSON-only models by overriding
+> `protected modelPrefersJsonObject(model: string): boolean`. With a plain
+> JSON Schema `outputSchema`, TanStack AI does not validate the reply; use
+> a Standard Schema (Zod, Valibot, ArkType) to get it validated.
 
 ### 6. OpenAI-Compatible Providers
 
@@ -348,7 +409,9 @@ dedicated package required.
 
 ```typescript
 import { openaiCompatible } from '@tanstack/ai-openai/compatible'
-import { createModel } from '@tanstack/ai'
+import { chat, createModel } from '@tanstack/ai'
+
+const messages = [{ role: 'user' as const, content: 'Hello' }]
 
 // Provider-factory: configure baseURL + apiKey + models ONCE,
 // then select a model per call (the model arg is a type-safe union).
@@ -366,8 +429,8 @@ const deepseek = openaiCompatible({
   ],
 })
 
-chat({ adapter: deepseek('deepseek-chat'), messages })
-chat({ adapter: deepseek('deepseek-reasoner'), messages })
+chat({ adapter: deepseek('deepseek-chat'), messages, threadId: 'thread-1' })
+chat({ adapter: deepseek('deepseek-reasoner'), messages, threadId: 'thread-1' })
 ```
 
 `config` also accepts any OpenAI SDK `ClientOptions` (notably `defaultHeaders`
@@ -377,6 +440,9 @@ For a single model, use the one-shot helper:
 
 ```typescript
 import { openaiCompatibleText } from '@tanstack/ai-openai/compatible'
+import { chat } from '@tanstack/ai'
+
+const messages = [{ role: 'user' as const, content: 'Hello' }]
 
 chat({
   adapter: openaiCompatibleText('deepseek-chat', {
@@ -384,6 +450,7 @@ chat({
     apiKey: process.env.DEEPSEEK_API_KEY!,
   }),
   messages,
+  threadId: 'thread-1',
 })
 ```
 
@@ -395,21 +462,113 @@ compatible providers speak.
 > Verify the provider's current `baseURL` and model ids against its live docs —
 > they drift. See `docs/adapters/openai-compatible.md` for the full provider table.
 
+### 7. Files Adapters (upload once, reference by handle)
+
+Four providers expose a native Files/storage API as a tree-shakeable `files`
+adapter: `openaiFiles()`, `anthropicFiles()`, `geminiFiles()` (each reads the
+same env var as the provider's text adapter; `create*Files(apiKey)` variants
+take an explicit key), and `falFiles(config)`. Upload media once with
+`uploadFile()`, then reference the returned `FileHandle` in messages via a
+`{ type: 'file' }` content source instead of re-sending base64 each request:
+
+```typescript
+import { chat, fileSourceFromHandle, uploadFile } from '@tanstack/ai'
+import { openaiFiles, openaiText } from '@tanstack/ai-openai'
+import { pdfBase64 } from './pdf-data'
+
+const handle = await uploadFile({
+  adapter: openaiFiles(),
+  input: { data: pdfBase64, mimeType: 'application/pdf' },
+})
+
+chat({
+  adapter: openaiText('gpt-5.5'),
+  messages: [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', content: 'Summarize this document' },
+        { type: 'document', source: fileSourceFromHandle(handle) },
+      ],
+    },
+  ],
+  threadId: 'thread-1',
+})
+```
+
+Rules agents must respect:
+
+- **The source is one opaque handle plus its issuer.** `fileSourceFromHandle`
+  builds `{ type: 'file', value: 'file-…', provider: 'openai' }`, matching the
+  AG-UI `FileSource` arm. A handle only resolves at the provider that issued
+  it, so an adapter throws when `provider` names a different adapter.
+  `provider` is optional, as on the AG-UI wire; a source without it is taken
+  as-is. To use the same bytes with two providers,
+  upload to each and send the matching handle.
+- **Adapters declare `supportsFileSources`.** For adapters that don't (Groq, Bedrock, Mistral, OpenRouter, Ollama, BytePlus, Cohere, and anything
+  written before this feature), `chat()` / `generateImage()` /
+  `generateVideo()` / `embed()` reject file sources in preflight, before any
+  request is built — pass `data`/`url` sources there instead.
+- **Lifecycle:** `getFile()` / `deleteFile()` work for OpenAI, Anthropic,
+  Gemini, and Grok, and accept the handle itself (provider-literal typed, so a
+  foreign handle is a compile error). fal storage is upload-only, so those
+  calls throw for `falFiles()`. `grokFiles().get()` mints the public URL again,
+  so do not call it after `revokePublicUrl()`.
+- **Some endpoints need raw bytes even on supporting providers:** OpenAI
+  `images/edits` + Sora `input_reference`, Gemini Veo, and Chat Completions
+  image inputs throw endpoint-specific errors for file sources.
+- **A file source crosses the chat wire.** A browser that holds a handle puts
+  `fileSourceFromHandle(handle)` straight into the `sendMessage` content, and
+  the server passes the messages to `chat()` as usual. `fileSourceFromHandle`
+  and the `FileHandle` type are exported from the browser-safe
+  `@tanstack/ai/client` entry.
+
+See `docs/advanced/files-api.md` for the full guide.
+
+## Behind a proxy or gateway
+
+Every adapter's client config accepts `baseURL` and `defaultHeaders`. Use these
+two names to route any adapter through Cloudflare AI Gateway, Vercel AI Gateway,
+or a corporate proxy. The adapter maps them onto the vendor SDK's own option
+names (Gemini `httpOptions`, Mistral `serverURL`, Ollama `host`, Cohere and
+ElevenLabs `baseUrl`/`headers`). The vendor names still work; when both are
+set, `baseURL` and `defaultHeaders` win.
+
+```typescript
+import { createGeminiChat } from '@tanstack/ai-gemini'
+
+const gateway = {
+  baseURL: 'https://gateway.example.com/google-ai-studio',
+  defaultHeaders: {
+    'cf-aig-authorization': `Bearer ${process.env.GATEWAY_TOKEN}`,
+  },
+}
+createGeminiChat('gemini-3.8-flash', process.env.GOOGLE_API_KEY!, {
+  ...gateway,
+})
+```
+
 ## Common Mistakes
 
 ### a. HIGH: Confusing legacy monolithic with tree-shakeable adapter
 
-The legacy `openai()` (and `anthropic()`, etc.) monolithic adapters are
-deprecated. They take the model in `chat()`, not in the factory.
+The legacy `openai()` (and `anthropic()`, etc.) monolithic adapters were
+removed in 1.0. They took the model in `chat()`, not in the factory.
+
+```typescript ignore
+// WRONG: Legacy monolithic adapter pattern (no longer exported)
+import { openai } from '@tanstack/ai-openai'
+chat({ adapter: openai(), model: 'gpt-5.2', messages, threadId: 'thread-1' })
+```
 
 ```typescript
-// WRONG: Legacy monolithic adapter pattern
-import { openai } from '@tanstack/ai-openai'
-chat({ adapter: openai(), model: 'gpt-5.2', messages })
-
 // CORRECT: Tree-shakeable adapter, model in factory
+import { chat } from '@tanstack/ai'
 import { openaiText } from '@tanstack/ai-openai'
-chat({ adapter: openaiText('gpt-5.2'), messages })
+
+const messages = [{ role: 'user' as const, content: 'Hello' }]
+
+chat({ adapter: openaiText('gpt-5.2'), messages, threadId: 'thread-1' })
 ```
 
 Source: docs/migration/migration.md
@@ -443,6 +602,7 @@ Detailed per-adapter reference files:
 - [Grok Adapter](references/grok-adapter.md)
 - [Groq Adapter](references/groq-adapter.md)
 - [OpenRouter Adapter](references/openrouter-adapter.md)
+- [BytePlus Adapter](references/byteplus-adapter.md)
 
 ## Tension
 

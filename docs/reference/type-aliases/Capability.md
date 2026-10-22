@@ -3,13 +3,11 @@ id: Capability
 title: Capability
 ---
 
-# Type Alias: Capability\<TValue, TName\>
-
 ```ts
 type Capability<TValue, TName> = readonly [CapabilityGetter<TValue>, CapabilityProvider<TValue>] & object;
 ```
 
-Defined in: [packages/ai/src/activities/chat/middleware/capabilities.ts:36](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/middleware/capabilities.ts#L36)
+Defined in: packages/ai/src/activities/chat/middleware/capabilities.ts:36
 
 A capability handle. It is BOTH a `[get, provide]` tuple (array-destructurable)
 AND the identity used in middleware `requires`/`provides` declarations.
@@ -26,7 +24,7 @@ unique across an app or the type-level coverage check conflates them.
 readonly capabilityName: TName;
 ```
 
-### has()
+### has
 
 ```ts
 has: (ctx) => boolean;

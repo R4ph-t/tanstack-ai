@@ -1,6 +1,13 @@
 export { useChat } from './use-chat'
+export { createChatHook } from './create-chat-hook'
+export { useByok } from './use-byok'
 export { useMcpAppBridge } from './use-mcp-app-bridge'
 export type { UseMcpAppBridgeOptions } from './use-mcp-app-bridge'
+export { usePageWebMCPTools, useRegisterWebMCPTools } from './use-web-mcp-tools'
+export type {
+  UsePageWebMCPToolsOptions,
+  UseRegisterWebMCPToolsOptions,
+} from './use-web-mcp-tools'
 export type {
   UseChatOptions,
   UseChatReturn,
@@ -15,8 +22,59 @@ export type {
 } from './types'
 
 export {
+  AudioRecorder,
+  ChatClient,
+  InterruptManager,
+  RealtimeClient,
+  GenerationClient,
+  VideoGenerationClient,
+  GENERATION_EVENTS,
+  reconstructImageResult,
+  reconstructAudioResult,
+  reconstructSpeechResult,
+  reconstructTranscriptionResult,
+  reconstructSummarizeResult,
+  UnsupportedResponseStreamError,
+  createAIDevtoolsGenerationPreview,
+  StreamTruncatedError,
+  DurableStreamIncompleteError,
+  StreamReconnectLimitError,
+  uiMessageToModelMessages,
+  modelMessageToUIMessage,
+  modelMessagesToUIMessages,
+  convertMessagesToModelMessages,
+  normalizeToUIMessage,
+  generateMessageId,
+  StreamProcessor,
+  ImmediateStrategy,
+  PunctuationStrategy,
+  BatchStrategy,
+  WordBoundaryStrategy,
+  CompositeStrategy,
+  parsePartialJSON,
+  PartialJSONParser,
+  defaultJSONParser,
+  registerWebMCPTools,
+  getWebMCPTools,
+  subscribeWebMCPTools,
+  type GetWebMCPToolsOptions,
+  type SubscribeWebMCPToolsOptions,
+  type WebMCPPageTool,
+  clientTools,
+  webSocket,
   fetchServerSentEvents,
+  localStoragePersistence,
+  sessionStoragePersistence,
+  indexedDBPersistence,
+  StorageUnavailableError,
+  type ChatClientPersistence,
+  type ChatPersistedState,
+  type ChatPersistenceOption,
+  type ChatStorageAdapter,
+  type WebStoragePersistenceOptions,
+  type IndexedDBPersistenceOptions,
   fetchHttpStream,
+  fetchJson,
   xhrServerSentEvents,
   xhrHttpStream,
   stream,
@@ -30,6 +88,7 @@ export {
   type SubscribeConnectionAdapter,
   type RunAgentInputContext,
   type FetchConnectionOptions,
+  type FetchJsonOptions,
   type XhrConnectionOptions,
   type InferChatMessages,
 } from '@tanstack/ai-client'

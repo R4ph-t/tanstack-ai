@@ -62,6 +62,7 @@ describe('Fal Image Adapter', () => {
     const adapter = createAdapter()
 
     const result = await generateImage({
+      threadId: 'thread-1',
       adapter: adapter,
       prompt: 'A futuristic city at sunset',
     })
@@ -92,6 +93,7 @@ describe('Fal Image Adapter', () => {
     const adapter = createAdapter()
 
     const result = await generateImage({
+      threadId: 'thread-1',
       adapter,
       prompt: 'A cute robot mascot',
       numberOfImages: 2,
@@ -119,6 +121,7 @@ describe('Fal Image Adapter', () => {
     const adapter = createAdapter()
 
     const result = await generateImage({
+      threadId: 'thread-1',
       adapter,
       prompt: 'A simple test image',
     })
@@ -138,6 +141,7 @@ describe('Fal Image Adapter', () => {
     const adapter = createAdapter()
 
     await generateImage({
+      threadId: 'thread-1',
       adapter,
       prompt: 'A wide landscape',
       modelOptions: { image_size: 'landscape_4_3' },
@@ -147,6 +151,52 @@ describe('Fal Image Adapter', () => {
     expect(options.input).toMatchObject({
       image_size: 'landscape_4_3',
     })
+  })
+
+  it('forwards request-specific abortSignal to fal.subscribe()', async () => {
+    const mockResponse = createMockImageResponse([
+      { url: 'https://fal.media/files/image.png' },
+    ])
+    mockSubscribe.mockResolvedValueOnce(mockResponse)
+
+    const adapter = createAdapter()
+    const controller = new AbortController()
+
+    await generateImage({
+      threadId: 'thread-1',
+      adapter,
+      prompt: 'A landscape',
+      abortSignal: controller.signal,
+    })
+
+    expect(mockSubscribe).toHaveBeenCalledTimes(1)
+    const [, options] = mockSubscribe.mock.calls[0]!
+    expect(options.abortSignal).toBeInstanceOf(AbortSignal)
+    // Must be request-scoped options, not a side effect of fal.config().
+    expect(mockConfig).toHaveBeenCalled()
+    for (const call of mockConfig.mock.calls) {
+      expect(call[0]).not.toHaveProperty('abortSignal')
+    }
+  })
+
+  it('forwards activity timeout as abortSignal to fal.subscribe()', async () => {
+    const mockResponse = createMockImageResponse([
+      { url: 'https://fal.media/files/image.png' },
+    ])
+    mockSubscribe.mockResolvedValueOnce(mockResponse)
+
+    const adapter = createAdapter()
+
+    await generateImage({
+      threadId: 'thread-1',
+      adapter,
+      prompt: 'A landscape',
+      timeout: 60_000,
+    })
+
+    const [, options] = mockSubscribe.mock.calls[0]!
+    expect(options.abortSignal).toBeInstanceOf(AbortSignal)
+    expect(options.abortSignal.aborted).toBe(false)
   })
 
   it('passes custom image_size through model options', async () => {
@@ -159,6 +209,7 @@ describe('Fal Image Adapter', () => {
     const adapter = createAdapter()
 
     await generateImage({
+      threadId: 'thread-1',
       adapter,
       prompt: 'A custom size image',
       modelOptions: { image_size: { width: 800, height: 600 } },
@@ -180,6 +231,7 @@ describe('Fal Image Adapter', () => {
     const adapter = createAdapter()
 
     await generateImage({
+      threadId: 'thread-1',
       adapter,
       prompt: 'Test',
       modelOptions: {
@@ -210,6 +262,7 @@ describe('Fal Image Adapter', () => {
     const adapter = createAdapter()
 
     const result = await generateImage({
+      threadId: 'thread-1',
       adapter,
       prompt: 'Single image test',
     })
@@ -225,6 +278,7 @@ describe('Fal Image Adapter', () => {
 
     await expect(
       generateImage({
+        threadId: 'thread-1',
         adapter,
         prompt: 'Test prompt',
       }),
@@ -264,7 +318,7 @@ describe('Fal Image Adapter', () => {
     const adapter = createAdapter()
 
     await expect(
-      generateImage({ adapter, prompt: 'bad payload' }),
+      generateImage({ threadId: 'thread-1', adapter, prompt: 'bad payload' }),
     ).rejects.toThrow(/Invalid image payload from fal response/)
   })
 
@@ -279,7 +333,7 @@ describe('Fal Image Adapter', () => {
     const adapter = createAdapter()
 
     await expect(
-      generateImage({ adapter, prompt: 'unknown shape' }),
+      generateImage({ threadId: 'thread-1', adapter, prompt: 'unknown shape' }),
     ).rejects.toThrow(
       /Unexpected fal image response shape\. Expected images\[\] or image\{\}\. Got keys: image_url/,
     )
@@ -296,7 +350,11 @@ describe('Fal Image Adapter', () => {
     const adapter = createAdapter()
 
     await expect(
-      generateImage({ adapter, prompt: 'unknown shape 2' }),
+      generateImage({
+        threadId: 'thread-1',
+        adapter,
+        prompt: 'unknown shape 2',
+      }),
     ).rejects.toThrow(
       /Unexpected fal image response shape\. Expected images\[\] or image\{\}\. Got keys: output/,
     )
@@ -312,7 +370,11 @@ describe('Fal Image Adapter', () => {
 
     const adapter = createAdapter()
 
-    const result = await generateImage({ adapter, prompt: 'string image' })
+    const result = await generateImage({
+      threadId: 'thread-1',
+      adapter,
+      prompt: 'string image',
+    })
     expect(result.images).toHaveLength(1)
     expect(result.images[0]!.url).toBe(
       'https://fal.media/files/direct-string.png',
@@ -327,6 +389,7 @@ describe('Fal Image Adapter', () => {
     })
 
     const result = await generateImage({
+      threadId: 'thread-1',
       adapter: createAdapter(),
       prompt: 'billed image',
     })
@@ -335,7 +398,7 @@ describe('Fal Image Adapter', () => {
       promptTokens: 0,
       completionTokens: 0,
       totalTokens: 0,
-      unitsBilled: 4,
+      billed: { quantity: 4, unit: 'units' },
     })
   })
 
@@ -347,6 +410,7 @@ describe('Fal Image Adapter', () => {
     )
 
     const result = await generateImage({
+      threadId: 'thread-1',
       adapter: createAdapter(),
       prompt: 'unbilled image',
     })

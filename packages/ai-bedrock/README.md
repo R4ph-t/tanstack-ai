@@ -1,3 +1,23 @@
+<div align="center">
+  <picture>
+    <source
+      media="(prefers-color-scheme: dark)"
+      srcset="https://tanstack.com/api/readme/ai.png?theme=dark"
+    />
+    <source
+      media="(prefers-color-scheme: light)"
+      srcset="https://tanstack.com/api/readme/ai.png"
+    />
+    <img
+      src="https://tanstack.com/api/readme/ai.png"
+      alt="TanStack AI"
+      width="900"
+    />
+  </picture>
+</div>
+
+<br />
+
 # @tanstack/ai-bedrock
 
 Amazon Bedrock adapter for TanStack AI — the native Converse API (default) plus the OpenAI-compatible Chat Completions and Responses APIs, with streaming, tool calling, and reasoning.
@@ -35,6 +55,7 @@ const adapter = bedrockText('us.anthropic.claude-haiku-4-5-20251001-v1:0', {
 for await (const chunk of chat({
   adapter,
   messages: [{ role: 'user', content: 'Hello from Bedrock!' }],
+  threadId: 'thread-1',
 })) {
   if (chunk.type === 'TEXT_MESSAGE_CONTENT')
     process.stdout.write(chunk.delta ?? '')

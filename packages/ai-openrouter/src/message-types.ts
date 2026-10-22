@@ -17,3 +17,11 @@ export interface OpenRouterMessageMetadataByModality {
   video: OpenRouterVideoMetadata
   document: OpenRouterDocumentMetadata
 }
+
+/** Provider state required to replay an OpenRouter Responses tool call. */
+export interface OpenRouterResponsesToolCallMetadata {
+  /** Responses output item ID, distinct from the function call's `call_id`. */
+  itemId: string
+  /** The namespace of a function call from a namespace tool group. */
+  namespace?: string
+}

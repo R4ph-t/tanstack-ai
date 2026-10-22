@@ -3,17 +3,16 @@ id: modelMessagesToUIMessages
 title: modelMessagesToUIMessages
 ---
 
-# Function: modelMessagesToUIMessages()
-
 ```ts
 function modelMessagesToUIMessages(modelMessages): UIMessage<unknown>[];
 ```
 
-Defined in: [packages/ai/src/activities/chat/messages.ts:584](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/messages.ts#L584)
+Defined in: packages/ai/src/activities/chat/messages.ts:1444
 
 Convert an array of ModelMessages to UIMessages
 
-This handles merging tool result messages with their corresponding assistant messages
+This handles merging tool result messages with their corresponding assistant
+messages, and assistant segments that share the same stable message ID.
 
 ## Parameters
 

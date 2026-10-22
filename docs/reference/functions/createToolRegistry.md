@@ -3,13 +3,11 @@ id: createToolRegistry
 title: createToolRegistry
 ---
 
-# Function: createToolRegistry()
-
 ```ts
-function createToolRegistry<TTool>(initialTools): ToolRegistry<TTool>;
+function createToolRegistry<TTool>(initialTools?): ToolRegistry<TTool>;
 ```
 
-Defined in: [packages/ai/src/tool-registry.ts:78](https://github.com/TanStack/ai/blob/main/packages/ai/src/tool-registry.ts#L78)
+Defined in: packages/ai/src/tool-registry.ts:78
 
 Create a mutable tool registry for dynamic tool scenarios.
 
@@ -24,7 +22,7 @@ changes will be reflected in subsequent agent loop iterations.
 
 ## Parameters
 
-### initialTools
+### initialTools?
 
 `TTool`[] = `[]`
 

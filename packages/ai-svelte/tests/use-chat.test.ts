@@ -1,16 +1,100 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { ChatClient } from '@tanstack/ai-client'
+import { tick } from 'svelte'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createChat } from '../src/create-chat.svelte'
-import { createMockConnectionAdapter, createTextChunks } from './test-utils'
+import {
+  createInterruptResumeSnapshot,
+  createMockConnectionAdapter,
+  createTextChunks,
+} from './test-utils'
 
 describe('createChat', () => {
   beforeEach(() => {
     vi.clearAllMocks()
   })
 
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  describe('interrupt state', () => {
+    it('projects one immutable reactive snapshot', async () => {
+      const onInterruptStateChange = vi.fn()
+      const chat = createChat({
+        threadId: 'thread-1',
+        connection: createMockConnectionAdapter(),
+        initialResumeSnapshot: createInterruptResumeSnapshot(),
+        onInterruptStateChange,
+      })
+
+      expect(Object.isFrozen(chat.interrupts)).toBe(true)
+      expect(chat.interrupts[0]).toMatchObject({
+        id: 'staged-interrupt',
+        status: 'pending',
+      })
+      expect(chat.interrupts[1]).toMatchObject({
+        id: 'invalid-interrupt',
+        status: 'pending',
+      })
+      expect(chat.interruptErrors).toEqual([])
+      expect(chat.resuming).toBe(false)
+      expect(chat.interrupts[0]).toEqual(
+        expect.objectContaining({
+          resolveInterrupt: expect.any(Function),
+          cancel: expect.any(Function),
+          clearResolution: expect.any(Function),
+        }),
+      )
+
+      chat.resolveInterrupts(false)
+      await tick()
+      expect(chat.interruptErrors[0]?.code).toBe('unsupported-bulk-operation')
+      expect(onInterruptStateChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          interrupts: chat.interrupts,
+          interruptErrors: chat.interruptErrors,
+        }),
+        { source: 'live' },
+      )
+    })
+
+    it('delegates every root interrupt control to ChatClient', async () => {
+      const resolve = vi
+        .spyOn(ChatClient.prototype, 'resolveInterrupts')
+        .mockImplementation(() => {})
+      const cancel = vi
+        .spyOn(ChatClient.prototype, 'cancelInterrupts')
+        .mockImplementation(() => {})
+      const retry = vi
+        .spyOn(ChatClient.prototype, 'retryInterrupts')
+        .mockImplementation(() => {})
+      const unsafe = vi
+        .spyOn(ChatClient.prototype, 'resumeInterruptsUnsafe')
+        .mockResolvedValue(true)
+      const chat = createChat({
+        threadId: 'thread-1',
+        connection: createMockConnectionAdapter(),
+      })
+      const resolver = () => undefined
+      const resume = [{ interruptId: 'one', status: 'cancelled' as const }]
+
+      chat.resolveInterrupts(resolver)
+      chat.cancelInterrupts()
+      chat.retryInterrupts()
+      await expect(chat.resumeInterruptsUnsafe(resume)).resolves.toBe(true)
+
+      expect(resolve).toHaveBeenCalledWith(resolver)
+      expect(cancel).toHaveBeenCalledOnce()
+      expect(retry).toHaveBeenCalledOnce()
+      expect(unsafe).toHaveBeenCalledWith(resume, undefined)
+    })
+  })
+
   it('should initialize with empty messages', () => {
     const mockConnection = createMockConnectionAdapter({ chunks: [] })
 
     const chat = createChat({
+      threadId: 'thread-1',
       connection: mockConnection,
     })
 
@@ -23,9 +107,41 @@ describe('createChat', () => {
     expect(chat.sessionGenerating).toBe(false)
   })
 
+  it('isHydrating is true until an async storage adapter has read the transcript', async () => {
+    let resolveRead!: (value: {
+      messages: Array<{
+        id: string
+        role: 'user'
+        parts: Array<{ type: 'text'; content: string }>
+      }>
+    }) => void
+    const read = new Promise<Parameters<typeof resolveRead>[0]>((resolve) => {
+      resolveRead = resolve
+    })
+    const chat = createChat({
+      connection: createMockConnectionAdapter({ chunks: [] }),
+      threadId: 'svelte-hydrating',
+      persistence: {
+        getItem: () => read,
+        setItem: async () => {},
+        removeItem: async () => {},
+      },
+    })
+
+    expect(chat.isHydrating).toBe(true)
+    resolveRead({
+      messages: [
+        { id: 'm1', role: 'user', parts: [{ type: 'text', content: 'hi' }] },
+      ],
+    })
+    await vi.waitFor(() => expect(chat.isHydrating).toBe(false))
+    expect(chat.messages).toHaveLength(1)
+  })
+
   it('should subscribe immediately when live is true', () => {
     const mockConnection = createMockConnectionAdapter({ chunks: [] })
     const chat = createChat({
+      threadId: 'thread-1',
       connection: mockConnection,
       live: true,
     })
@@ -46,6 +162,7 @@ describe('createChat', () => {
     ]
 
     const chat = createChat({
+      threadId: 'thread-1',
       connection: mockConnection,
       initialMessages,
     })
@@ -65,15 +182,15 @@ describe('createChat', () => {
       },
     ]
     const persistence = {
-      getItem: vi.fn(() => persistedMessages),
+      getItem: vi.fn(() => ({ messages: persistedMessages })),
       setItem: vi.fn(),
       removeItem: vi.fn(),
     }
 
     const chat = createChat({
       connection: mockConnection,
-      id: 'persisted-chat',
-      persistence,
+      threadId: 'persisted-chat',
+      persistence: persistence,
     })
 
     expect(chat.messages).toEqual(persistedMessages)
@@ -91,16 +208,16 @@ describe('createChat', () => {
       },
     ]
     const persistence = {
-      getItem: vi.fn(() => []),
+      getItem: vi.fn(() => ({ messages: [] })),
       setItem: vi.fn(),
       removeItem: vi.fn(),
     }
 
     const chat = createChat({
       connection: mockConnection,
-      id: 'persisted-chat',
+      threadId: 'persisted-chat',
       initialMessages,
-      persistence,
+      persistence: persistence,
     })
 
     expect(chat.messages).toEqual([])
@@ -111,16 +228,43 @@ describe('createChat', () => {
     const mockConnection = createMockConnectionAdapter({ chunks: [] })
 
     const chat = createChat({
+      threadId: 'thread-1',
       connection: mockConnection,
     })
 
     expect(typeof chat.sendMessage).toBe('function')
   })
 
+  it('should merge sendMessage options.body into the request', async () => {
+    let capturedData: Record<string, unknown> | undefined
+    const mockConnection = createMockConnectionAdapter({
+      chunks: createTextChunks('Response'),
+      onConnect: (_messages, data) => {
+        capturedData = data
+      },
+    })
+
+    const chat = createChat({
+      threadId: 'thread-1',
+      connection: mockConnection,
+      forwardedProps: { provider: 'openai' },
+    })
+
+    await chat.sendMessage('Test', {
+      whenBusy: 'queue',
+      body: { provider: 'anthropic', attachmentIds: ['a1', 'a2'] },
+    })
+
+    expect(capturedData?.['provider']).toBe('anthropic')
+    expect(capturedData?.['attachmentIds']).toEqual(['a1', 'a2'])
+    expect(capturedData?.['whenBusy']).toBeUndefined()
+  })
+
   it('should have stop method', () => {
     const mockConnection = createMockConnectionAdapter({ chunks: [] })
 
     const chat = createChat({
+      threadId: 'thread-1',
       connection: mockConnection,
     })
 
@@ -132,6 +276,7 @@ describe('createChat', () => {
     const mockConnection = createMockConnectionAdapter({ chunks: [] })
 
     const chat = createChat({
+      threadId: 'thread-1',
       connection: mockConnection,
     })
 
@@ -143,6 +288,7 @@ describe('createChat', () => {
     const mockConnection = createMockConnectionAdapter({ chunks: [] })
 
     const chat = createChat({
+      threadId: 'thread-1',
       connection: mockConnection,
     })
 
@@ -153,6 +299,7 @@ describe('createChat', () => {
     const mockConnection = createMockConnectionAdapter({ chunks: [] })
 
     const chat = createChat({
+      threadId: 'thread-1',
       connection: mockConnection,
     })
 
@@ -163,26 +310,18 @@ describe('createChat', () => {
     const mockConnection = createMockConnectionAdapter({ chunks: [] })
 
     const chat = createChat({
+      threadId: 'thread-1',
       connection: mockConnection,
     })
 
     expect(typeof chat.addToolResult).toBe('function')
   })
 
-  it('should have addToolApprovalResponse method', () => {
-    const mockConnection = createMockConnectionAdapter({ chunks: [] })
-
-    const chat = createChat({
-      connection: mockConnection,
-    })
-
-    expect(typeof chat.addToolApprovalResponse).toBe('function')
-  })
-
   it('should expose reactive messages property', () => {
     const mockConnection = createMockConnectionAdapter({ chunks: [] })
 
     const chat = createChat({
+      threadId: 'thread-1',
       connection: mockConnection,
     })
 
@@ -195,6 +334,7 @@ describe('createChat', () => {
     const mockConnection = createMockConnectionAdapter({ chunks: [] })
 
     const chat = createChat({
+      threadId: 'thread-1',
       connection: mockConnection,
     })
 
@@ -207,6 +347,7 @@ describe('createChat', () => {
     const mockConnection = createMockConnectionAdapter({ chunks: [] })
 
     const chat = createChat({
+      threadId: 'thread-1',
       connection: mockConnection,
     })
 
@@ -219,6 +360,7 @@ describe('createChat', () => {
     const mockConnection = createMockConnectionAdapter({ chunks: [] })
 
     const chat = createChat({
+      threadId: 'thread-1',
       connection: mockConnection,
     })
 
@@ -236,6 +378,7 @@ describe('createChat', () => {
       })
 
       const chat = createChat({
+        threadId: 'thread-1',
         connection: mockConnection,
       })
 
@@ -254,6 +397,7 @@ describe('createChat', () => {
       })
 
       const chat = createChat({
+        threadId: 'thread-1',
         connection: mockConnection,
       })
 
@@ -269,6 +413,7 @@ describe('createChat', () => {
       })
 
       const chat = createChat({
+        threadId: 'thread-1',
         connection: mockConnection,
       })
 
@@ -282,6 +427,31 @@ describe('createChat', () => {
       expect(chat.status).toBe('ready')
 
       await promise.catch(() => {})
+    })
+  })
+
+  describe('snapshot', () => {
+    it('publishes frozen messages and stops updating after dispose', async () => {
+      const chat = createChat({
+        threadId: 'thread-1',
+        connection: createMockConnectionAdapter({
+          chunks: createTextChunks('Hi'),
+        }),
+      })
+
+      await chat.sendMessage('Hello')
+      const messages = chat.messages
+      expect(messages).toHaveLength(2)
+      expect(Object.isFrozen(messages)).toBe(true)
+      expect(() => (messages as Array<unknown>).push({})).toThrow(TypeError)
+
+      // The frozen list goes back in as it is.
+      chat.setMessages(messages)
+      expect(chat.messages).toHaveLength(2)
+
+      chat.dispose()
+      chat.setMessages([])
+      expect(chat.messages).toHaveLength(2)
     })
   })
 })

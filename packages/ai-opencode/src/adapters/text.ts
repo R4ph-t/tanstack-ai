@@ -1,15 +1,26 @@
 import { EventType, normalizeSystemPrompts } from '@tanstack/ai'
-import { toRunErrorRawEvent } from '@tanstack/ai/adapter-internals'
+import {
+  appendOutputSchemaInstruction,
+  parseJsonFromAssistantText,
+  reasoningBudget,
+  resolveReasoning,
+  structuredOutputCompleteChunk,
+  structuredOutputStartChunk,
+  toRunErrorRawEvent,
+} from '@tanstack/ai/adapter-internals'
 import { BaseTextAdapter } from '@tanstack/ai/adapters'
 import {
+  DurableAttachNotSupportedError,
   SandboxCapability,
   buildApprovalRequestedEvent,
   createBridgeEventChannel,
   getSandbox,
+  getSandboxDurability,
   getToolBridgeProvisioner,
   getWorkspaceProjection,
   mergeChunkStreams,
   nodeHttpBridgeProvisioner,
+  resolveDurableRunId,
 } from '@tanstack/ai-sandbox'
 import { buildPrompt } from '../messages/prompt'
 import { startOpencodeSession } from '../process/server'
@@ -18,6 +29,7 @@ import { resolveInteractivePermission } from '../process/permissions'
 import { AsyncQueue } from '../stream/queue'
 import { translateOpencodeStream } from '../stream/translate'
 import { projectOpencodeWorkspace } from './projection'
+import { OPENCODE_MODEL_REASONING } from '../model-meta'
 import type { HostToolBridge, SandboxHandle } from '@tanstack/ai-sandbox'
 import type {
   StructuredOutputOptions,
@@ -26,7 +38,9 @@ import type {
 import type {
   DefaultMessageMetadataByModality,
   Modality,
-  StreamChunk,
+  ModelReasoning,
+  AdapterYieldChunk,
+  ReasoningRequest,
   TextOptions,
 } from '@tanstack/ai'
 import type { OpencodeSessionHandle } from '../process/server'
@@ -35,11 +49,12 @@ import type {
   PermissionHandler,
 } from '../process/permissions'
 import type { OpencodeStreamEvent } from '../stream/sdk-types'
-import type { OpencodeModel } from '../model-meta'
+import type { OpencodeModel, OpenCodeModelReasoningByName } from '../model-meta'
 import type { OpencodeTextProviderOptions } from '../provider-options'
 
 const DEFAULT_WORKDIR = '/workspace'
 const DEFAULT_PORT = 4096
+const TEARDOWN_STEP_MS = 1000
 
 export interface OpencodeTextConfig {
   /** Working directory inside the sandbox. Defaults to `/workspace`. */
@@ -73,6 +88,48 @@ function splitModel(model: string): { providerID: string; modelID: string } {
   return { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) }
 }
 
+/** The reasoning levels of a model, for `chat({ reasoning })`. `never`: none. */
+type ResolveReasoning<TModel extends string> =
+  TModel extends keyof OpenCodeModelReasoningByName
+    ? OpenCodeModelReasoningByName[TModel]
+    : never
+
+/**
+ * OpenCode's per-model `options` for `chat({ reasoning })`, as its config docs
+ * show them: Claude takes `thinking` with a token budget (pi's table when the
+ * request sets none), other models take `reasoningEffort` and
+ * `reasoningSummary`.
+ */
+export function opencodeReasoningOptions(
+  modelID: string,
+  request: ReasoningRequest | undefined,
+  reasoning: ModelReasoning | undefined,
+): Record<string, unknown> | undefined {
+  const resolved = resolveReasoning(request, reasoning)
+  if (!resolved) return undefined
+  if (modelID.includes('claude')) {
+    if (resolved.level === 'off') return { thinking: { type: 'disabled' } }
+    return {
+      thinking: {
+        type: 'enabled',
+        budgetTokens: reasoningBudget({
+          level: resolved.level,
+          summary: resolved.summary,
+          ...(resolved.budgetTokens !== undefined
+            ? { budgetTokens: resolved.budgetTokens }
+            : {}),
+        }),
+      },
+    }
+  }
+  return {
+    reasoningEffort: resolved.value,
+    ...(resolved.summary && resolved.level !== 'off'
+      ? { reasoningSummary: 'auto' }
+      : {}),
+  }
+}
+
 export class OpencodeTextAdapter<
   TModel extends OpencodeModel,
 > extends BaseTextAdapter<
@@ -82,7 +139,8 @@ export class OpencodeTextAdapter<
   DefaultMessageMetadataByModality,
   ReadonlyArray<string>,
   unknown,
-  never
+  never,
+  ResolveReasoning<TModel>
 > {
   readonly name = 'opencode' as const
 
@@ -90,9 +148,38 @@ export class OpencodeTextAdapter<
 
   private readonly adapterConfig: OpencodeTextConfig
 
+  /** `toolChoice` warnings that this instance already logged. */
+  private readonly toolChoiceWarnings = new Set<string>()
+
   constructor(config: OpencodeTextConfig, model: TModel) {
     super({}, model)
     this.adapterConfig = config
+  }
+
+  /**
+   * The chat() tools to bridge for `toolChoice`: none for `'none'`, and only
+   * the named tool for `{ type: 'tool', name }`. OpenCode cannot force a tool
+   * call, so every value except `'auto'` logs a warning once.
+   *
+   * ponytail: the built-in tools stay on. The `tools` field of
+   * `session.prompt` is deprecated in opencode, and the server stores it as
+   * the permission rules of the session, so a later call on a resumed session
+   * keeps the limit. Use session permissions if this must change.
+   */
+  private toolsForChoice(options: TextOptions<OpencodeTextProviderOptions>) {
+    const { toolChoice, tools = [] } = options
+    if (toolChoice === undefined || toolChoice === 'auto') return tools
+    const warning =
+      toolChoice === 'required'
+        ? "opencode: toolChoice 'required' is not supported. The agent decides which tools to call."
+        : 'opencode: toolChoice limits only the chat() tools. The built-in OpenCode tools stay on.'
+    if (!this.toolChoiceWarnings.has(warning)) {
+      this.toolChoiceWarnings.add(warning)
+      options.logger.warn(warning)
+    }
+    if (toolChoice === 'none') return []
+    if (toolChoice === 'required') return tools
+    return tools.filter((tool) => tool.name === toolChoice.name)
   }
 
   private sandboxFrom(
@@ -105,6 +192,14 @@ export class OpencodeTextAdapter<
       )
     }
     return getSandbox(ctx)
+  }
+
+  supportsCombinedToolsAndSchema(): boolean {
+    return true
+  }
+
+  combinedStructuredOutputSource(): 'event' {
+    return 'event'
   }
 
   private applySystemPrompts(
@@ -120,7 +215,7 @@ export class OpencodeTextAdapter<
 
   async *chatStream(
     options: TextOptions<OpencodeTextProviderOptions>,
-  ): AsyncIterable<StreamChunk> {
+  ): AsyncIterable<AdapterYieldChunk> {
     const { logger } = options
     let server:
       | Awaited<ReturnType<typeof startOpencodeServerInSandbox>>
@@ -130,8 +225,15 @@ export class OpencodeTextAdapter<
     const externalSignal =
       options.abortController?.signal ?? options.request?.signal ?? undefined
     let onAbort: (() => void) | undefined
-    const runId = options.runId ?? this.generateId()
-    const threadId = options.threadId ?? this.generateId()
+    // This adapter does not journal yet, so a generated id is still fine.
+    // Routed through the helper anyway so journaling here inherits the
+    // caller-supplied-runId requirement instead of re-deriving it.
+    const runId = resolveDurableRunId(options.runId, {
+      durable: false,
+      adapter: 'opencode',
+      fallback: () => this.generateId(),
+    })
+    const threadId = options.threadId
     // Surfaces custom events from bridged tools (e.g. code mode console logs)
     // on this run's live output stream.
     const channel = createBridgeEventChannel({
@@ -141,11 +243,51 @@ export class OpencodeTextAdapter<
     })
 
     try {
+      const tools = this.toolsForChoice(options)
       const sandbox = this.sandboxFrom(options)
       const directory =
         options.modelOptions?.directory ??
         this.adapterConfig.directory ??
         DEFAULT_WORKDIR
+
+      // Durability wired onto a path that cannot deliver it. Two outcomes, split
+      // by whether a first attempt has already run.
+      //
+      // ATTACH is fatal. `sandboxRunDriver`'s `drive()` sets `attach: true` only
+      // when a previous host was already streaming this run, so continuing past
+      // here reaches `startOpencodeServerInSandbox` + the session prompt and
+      // re-runs the agent from scratch against the workspace that attempt
+      // already mutated, appending its whole output to a log that still holds
+      // the first attempt's. This adapter has no journal to tail, no
+      // `awaitAttachableJournal` to refuse the attach up front, and no
+      // `alignedIfAttaching` to suppress the already-delivered prefix — so there
+      // is nothing between here and that corruption except this throw.
+      //
+      // A FRESH durable run only fails to be recoverable LATER, which an app may
+      // knowingly accept (it can wire `withSandbox({ runs, durability })` once at
+      // the middleware level and still route some runs through this adapter). So
+      // that is a warn, not a throw: audible, not fatal. Once per run, not per
+      // chunk — a per-chunk warning would be worse than none. Mirrors
+      // `ai-grok-build`'s `chatStreamAcp`.
+      const durability = options.capabilities
+        ? getSandboxDurability(options.capabilities, { optional: true })
+        : undefined
+      if (durability !== undefined) {
+        if (durability.attach) {
+          throw new DurableAttachNotSupportedError(
+            'opencode',
+            'this adapter drives the harness over the opencode HTTP server ' +
+              'and does not journal',
+          )
+        }
+        logger.warn(
+          'opencode: sandbox durability is wired but this adapter never ' +
+            'journals — this run will not be recoverable on reconnect. Use a ' +
+            'journaling harness adapter for runs that must survive a host ' +
+            'restart, or drop durability if these runs are not meant to.',
+          { runId, adapter: 'opencode' },
+        )
+      }
 
       // Project workspace skills / MCP servers into the sandbox before starting
       // the opencode server so the workspace config is in place for the session.
@@ -165,16 +307,15 @@ export class OpencodeTextAdapter<
 
       // Bridge chat()-provided tools into the in-sandbox server over MCP
       // (configured via OPENCODE_CONFIG_CONTENT at server spawn).
-      const bridgedToolNames = new Set(
-        (options.tools ?? []).map((tool) => tool.name),
-      )
-      if (options.tools && options.tools.length > 0) {
+      const bridgedToolNames = new Set(tools.map((tool) => tool.name))
+      if (tools.length > 0) {
         const provisioner =
           (options.capabilities
             ? getToolBridgeProvisioner(options.capabilities, { optional: true })
             : undefined) ?? nodeHttpBridgeProvisioner
-        bridge = await provisioner.provision(options.tools, {
+        bridge = await provisioner.provision(tools, {
           provider: sandbox.provider,
+          threadId,
           context: options.context,
           emitCustomEvent: channel.emitCustomEvent,
           ...(externalSignal ? { signal: externalSignal } : {}),
@@ -183,7 +324,7 @@ export class OpencodeTextAdapter<
 
       // Approval-requested events for `ask`-policy actions with no client
       // decision yet, emitted after the stream so the client can approve + re-run.
-      const approvalRequests: Array<StreamChunk> = []
+      const approvalRequests: Array<AdapterYieldChunk> = []
 
       const queue = new AsyncQueue<OpencodeStreamEvent>()
       const mode =
@@ -218,20 +359,36 @@ export class OpencodeTextAdapter<
         { provider: 'opencode', model: this.model },
       )
 
-      const serverEnv = bridge
-        ? {
-            OPENCODE_CONFIG_CONTENT: JSON.stringify({
-              mcp: {
-                [bridge.name]: {
-                  type: 'remote',
-                  url: bridge.url,
-                  enabled: true,
-                  headers: { Authorization: `Bearer ${bridge.token}` },
-                },
-              },
-            }),
-          }
-        : undefined
+      // `chat({ reasoning })` goes on the model's config entry.
+      const reasoningOptions = opencodeReasoningOptions(
+        modelID,
+        options.reasoning,
+        OPENCODE_MODEL_REASONING[this.model],
+      )
+      const serverEnv =
+        bridge || reasoningOptions
+          ? {
+              OPENCODE_CONFIG_CONTENT: JSON.stringify({
+                ...(bridge && {
+                  mcp: {
+                    [bridge.name]: {
+                      type: 'remote',
+                      url: bridge.url,
+                      enabled: true,
+                      headers: { Authorization: `Bearer ${bridge.token}` },
+                    },
+                  },
+                }),
+                ...(reasoningOptions && {
+                  provider: {
+                    [providerID]: {
+                      models: { [modelID]: { options: reasoningOptions } },
+                    },
+                  },
+                }),
+              }),
+            }
+          : undefined
 
       server = await startOpencodeServerInSandbox(sandbox, {
         port: this.adapterConfig.port ?? DEFAULT_PORT,
@@ -272,22 +429,32 @@ export class OpencodeTextAdapter<
 
       queue.push({ kind: 'session', sessionId: session.sessionId })
 
-      const promptText = this.applySystemPrompts(
+      let promptText = this.applySystemPrompts(
         options,
         session.resumed || sessionId === undefined
           ? resumePrompt
           : buildPrompt(options.messages, undefined).prompt,
       )
+      if (options.outputSchema) {
+        promptText = appendOutputSchemaInstruction(
+          promptText,
+          options.outputSchema,
+        )
+      }
 
+      let lastAssistantText = ''
       session
         .prompt(promptText)
-        .then(({ message }) => {
+        .then(({ message, text }) => {
+          lastAssistantText = text
           queue.push({ kind: 'done', message })
           queue.end()
         })
         .catch((error: unknown) => queue.fail(error))
 
-      yield* mergeChunkStreams(
+      let heldFinished: AdapterYieldChunk | undefined
+      let lastTextMessageId: string | undefined
+      for await (const chunk of mergeChunkStreams(
         translateOpencodeStream(queue, {
           model: this.model,
           runId,
@@ -303,7 +470,54 @@ export class OpencodeTextAdapter<
             }),
         }),
         channel.stream,
-      )
+      )) {
+        if (options.outputSchema && chunk.type === EventType.RUN_FINISHED) {
+          heldFinished = chunk
+          continue
+        }
+        if (
+          chunk.type === EventType.TEXT_MESSAGE_START &&
+          typeof chunk.messageId === 'string' &&
+          chunk.messageId !== ''
+        ) {
+          lastTextMessageId = chunk.messageId
+        }
+        yield chunk
+      }
+
+      if (options.outputSchema) {
+        try {
+          const object = parseJsonFromAssistantText(lastAssistantText)
+          const messageId = lastTextMessageId ?? this.generateId()
+          yield structuredOutputStartChunk({
+            messageId,
+            model: this.model,
+            threadId,
+            runId,
+          })
+          yield structuredOutputCompleteChunk({
+            messageId,
+            model: this.model,
+            threadId,
+            runId,
+            object,
+            raw: lastAssistantText,
+          })
+        } catch (error: unknown) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : 'Failed to parse structured output'
+          yield {
+            type: EventType.RUN_ERROR,
+            model: this.model,
+            timestamp: Date.now(),
+            message,
+            error: { message },
+          }
+        }
+      }
+      if (heldFinished) yield heldFinished
 
       // Surface pending approval requests (ask-policy actions awaiting a client
       // decision); the client approves and re-runs to continue.
@@ -332,9 +546,26 @@ export class OpencodeTextAdapter<
         externalSignal.removeEventListener('abort', onAbort)
       }
       channel.close()
-      await handle?.dispose()
-      await server?.dispose()
-      await bridge?.close()
+      // Each step gets a time limit: a step that never settles (a sandbox
+      // `kill()` that never returns, a bridge request held open) must not
+      // hold back RUN_FINISHED.
+      const bounded = (step: () => Promise<void> | undefined) =>
+        Promise.race([
+          Promise.resolve()
+            .then(step)
+            .catch((error: unknown) =>
+              logger.errors('opencode teardown failed', {
+                error,
+                source: 'opencode.chatStream',
+              }),
+            ),
+          new Promise<void>((resolve) =>
+            setTimeout(resolve, TEARDOWN_STEP_MS).unref?.(),
+          ),
+        ])
+      await bounded(() => handle?.dispose())
+      await bounded(() => server?.dispose())
+      await bounded(() => bridge?.close())
     }
   }
 
@@ -343,8 +574,8 @@ export class OpencodeTextAdapter<
   ): Promise<StructuredOutputResult<unknown>> {
     return Promise.reject(
       new Error(
-        'Structured output is not yet supported by the in-sandbox OpenCode adapter. ' +
-          'Use a model adapter for structured output, or omit outputSchema.',
+        'This harness honors outputSchema on chat() in the same turn. ' +
+          'Pass outputSchema to chat(), or use a model adapter for a one-shot extract.',
       ),
     )
   }
@@ -358,7 +589,7 @@ export class OpencodeTextAdapter<
  * the `@opencode-ai/sdk` HTTP client to it. OpenCode owns the agent loop and
  * executes its native tools against the sandbox workspace. The sandbox image
  * must provide the `opencode` executable (Docker: also publish the server port
- * via `publishPorts`). chat()-provided tools aren't bridged yet.
+ * via `publishPorts`). The chat() tools reach OpenCode through an MCP bridge.
  */
 export function opencodeText<TModel extends OpencodeModel>(
   model: TModel,

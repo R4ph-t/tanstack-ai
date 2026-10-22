@@ -1,19 +1,37 @@
-import type { ModelMessage, StreamChunk } from '@tanstack/ai'
 import { EventType } from '@tanstack/ai'
-import type { SubscribeConnectionAdapter } from '@tanstack/ai-client'
-import { act, renderHook, waitFor } from '@testing-library/react'
-import { StrictMode, useState } from 'react'
-import { describe, expect, it, vi } from 'vitest'
-import type { UIMessage, UseChatOptions } from '../src/types'
+import { ChatClient } from '@tanstack/ai-client'
+import { act, render, renderHook, waitFor } from '@testing-library/react'
+import {
+  StrictMode,
+  Suspense,
+  createElement,
+  useLayoutEffect,
+  useState,
+} from 'react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useChat } from '../src/use-chat'
 import {
+  createInterruptResumeSnapshot,
   createMockConnectionAdapter,
   createTextChunks,
   createToolCallChunks,
   renderUseChat,
 } from './test-utils'
+import type {
+  ChatClientPersistence,
+  ConnectConnectionAdapter,
+  ResumableConnectConnectionAdapter,
+  SubscribeConnectionAdapter,
+} from '@tanstack/ai-client'
+import type { UIMessage, UseChatOptions } from '../src/types'
+import type { ModelMessage, StreamChunk } from '@tanstack/ai'
 
 describe('useChat', () => {
+  afterEach(() => {
+    vi.doUnmock('react')
+    vi.unstubAllGlobals()
+  })
+
   function createDeferred<T>() {
     let resolve!: (value: T) => void
     const promise = new Promise<T>((promiseResolve) => {
@@ -22,10 +40,140 @@ describe('useChat', () => {
     return { promise, resolve }
   }
 
+  describe('interrupt state', () => {
+    it('projects one immutable snapshot', async () => {
+      const onInterruptStateChange = vi.fn()
+      const { result } = renderHook(
+        () =>
+          useChat({
+            threadId: 'thread-1',
+            connection: createMockConnectionAdapter(),
+            initialResumeSnapshot: createInterruptResumeSnapshot(),
+            onInterruptStateChange,
+          }),
+        { wrapper: StrictMode },
+      )
+
+      expect(onInterruptStateChange).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ interrupts: result.current.interrupts }),
+        { source: 'hydrate' },
+      )
+      expect(Object.isFrozen(result.current.interrupts)).toBe(true)
+      expect(result.current.interrupts[0]).toMatchObject({
+        id: 'staged-interrupt',
+        status: 'pending',
+      })
+      expect(result.current.interrupts[1]).toMatchObject({
+        id: 'invalid-interrupt',
+        status: 'pending',
+      })
+      expect(result.current.interruptErrors).toEqual([])
+      expect(result.current.resuming).toBe(false)
+      expect(result.current.interrupts[0]).toEqual(
+        expect.objectContaining({
+          resolveInterrupt: expect.any(Function),
+          cancel: expect.any(Function),
+          clearResolution: expect.any(Function),
+        }),
+      )
+
+      act(() => result.current.resolveInterrupts(false))
+      await waitFor(() => {
+        expect(result.current.interruptErrors[0]?.code).toBe(
+          'unsupported-bulk-operation',
+        )
+      })
+      expect(onInterruptStateChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          interrupts: result.current.interrupts,
+          interruptErrors: result.current.interruptErrors,
+        }),
+        { source: 'live' },
+      )
+    })
+
+    it('awaits onResponse when hydration resumes during activation', async () => {
+      const response = createDeferred<void>()
+      const onResponse = vi.fn(() => response.promise)
+      const onConnect = vi.fn()
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: createMockConnectionAdapter({
+          chunks: createTextChunks('resumed'),
+          onConnect,
+        }),
+        initialResumeSnapshot: createInterruptResumeSnapshot(),
+        live: true,
+        onResponse,
+        onInterruptStateChange: (state, context) => {
+          if (context.source !== 'hydrate') return
+          for (const interrupt of state.interrupts) {
+            if (interrupt.kind === 'unbound') continue
+            interrupt.cancel()
+          }
+        },
+      })
+
+      await waitFor(() => {
+        expect(onResponse).toHaveBeenCalledOnce()
+      })
+      expect(onConnect).not.toHaveBeenCalled()
+
+      await act(async () => {
+        response.resolve()
+        await response.promise
+      })
+
+      await waitFor(() => {
+        expect(onConnect).toHaveBeenCalledOnce()
+        expect(result.current.resuming).toBe(false)
+      })
+    })
+
+    it('delegates every root interrupt control to ChatClient', async () => {
+      const resolve = vi
+        .spyOn(ChatClient.prototype, 'resolveInterrupts')
+        .mockImplementation(() => {})
+      const cancel = vi
+        .spyOn(ChatClient.prototype, 'cancelInterrupts')
+        .mockImplementation(() => {})
+      const retry = vi
+        .spyOn(ChatClient.prototype, 'retryInterrupts')
+        .mockImplementation(() => {})
+      const unsafe = vi
+        .spyOn(ChatClient.prototype, 'resumeInterruptsUnsafe')
+        .mockResolvedValue(true)
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: createMockConnectionAdapter(),
+      })
+      const resolver = () => undefined
+      const resume = [{ interruptId: 'one', status: 'cancelled' as const }]
+
+      act(() => {
+        result.current.resolveInterrupts(resolver)
+        result.current.cancelInterrupts()
+        result.current.retryInterrupts()
+      })
+      await expect(result.current.resumeInterruptsUnsafe(resume)).resolves.toBe(
+        true,
+      )
+
+      expect(resolve).toHaveBeenCalledWith(resolver)
+      expect(cancel).toHaveBeenCalledOnce()
+      expect(retry).toHaveBeenCalledOnce()
+      expect(unsafe).toHaveBeenCalledWith(resume, undefined)
+    })
+  })
+
   describe('initialization', () => {
     it('should initialize with default state', () => {
       const adapter = createMockConnectionAdapter()
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       expect(result.current.messages).toEqual([])
       expect(result.current.isLoading).toBe(false)
@@ -38,7 +186,11 @@ describe('useChat', () => {
 
     it('should subscribe immediately when live is true', async () => {
       const adapter = createMockConnectionAdapter()
-      const { result } = renderUseChat({ connection: adapter, live: true })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+        live: true,
+      })
 
       await waitFor(() => {
         expect(result.current.isSubscribed).toBe(true)
@@ -50,7 +202,7 @@ describe('useChat', () => {
 
     it('should initialize with provided messages', () => {
       const adapter = createMockConnectionAdapter()
-      const initialMessages: UIMessage[] = [
+      const initialMessages: Array<UIMessage> = [
         {
           id: 'msg-1',
           role: 'user',
@@ -60,6 +212,7 @@ describe('useChat', () => {
       ]
 
       const { result } = renderUseChat({
+        threadId: 'thread-1',
         connection: adapter,
         initialMessages,
       })
@@ -67,9 +220,47 @@ describe('useChat', () => {
       expect(result.current.messages).toEqual(initialMessages)
     })
 
+    it('throws on in-place messages.push and accepts setMessages', () => {
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: createMockConnectionAdapter(),
+        initialMessages: [
+          {
+            id: 'msg-1',
+            role: 'user',
+            parts: [{ type: 'text', content: 'Hello' }],
+            createdAt: new Date(),
+          },
+        ],
+      })
+
+      expect(Object.isFrozen(result.current.messages)).toBe(true)
+      expect(() => {
+        Array.prototype.push.call(result.current.messages, {
+          id: 'x',
+          role: 'user',
+          parts: [{ type: 'text', content: 'nope' }],
+          createdAt: new Date(),
+        })
+      }).toThrow(TypeError)
+
+      act(() => {
+        result.current.setMessages([
+          ...result.current.messages,
+          {
+            id: 'ok',
+            role: 'user',
+            parts: [{ type: 'text', content: 'ok' }],
+            createdAt: new Date(),
+          },
+        ])
+      })
+      expect(result.current.messages).toHaveLength(2)
+    })
+
     it('should initialize with persisted messages', async () => {
       const adapter = createMockConnectionAdapter()
-      const persistedMessages: UIMessage[] = [
+      const persistedMessages: Array<UIMessage> = [
         {
           id: 'persisted-1',
           role: 'user',
@@ -78,15 +269,15 @@ describe('useChat', () => {
         },
       ]
       const persistence = {
-        getItem: vi.fn(() => persistedMessages),
+        getItem: vi.fn(() => ({ messages: persistedMessages })),
         setItem: vi.fn(),
         removeItem: vi.fn(),
       }
 
       const { result } = renderUseChat({
         connection: adapter,
-        id: 'persisted-chat',
-        persistence,
+        threadId: 'persisted-chat',
+        persistence: persistence,
       })
 
       await waitFor(() => {
@@ -95,9 +286,439 @@ describe('useChat', () => {
       expect(persistence.getItem).toHaveBeenCalledWith('persisted-chat')
     })
 
+    it('forwards persisted interrupt hydration from a synchronous store', async () => {
+      const onInterruptStateChange = vi.fn()
+      const persistence = {
+        getItem: vi.fn(() => ({
+          messages: [],
+          resume: createInterruptResumeSnapshot(),
+        })),
+        setItem: vi.fn(),
+        removeItem: vi.fn(),
+      }
+
+      const { result } = renderHook(
+        () =>
+          useChat({
+            connection: createMockConnectionAdapter(),
+            threadId: 'persisted-interrupt-chat',
+            persistence,
+            onInterruptStateChange,
+          }),
+        { wrapper: StrictMode },
+      )
+
+      await waitFor(() => {
+        expect(result.current.interrupts).toHaveLength(2)
+      })
+      expect(onInterruptStateChange).toHaveBeenCalledOnce()
+      expect(onInterruptStateChange).toHaveBeenCalledWith(
+        expect.objectContaining({ interrupts: result.current.interrupts }),
+        { source: 'hydrate' },
+      )
+    })
+
+    it('keeps the server message count for the first hydration render', async () => {
+      const initialMessages: Array<UIMessage> = [
+        {
+          id: 'server-message',
+          role: 'user',
+          parts: [{ type: 'text', content: 'Server message' }],
+          createdAt: new Date(),
+        },
+      ]
+      const persistedMessages: Array<UIMessage> = [
+        ...initialMessages,
+        {
+          id: 'persisted-message',
+          role: 'assistant',
+          parts: [{ type: 'text', content: 'Persisted message' }],
+          createdAt: new Date(),
+        },
+      ]
+      const persistence = {
+        getItem: vi.fn(() => ({ messages: persistedMessages })),
+        setItem: vi.fn(),
+        removeItem: vi.fn(),
+      }
+      const renderCounts: Array<number> = []
+      const onRecoverableError = vi.fn()
+      const container = document.createElement('div')
+      container.innerHTML = '<div data-testid="message-count">1</div>'
+      document.body.append(container)
+
+      function HydratedChat() {
+        const chat = useChat({
+          connection: createMockConnectionAdapter(),
+          threadId: 'hydrated-message-chat',
+          initialMessages,
+          persistence,
+        })
+        renderCounts.push(chat.messages.length)
+        return createElement(
+          'div',
+          { 'data-testid': 'message-count' },
+          chat.messages.length,
+        )
+      }
+
+      const view = render(
+        createElement(StrictMode, null, createElement(HydratedChat)),
+        { container, hydrate: true, onRecoverableError },
+      )
+
+      expect(renderCounts[0]).toBe(1)
+      await waitFor(() => {
+        expect(view.getByTestId('message-count').textContent).toBe('2')
+      })
+      expect(persistence.getItem).toHaveBeenCalledOnce()
+      expect(onRecoverableError).not.toHaveBeenCalled()
+    })
+
+    it('keeps server interrupts empty until persistence hydration starts after commit', async () => {
+      const persistence = {
+        getItem: vi.fn(() => ({
+          messages: [],
+          resume: createInterruptResumeSnapshot(),
+        })),
+        setItem: vi.fn(),
+        removeItem: vi.fn(),
+      }
+      const renderCounts: Array<number> = []
+      const hydrationCommitStates: Array<boolean> = []
+      const onRecoverableError = vi.fn()
+      const container = document.createElement('div')
+      container.innerHTML = '<div data-testid="interrupt-count">0</div>'
+      document.body.append(container)
+
+      function HydratedInterrupts() {
+        let committed = false
+        useLayoutEffect(() => {
+          committed = true
+        }, [])
+        const chat = useChat({
+          connection: createMockConnectionAdapter(),
+          threadId: 'hydrated-interrupt-chat',
+          persistence,
+          onInterruptStateChange: (_state, context) => {
+            if (context.source === 'hydrate') {
+              hydrationCommitStates.push(committed)
+            }
+          },
+        })
+        renderCounts.push(chat.interrupts.length)
+        return createElement(
+          'div',
+          { 'data-testid': 'interrupt-count' },
+          chat.interrupts.length,
+        )
+      }
+
+      const view = render(
+        createElement(StrictMode, null, createElement(HydratedInterrupts)),
+        { container, hydrate: true, onRecoverableError },
+      )
+
+      expect(renderCounts[0]).toBe(0)
+      await waitFor(() => {
+        expect(view.getByTestId('interrupt-count').textContent).toBe('2')
+      })
+      expect(hydrationCommitStates).toEqual([true])
+      expect(persistence.getItem).toHaveBeenCalledOnce()
+      expect(onRecoverableError).not.toHaveBeenCalled()
+    })
+
+    it('keeps the initial resume snapshot through hydration before rejoining the stored run', async () => {
+      const initialResumeSnapshot = createInterruptResumeSnapshot()
+      const persistence = {
+        getItem: vi.fn(() => ({
+          messages: [],
+          resume: {
+            schemaVersion: 2,
+            resumeState: {
+              threadId: 'hydrated-resume-chat',
+              runId: 'stored-run',
+            },
+          },
+        })),
+        setItem: vi.fn(),
+        removeItem: vi.fn(),
+      }
+      const joinRun = vi.fn(async function* (_runId: string) {})
+      const connection: ResumableConnectConnectionAdapter = {
+        connect: async function* () {},
+        joinRun,
+      }
+      const renderCounts: Array<number> = []
+      const onRecoverableError = vi.fn()
+      const container = document.createElement('div')
+      container.innerHTML = '<div data-testid="interrupt-count">2</div>'
+      document.body.append(container)
+
+      function HydratedResume() {
+        const chat = useChat({
+          connection,
+          threadId: 'hydrated-resume-chat',
+          initialResumeSnapshot,
+          persistence,
+        })
+        renderCounts.push(chat.interrupts.length)
+        return createElement(
+          'div',
+          { 'data-testid': 'interrupt-count' },
+          chat.interrupts.length,
+        )
+      }
+
+      const view = render(createElement(HydratedResume), {
+        container,
+        hydrate: true,
+        onRecoverableError,
+      })
+
+      expect(renderCounts[0]).toBe(2)
+      expect(joinRun).not.toHaveBeenCalled()
+      await waitFor(() => {
+        expect(view.getByTestId('interrupt-count').textContent).toBe('0')
+        expect(joinRun).toHaveBeenCalledOnce()
+      })
+      expect(joinRun).toHaveBeenCalledWith('stored-run', expect.anything())
+      expect(persistence.getItem).toHaveBeenCalledOnce()
+      expect(onRecoverableError).not.toHaveBeenCalled()
+    })
+
+    it('preserves the persistence adapter receiver for reads, writes, and removal', async () => {
+      class ReceiverSensitivePersistence implements ChatClientPersistence {
+        calls: Array<string> = []
+
+        getItem(id: string) {
+          this.calls.push(`get:${id}`)
+          return { messages: [] }
+        }
+
+        setItem(id: string) {
+          this.calls.push(`set:${id}`)
+        }
+
+        removeItem(id: string) {
+          this.calls.push(`remove:${id}`)
+        }
+      }
+
+      const persistence = new ReceiverSensitivePersistence()
+      const { result } = renderUseChat({
+        connection: createMockConnectionAdapter({
+          chunks: createTextChunks('Persisted reply'),
+        }),
+        threadId: 'receiver-chat',
+        persistence,
+      })
+
+      await waitFor(() => {
+        expect(persistence.calls).toContain('get:receiver-chat')
+      })
+      await act(async () => {
+        await result.current.sendMessage('Persist me')
+      })
+      await waitFor(() => {
+        expect(persistence.calls).toContain('set:receiver-chat')
+      })
+      const removalsBeforeClear = persistence.calls.filter(
+        (call) => call === 'remove:receiver-chat',
+      ).length
+      act(() => result.current.clear())
+      await waitFor(() => {
+        const removalsAfterClear = persistence.calls.filter(
+          (call) => call === 'remove:receiver-chat',
+        ).length
+        expect(removalsAfterClear).toBeGreaterThan(removalsBeforeClear)
+      })
+    })
+
+    it('keeps initial state when a synchronous persistence read throws during hydration', async () => {
+      const initialMessages: Array<UIMessage> = [
+        {
+          id: 'initial-message',
+          role: 'user',
+          parts: [{ type: 'text', content: 'Initial' }],
+          createdAt: new Date(),
+        },
+      ]
+      const persistence = {
+        getItem: vi.fn(() => {
+          throw new Error('storage unavailable')
+        }),
+        setItem: vi.fn(),
+        removeItem: vi.fn(),
+      }
+      const onInterruptStateChange = vi.fn()
+      const onRecoverableError = vi.fn()
+      const container = document.createElement('div')
+      container.innerHTML = '<div data-testid="message-count">1</div>'
+      document.body.append(container)
+
+      function HydratedChat() {
+        const chat = useChat({
+          connection: createMockConnectionAdapter(),
+          threadId: 'throwing-sync-chat',
+          initialMessages,
+          persistence,
+          onInterruptStateChange,
+        })
+        return createElement(
+          'div',
+          { 'data-testid': 'message-count' },
+          chat.messages.length,
+        )
+      }
+
+      const view = render(createElement(HydratedChat), {
+        container,
+        hydrate: true,
+        onRecoverableError,
+      })
+
+      await waitFor(() => {
+        expect(persistence.getItem).toHaveBeenCalledOnce()
+      })
+      expect(view.getByTestId('message-count').textContent).toBe('1')
+      expect(onInterruptStateChange).not.toHaveBeenCalled()
+      expect(onRecoverableError).not.toHaveBeenCalled()
+    })
+
+    it('keeps initial state when an asynchronous persistence read rejects', async () => {
+      const initialMessages: Array<UIMessage> = [
+        {
+          id: 'initial-message',
+          role: 'user',
+          parts: [{ type: 'text', content: 'Initial' }],
+          createdAt: new Date(),
+        },
+      ]
+      const persistence = {
+        getItem: vi.fn(async () => {
+          throw new Error('storage unavailable')
+        }),
+        setItem: vi.fn(),
+        removeItem: vi.fn(),
+      }
+      const onInterruptStateChange = vi.fn()
+      const { result } = renderUseChat({
+        connection: createMockConnectionAdapter(),
+        threadId: 'throwing-async-chat',
+        initialMessages,
+        persistence,
+        onInterruptStateChange,
+      })
+
+      await waitFor(() => {
+        expect(persistence.getItem).toHaveBeenCalledOnce()
+      })
+      expect(result.current.messages).toEqual(initialMessages)
+      expect(onInterruptStateChange).not.toHaveBeenCalled()
+    })
+
+    it('applies asynchronous persistence only after attach and commit', async () => {
+      const hydration = createDeferred<{
+        messages: Array<UIMessage>
+        resume: ReturnType<typeof createInterruptResumeSnapshot>
+      }>()
+      let committed = false
+      const readCommitStates: Array<boolean> = []
+      const hydrationCommitStates: Array<boolean> = []
+      const persistence = {
+        getItem: vi.fn(() => {
+          readCommitStates.push(committed)
+          return hydration.promise
+        }),
+        setItem: vi.fn(),
+        removeItem: vi.fn(),
+      }
+
+      function useHydratedChat() {
+        useLayoutEffect(() => {
+          committed = true
+        }, [])
+        const chat = useChat({
+          connection: createMockConnectionAdapter(),
+          threadId: 'async-hydration-chat',
+          persistence,
+          onInterruptStateChange: (_state, context) => {
+            if (context.source === 'hydrate') {
+              hydrationCommitStates.push(committed)
+            }
+          },
+        })
+        return chat.interrupts.length
+      }
+
+      const { result } = renderHook(() => useHydratedChat())
+
+      expect(result.current).toBe(0)
+      await waitFor(() => {
+        expect(persistence.getItem).toHaveBeenCalledOnce()
+      })
+      expect(readCommitStates).toEqual([true])
+      await act(async () => {
+        hydration.resolve({
+          messages: [],
+          resume: createInterruptResumeSnapshot(),
+        })
+        await hydration.promise
+      })
+      await waitFor(() => {
+        expect(result.current).toBe(2)
+      })
+      expect(hydrationCommitStates).toEqual([true])
+    })
+
+    it('does not publish async hydration from an abandoned render', async () => {
+      const hydration = createDeferred<{
+        messages: Array<UIMessage>
+        resume: ReturnType<typeof createInterruptResumeSnapshot>
+      }>()
+      const onInterruptStateChange = vi.fn()
+      const persistence = {
+        getItem: vi.fn(() => hydration.promise),
+        setItem: vi.fn(),
+        removeItem: vi.fn(),
+      }
+      const suspended = new Promise<never>(() => {})
+
+      function AbandonedChat(): never {
+        useChat({
+          connection: createMockConnectionAdapter(),
+          threadId: 'abandoned-chat',
+          persistence,
+          onInterruptStateChange,
+        })
+        throw suspended
+      }
+
+      const view = render(
+        createElement(
+          Suspense,
+          { fallback: null },
+          createElement(AbandonedChat),
+        ),
+      )
+      view.unmount()
+
+      await act(async () => {
+        hydration.resolve({
+          messages: [],
+          resume: createInterruptResumeSnapshot(),
+        })
+        await hydration.promise
+      })
+
+      expect(persistence.getItem).not.toHaveBeenCalled()
+      expect(onInterruptStateChange).not.toHaveBeenCalled()
+    })
+
     it('should preserve persisted empty messages over provided initial messages', async () => {
       const adapter = createMockConnectionAdapter()
-      const initialMessages: UIMessage[] = [
+      const initialMessages: Array<UIMessage> = [
         {
           id: 'initial-1',
           role: 'user',
@@ -106,26 +727,26 @@ describe('useChat', () => {
         },
       ]
       const persistence = {
-        getItem: vi.fn(() => []),
+        getItem: vi.fn(() => ({ messages: [] })),
         setItem: vi.fn(),
         removeItem: vi.fn(),
       }
 
       const { result } = renderUseChat({
         connection: adapter,
-        id: 'persisted-empty-chat',
+        threadId: 'persisted-empty-chat',
         initialMessages,
-        persistence,
+        persistence: persistence,
       })
 
       await waitFor(() => {
         expect(persistence.getItem).toHaveBeenCalledWith('persisted-empty-chat')
+        expect(result.current.messages).toEqual([])
       })
-      expect(result.current.messages).toEqual([])
     })
 
     it('should ignore async persisted messages from a previous id', async () => {
-      const oldHydration = createDeferred<Array<UIMessage>>()
+      const oldHydration = createDeferred<{ messages: Array<UIMessage> }>()
       const oldMessages: Array<UIMessage> = [
         {
           id: 'old-persisted',
@@ -144,18 +765,18 @@ describe('useChat', () => {
       ]
       const persistence = {
         getItem: vi.fn((id: string) =>
-          id === 'old-chat' ? oldHydration.promise : newMessages,
+          id === 'old-chat' ? oldHydration.promise : { messages: newMessages },
         ),
         setItem: vi.fn(),
         removeItem: vi.fn(),
       }
 
       function useChangingChat() {
-        const [id, setId] = useState('old-chat')
+        const [threadId, setId] = useState('old-chat')
         const chat = useChat({
           connection: createMockConnectionAdapter(),
-          id,
-          persistence,
+          threadId,
+          persistence: persistence,
         })
 
         return { ...chat, setId }
@@ -172,20 +793,20 @@ describe('useChat', () => {
       })
 
       await act(async () => {
-        oldHydration.resolve(oldMessages)
+        oldHydration.resolve({ messages: oldMessages })
         await oldHydration.promise
       })
 
       expect(result.current.messages).toEqual(newMessages)
     })
 
-    it('should use provided id', async () => {
+    it('should use provided threadId', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
 
       const { result } = renderUseChat({
         connection: adapter,
-        id: 'custom-id',
+        threadId: 'custom-id',
       })
 
       await result.current.sendMessage('Test')
@@ -205,7 +826,10 @@ describe('useChat', () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
 
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Test')
 
@@ -219,9 +843,57 @@ describe('useChat', () => {
       expect(messageId).not.toMatch(/^custom-id-/)
     })
 
+    it('does not call crypto.randomUUID while rendering useChat', () => {
+      const randomUUID = vi.fn(() => {
+        throw new Error('crypto.randomUUID during render')
+      })
+      vi.stubGlobal('crypto', { randomUUID })
+
+      expect(() => {
+        renderUseChat({
+          threadId: 'thread-1',
+          connection: createMockConnectionAdapter(),
+        })
+      }).not.toThrow()
+
+      expect(randomUUID).not.toHaveBeenCalled()
+      vi.unstubAllGlobals()
+    })
+
+    it('sends the threadId on the wire', async () => {
+      const threadIds: Array<string> = []
+      const adapter: ConnectConnectionAdapter = {
+        async *connect(_messages, _data, abortSignal, runContext) {
+          if (runContext) {
+            threadIds.push(runContext.threadId)
+          }
+          for (const chunk of createTextChunks('Response')) {
+            if (abortSignal?.aborted) {
+              return
+            }
+            yield chunk
+          }
+        },
+      }
+
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
+      await result.current.sendMessage('Test')
+
+      await waitFor(() => {
+        expect(threadIds).toHaveLength(1)
+      })
+      expect(threadIds[0]).toBe('thread-1')
+    })
+
     it('should maintain client instance across re-renders', () => {
       const adapter = createMockConnectionAdapter()
-      const { result, rerender } = renderUseChat({ connection: adapter })
+      const { result, rerender } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       const initialMessages = result.current.messages
 
@@ -230,13 +902,227 @@ describe('useChat', () => {
       // Client should be the same instance, state should persist
       expect(result.current.messages).toBe(initialMessages)
     })
+
+    it('does not expose delivery-cursor resume/autoResume machinery', () => {
+      // Delivery-durability resume is now transparent (the resumable SSE
+      // connection adapter reattaches via native Last-EventID). useChat only
+      // keeps interrupt (state) resume: `resumeInterruptsUnsafe` + `runId`.
+      const adapter = createMockConnectionAdapter()
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
+
+      expect(result.current).not.toHaveProperty('resume')
+      expect(result.current).not.toHaveProperty('resumeState')
+      expect(typeof result.current.resumeInterruptsUnsafe).toBe('function')
+      expect(result.current.runId).toBeNull()
+    })
+
+    it('exposes the run id while a send is in flight and clears it after', async () => {
+      // Hold the stream open after RUN_STARTED so the in-flight value can be
+      // observed, then release it and check the id is cleared on settle.
+      let release: (() => void) | undefined
+      const held = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const adapter: ConnectConnectionAdapter = {
+        async *connect(_messages, _data, _signal, runContext) {
+          yield {
+            type: EventType.RUN_STARTED,
+            runId: runContext?.runId ?? 'r1',
+            threadId: runContext?.threadId ?? 't1',
+            timestamp: 1,
+          }
+          await held
+          yield {
+            type: EventType.RUN_FINISHED,
+            runId: runContext?.runId ?? 'r1',
+            threadId: runContext?.threadId ?? 't1',
+            finishReason: 'stop',
+            timestamp: 2,
+          }
+        },
+      }
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
+
+      const send = result.current.sendMessage('hi')
+      await waitFor(() => {
+        expect(result.current.runId).toMatch(/^run-/)
+      })
+
+      await act(async () => {
+        release?.()
+        await send
+      })
+      expect(result.current.runId).toBeNull()
+    })
+
+    it('rejoins an in-flight run on mount without aborting it (live off)', async () => {
+      // Regression: the mount effect used to call `client.unsubscribe()` when
+      // `live` was false, which aborted the delivery resume the constructor had
+      // just kicked off — so a reload dropped the rejoin before it delivered a
+      // chunk. The rejoined run must stream through to the message list.
+      const runChunks: Array<StreamChunk> = [
+        {
+          type: EventType.RUN_STARTED,
+          runId: 'r1',
+          threadId: 't1',
+          timestamp: 1,
+        },
+        {
+          type: EventType.TEXT_MESSAGE_START,
+          messageId: 'a1',
+          role: 'assistant',
+          timestamp: 2,
+        },
+        {
+          type: EventType.TEXT_MESSAGE_CONTENT,
+          messageId: 'a1',
+          delta: 'resumed reply',
+          timestamp: 3,
+        },
+        { type: EventType.TEXT_MESSAGE_END, messageId: 'a1', timestamp: 4 },
+        {
+          type: EventType.RUN_FINISHED,
+          runId: 'r1',
+          threadId: 't1',
+          finishReason: 'stop',
+          timestamp: 5,
+        },
+      ]
+      const joinRun = vi.fn(async function* (_runId: string) {
+        for (const chunk of runChunks) yield chunk
+      })
+      const connection: ResumableConnectConnectionAdapter = {
+        connect: async function* () {},
+        joinRun,
+      }
+      // Server-authoritative store: no cached messages, only a resume pointer.
+      const persistence: ChatClientPersistence = {
+        getItem: () => ({
+          messages: [],
+          resume: {
+            schemaVersion: 2,
+            resumeState: { threadId: 't1', runId: 'r1' },
+          },
+        }),
+        setItem: () => {},
+        removeItem: () => {},
+      }
+
+      const { result } = renderUseChat({
+        connection,
+        threadId: 't1',
+        persistence,
+      })
+
+      await waitFor(() => {
+        const assistant = result.current.messages.find(
+          (m) => m.role === 'assistant',
+        )
+        const text = assistant?.parts.find((p) => p.type === 'text')
+        expect(text && 'content' in text && text.content).toBe('resumed reply')
+      })
+    })
+
+    it('rejoins under StrictMode remount without aborting the constructor rejoin', async () => {
+      // Soft-dispose cleanup must not call stop() — Strict Mode remount reuses
+      // the same client one tick later, and stop() would abort rejoin + wipe
+      // the resume pointer before the first chunk.
+      let releaseFirstChunk!: () => void
+      const firstChunkGate = new Promise<void>((resolve) => {
+        releaseFirstChunk = resolve
+      })
+      const joinRun = vi.fn(async function* (_runId: string) {
+        await firstChunkGate
+        const chunks: Array<StreamChunk> = [
+          {
+            type: EventType.RUN_STARTED,
+            runId: 'r1',
+            threadId: 't1',
+            timestamp: 1,
+          },
+          {
+            type: EventType.TEXT_MESSAGE_START,
+            messageId: 'a1',
+            role: 'assistant',
+            timestamp: 2,
+          },
+          {
+            type: EventType.TEXT_MESSAGE_CONTENT,
+            messageId: 'a1',
+            delta: 'strict-ok',
+            timestamp: 3,
+          },
+          { type: EventType.TEXT_MESSAGE_END, messageId: 'a1', timestamp: 4 },
+          {
+            type: EventType.RUN_FINISHED,
+            runId: 'r1',
+            threadId: 't1',
+            finishReason: 'stop',
+            timestamp: 5,
+          },
+        ]
+        for (const chunk of chunks) yield chunk
+      })
+      const connection: ResumableConnectConnectionAdapter = {
+        connect: async function* () {},
+        joinRun,
+      }
+      const persistence: ChatClientPersistence = {
+        getItem: () => ({
+          messages: [],
+          resume: {
+            schemaVersion: 2,
+            resumeState: { threadId: 't1', runId: 'r1' },
+          },
+        }),
+        setItem: () => {},
+        removeItem: () => {},
+      }
+
+      const { result } = renderHook(
+        () =>
+          useChat({
+            connection,
+            threadId: 't1',
+            persistence,
+          }),
+        { wrapper: StrictMode },
+      )
+
+      // Let Strict Mode mount → cleanup → remount complete before chunks flow.
+      await act(async () => {
+        await Promise.resolve()
+        releaseFirstChunk()
+      })
+
+      await waitFor(() => {
+        const assistant = result.current.messages.find(
+          (m) => m.role === 'assistant',
+        )
+        const text = assistant?.parts.find((p) => p.type === 'text')
+        expect(text && 'content' in text && text.content).toBe('strict-ok')
+      })
+      // Strict Mode may construct more than one client in dev; what matters is
+      // rejoin completed (content above) and was not aborted before attach.
+      expect(joinRun).toHaveBeenCalled()
+      expect(joinRun).toHaveBeenCalledWith('r1', expect.anything())
+    })
   })
 
   describe('state synchronization', () => {
     it('should update messages via onMessagesChange callback', async () => {
       const chunks = createTextChunks('Hello, world!')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
 
@@ -260,7 +1146,10 @@ describe('useChat', () => {
         chunks,
         chunkDelay: 50,
       })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       expect(result.current.isLoading).toBe(false)
 
@@ -285,7 +1174,10 @@ describe('useChat', () => {
         shouldError: true,
         error,
       })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Test')
 
@@ -299,7 +1191,10 @@ describe('useChat', () => {
     it('should persist state across re-renders', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result, rerender } = renderUseChat({ connection: adapter })
+      const { result, rerender } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
 
@@ -320,7 +1215,10 @@ describe('useChat', () => {
     it('should send a message and append it', async () => {
       const chunks = createTextChunks('Hello, world!')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
 
@@ -338,10 +1236,43 @@ describe('useChat', () => {
       }
     })
 
+    it('should merge sendMessage options.body into the request', async () => {
+      const chunks = createTextChunks('Response')
+      let capturedData: Record<string, unknown> | undefined
+      const adapter = createMockConnectionAdapter({
+        chunks,
+        onConnect: (_messages, data) => {
+          capturedData = data
+        },
+      })
+
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+        forwardedProps: { provider: 'openai' },
+      })
+
+      await result.current.sendMessage('Test', {
+        whenBusy: 'queue',
+        body: { provider: 'anthropic', attachmentIds: ['a1', 'a2'] },
+      })
+
+      await waitFor(() => {
+        expect(result.current.messages.length).toBeGreaterThan(0)
+      })
+
+      expect(capturedData?.['provider']).toBe('anthropic')
+      expect(capturedData?.['attachmentIds']).toEqual(['a1', 'a2'])
+      expect(capturedData?.['whenBusy']).toBeUndefined()
+    })
+
     it('should create assistant message from stream chunks', async () => {
       const chunks = createTextChunks('Hello, world!')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
 
@@ -367,7 +1298,10 @@ describe('useChat', () => {
 
     it('should not send empty messages', async () => {
       const adapter = createMockConnectionAdapter()
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('')
       await result.current.sendMessage('   ')
@@ -380,7 +1314,10 @@ describe('useChat', () => {
         chunks: createTextChunks('Response'),
         chunkDelay: 100,
       })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       const promise1 = result.current.sendMessage('First')
       const promise2 = result.current.sendMessage('Second')
@@ -405,7 +1342,10 @@ describe('useChat', () => {
         shouldError: true,
         error,
       })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Test')
 
@@ -422,7 +1362,10 @@ describe('useChat', () => {
     it('should append a UIMessage', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       const message: UIMessage = {
         id: 'user-1',
@@ -443,7 +1386,10 @@ describe('useChat', () => {
     it('should convert and append a ModelMessage', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       const modelMessage: ModelMessage = {
         role: 'user',
@@ -469,7 +1415,10 @@ describe('useChat', () => {
         shouldError: true,
         error,
       })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       const message: UIMessage = {
         id: 'msg-1',
@@ -508,7 +1457,10 @@ describe('useChat', () => {
 
       // Create a new adapter for the second call
       const adapter2 = createMockConnectionAdapter({ chunks: chunks2 })
-      const { result, rerender } = renderUseChat({ connection: adapter })
+      const { result, rerender } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
 
@@ -520,7 +1472,7 @@ describe('useChat', () => {
       })
 
       // Reload with new adapter
-      rerender({ connection: adapter2 })
+      rerender({ threadId: 'thread-1', connection: adapter2 })
       await result.current.reload()
 
       await waitFor(() => {
@@ -538,7 +1490,10 @@ describe('useChat', () => {
     it('should maintain conversation history after reload', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('First')
       await waitFor(() => {
@@ -563,7 +1518,10 @@ describe('useChat', () => {
     it('should handle errors during reload', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
       await waitFor(() => {
@@ -584,7 +1542,10 @@ describe('useChat', () => {
         chunks,
         chunkDelay: 50,
       })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       const sendPromise = result.current.sendMessage('Test')
 
@@ -610,7 +1571,10 @@ describe('useChat', () => {
 
     it('should be safe to call multiple times', () => {
       const adapter = createMockConnectionAdapter()
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       // Should not throw
       result.current.stop()
@@ -627,7 +1591,10 @@ describe('useChat', () => {
         chunks,
         chunkDelay: 50,
       })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       const sendPromise = result.current.sendMessage('Test')
 
@@ -658,7 +1625,10 @@ describe('useChat', () => {
         chunks,
         chunkDelay: 50,
       })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       const sendPromise = result.current.sendMessage('Test')
 
@@ -688,7 +1658,10 @@ describe('useChat', () => {
     it('should clear all messages', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
       await waitFor(() => {
@@ -703,7 +1676,7 @@ describe('useChat', () => {
     })
 
     it('should reset to initial state', async () => {
-      const initialMessages: UIMessage[] = [
+      const initialMessages: Array<UIMessage> = [
         {
           id: 'msg-1',
           role: 'user',
@@ -715,6 +1688,7 @@ describe('useChat', () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
       const { result } = renderUseChat({
+        threadId: 'thread-1',
         connection: adapter,
         initialMessages,
       })
@@ -737,7 +1711,10 @@ describe('useChat', () => {
     it('should maintain client instance after clear', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
       await waitFor(() => {
@@ -757,9 +1734,12 @@ describe('useChat', () => {
   describe('setMessages', () => {
     it('should manually set messages', async () => {
       const adapter = createMockConnectionAdapter()
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
-      const newMessages: UIMessage[] = [
+      const newMessages: Array<UIMessage> = [
         {
           id: 'msg-1',
           role: 'user',
@@ -777,11 +1757,14 @@ describe('useChat', () => {
 
     it('should update state immediately', async () => {
       const adapter = createMockConnectionAdapter()
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       expect(result.current.messages).toEqual([])
 
-      const newMessages: UIMessage[] = [
+      const newMessages: Array<UIMessage> = [
         {
           id: 'msg-1',
           role: 'user',
@@ -801,7 +1784,10 @@ describe('useChat', () => {
     it('should replace all existing messages', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage('Hello')
       await waitFor(() => {
@@ -810,7 +1796,7 @@ describe('useChat', () => {
 
       const originalCount = result.current.messages.length
 
-      const newMessages: UIMessage[] = [
+      const newMessages: Array<UIMessage> = [
         {
           id: 'msg-new',
           role: 'user',
@@ -836,6 +1822,7 @@ describe('useChat', () => {
       const onChunk = vi.fn()
 
       const { result } = renderUseChat({
+        threadId: 'thread-1',
         connection: adapter,
         onChunk,
       })
@@ -856,6 +1843,7 @@ describe('useChat', () => {
       const onFinish = vi.fn()
 
       const { result } = renderUseChat({
+        threadId: 'thread-1',
         connection: adapter,
         onFinish,
       })
@@ -880,6 +1868,7 @@ describe('useChat', () => {
       const onError = vi.fn()
 
       const { result } = renderUseChat({
+        threadId: 'thread-1',
         connection: adapter,
         onError,
       })
@@ -899,6 +1888,7 @@ describe('useChat', () => {
       const onResponse = vi.fn()
 
       const { result } = renderUseChat({
+        threadId: 'thread-1',
         connection: adapter,
         onResponse,
       })
@@ -922,12 +1912,16 @@ describe('useChat', () => {
       const { result, rerender } = renderHook(
         (opts: UseChatOptions) => useChat(opts),
         {
-          initialProps: { connection: adapter, onChunk: first },
+          initialProps: {
+            threadId: 'thread-1',
+            connection: adapter,
+            onChunk: first,
+          },
         },
       )
 
       // Swap in a new callback before the next sendMessage
-      rerender({ connection: adapter, onChunk: second })
+      rerender({ threadId: 'thread-1', connection: adapter, onChunk: second })
 
       await result.current.sendMessage('Test')
 
@@ -954,7 +1948,7 @@ describe('useChat', () => {
         {
           initialProps: {
             connection: adapter,
-            id: 'old-client',
+            threadId: 'old-client',
             onChunk: oldOnChunk,
           },
         },
@@ -967,7 +1961,7 @@ describe('useChat', () => {
 
       rerender({
         connection: adapter,
-        id: 'new-client',
+        threadId: 'new-client',
         onChunk: newOnChunk,
       })
 
@@ -987,6 +1981,7 @@ describe('useChat', () => {
       const { result } = renderHook(
         () =>
           useChat({
+            threadId: 'thread-1',
             connection: adapter,
             onChunk,
           }),
@@ -1007,28 +2002,33 @@ describe('useChat', () => {
     describe('options changes', () => {
       it('should maintain client instance when options change', () => {
         const adapter1 = createMockConnectionAdapter()
-        const { result, rerender } = renderUseChat({ connection: adapter1 })
+        const { result, rerender } = renderUseChat({
+          threadId: 'thread-1',
+          connection: adapter1,
+        })
 
         const initialMessages = result.current.messages
 
         const adapter2 = createMockConnectionAdapter()
-        rerender({ connection: adapter2 })
+        rerender({ threadId: 'thread-1', connection: adapter2 })
 
         // Client instance should persist (current implementation doesn't update)
         // This documents current behavior - options changes don't update client
         expect(result.current.messages).toBe(initialMessages)
       })
 
-      it('should handle body changes', () => {
+      it('should handle forwardedProps changes', () => {
         const adapter = createMockConnectionAdapter()
         const { result, rerender } = renderUseChat({
+          threadId: 'thread-1',
           connection: adapter,
-          body: { userId: '123' },
+          forwardedProps: { userId: '123' },
         })
 
         rerender({
+          threadId: 'thread-1',
           connection: adapter,
-          body: { userId: '456' },
+          forwardedProps: { userId: '456' },
         })
 
         // Should not throw
@@ -1039,12 +2039,14 @@ describe('useChat', () => {
         const adapter = createMockConnectionAdapter()
         const onChunk1 = vi.fn()
         const { result, rerender } = renderUseChat({
+          threadId: 'thread-1',
           connection: adapter,
           onChunk: onChunk1,
         })
 
         const onChunk2 = vi.fn()
         rerender({
+          threadId: 'thread-1',
           connection: adapter,
           onChunk: onChunk2,
         })
@@ -1066,8 +2068,8 @@ describe('useChat', () => {
         // Control id via state so setMessages and setId are both React
         // state updates that get batched into a single render.
         const { result } = renderHook(() => {
-          const [id, setId] = useState('client-A')
-          const chat = useChat({ connection: adapter, id })
+          const [threadId, setId] = useState('client-A')
+          const chat = useChat({ connection: adapter, threadId })
           return { ...chat, switchId: setId }
         })
 
@@ -1129,8 +2131,8 @@ describe('useChat', () => {
         ]
 
         const { result } = renderHook(() => {
-          const [id, setId] = useState('client-A')
-          const chat = useChat({ connection: adapter, id })
+          const [threadId, setId] = useState('client-A')
+          const chat = useChat({ connection: adapter, threadId })
           return { ...chat, switchId: setId }
         })
 
@@ -1155,7 +2157,10 @@ describe('useChat', () => {
           chunks,
           chunkDelay: 100,
         })
-        const { result, unmount } = renderUseChat({ connection: adapter })
+        const { result, unmount } = renderUseChat({
+          threadId: 'thread-1',
+          connection: adapter,
+        })
 
         const sendPromise = result.current.sendMessage('Test')
 
@@ -1177,7 +2182,10 @@ describe('useChat', () => {
           chunks,
           chunkDelay: 100,
         })
-        const { result, unmount } = renderUseChat({ connection: adapter })
+        const { result, unmount } = renderUseChat({
+          threadId: 'thread-1',
+          connection: adapter,
+        })
 
         result.current.sendMessage('Test')
 
@@ -1199,7 +2207,10 @@ describe('useChat', () => {
           chunks: createTextChunks('Response'),
           chunkDelay: 50,
         })
-        const { result } = renderUseChat({ connection: adapter })
+        const { result } = renderUseChat({
+          threadId: 'thread-1',
+          connection: adapter,
+        })
 
         const promise1 = result.current.sendMessage('First')
         const promise2 = result.current.sendMessage('Second')
@@ -1223,7 +2234,10 @@ describe('useChat', () => {
           chunks,
           chunkDelay: 50,
         })
-        const { result } = renderUseChat({ connection: adapter })
+        const { result } = renderUseChat({
+          threadId: 'thread-1',
+          connection: adapter,
+        })
 
         const sendPromise = result.current.sendMessage('Test')
 
@@ -1251,7 +2265,10 @@ describe('useChat', () => {
           chunks,
           chunkDelay: 50,
         })
-        const { result } = renderUseChat({ connection: adapter })
+        const { result } = renderUseChat({
+          threadId: 'thread-1',
+          connection: adapter,
+        })
 
         const sendPromise = result.current.sendMessage('Test')
 
@@ -1278,7 +2295,10 @@ describe('useChat', () => {
           shouldError: true,
           error,
         })
-        const { result } = renderUseChat({ connection: adapter })
+        const { result } = renderUseChat({
+          threadId: 'thread-1',
+          connection: adapter,
+        })
 
         await result.current.sendMessage('Test')
 
@@ -1296,7 +2316,10 @@ describe('useChat', () => {
           shouldError: true,
           error,
         })
-        const { result } = renderUseChat({ connection: adapter })
+        const { result } = renderUseChat({
+          threadId: 'thread-1',
+          connection: adapter,
+        })
 
         await result.current.sendMessage('Test')
 
@@ -1313,6 +2336,7 @@ describe('useChat', () => {
           error: new Error('Initial error'),
         })
         const { result, rerender } = renderUseChat({
+          threadId: 'thread-1',
           connection: errorAdapter,
         })
 
@@ -1326,7 +2350,7 @@ describe('useChat', () => {
         const workingAdapter = createMockConnectionAdapter({
           chunks: createTextChunks('Success'),
         })
-        rerender({ connection: workingAdapter })
+        rerender({ threadId: 'thread-1', connection: workingAdapter })
 
         await result.current.sendMessage('Test')
 
@@ -1358,11 +2382,11 @@ describe('useChat', () => {
 
         const { result: result1 } = renderUseChat({
           connection: adapter1,
-          id: 'chat-1',
+          threadId: 'chat-1',
         })
         const { result: result2 } = renderUseChat({
           connection: adapter2,
-          id: 'chat-2',
+          threadId: 'chat-2',
         })
 
         await result1.current.sendMessage('Hello 1')
@@ -1386,11 +2410,11 @@ describe('useChat', () => {
         const adapter = createMockConnectionAdapter()
         const { result: result1 } = renderUseChat({
           connection: adapter,
-          id: 'chat-1',
+          threadId: 'chat-1',
         })
         const { result: result2 } = renderUseChat({
           connection: adapter,
-          id: 'chat-2',
+          threadId: 'chat-2',
         })
 
         // Should not interfere with each other
@@ -1407,9 +2431,11 @@ describe('useChat', () => {
         })
 
         const { result: result1 } = renderUseChat({
+          threadId: 'thread-1',
           connection: adapter1,
         })
         const { result: result2 } = renderUseChat({
+          threadId: 'thread-1',
           connection: adapter2,
         })
 
@@ -1447,6 +2473,7 @@ describe('useChat', () => {
         // via `as any` and then never exercised its result — `addToolResult`
         // itself is the public API under test.
         const { result } = renderUseChat({
+          threadId: 'thread-1',
           connection: adapter,
         })
 
@@ -1486,57 +2513,6 @@ describe('useChat', () => {
           })
         }
       })
-
-      it('should handle addToolApprovalResponse', async () => {
-        const toolCalls = createToolCallChunks([
-          { id: 'tool-1', name: 'testTool', arguments: '{"param": "value"}' },
-        ])
-        const adapter = createMockConnectionAdapter({ chunks: toolCalls })
-        const { result } = renderUseChat({
-          connection: adapter,
-        })
-
-        await result.current.sendMessage('Test')
-
-        await waitFor(() => {
-          const assistantMessage = result.current.messages.find(
-            (m) => m.role === 'assistant',
-          )
-          expect(assistantMessage).toBeDefined()
-        })
-
-        // Find tool call with approval
-        const assistantMessage = result.current.messages.find(
-          (m) => m.role === 'assistant',
-        )
-        const toolCallPart = assistantMessage?.parts.find(
-          (p) => p.type === 'tool-call' && p.approval,
-        )
-
-        if (
-          toolCallPart &&
-          toolCallPart.type === 'tool-call' &&
-          toolCallPart.approval
-        ) {
-          await result.current.addToolApprovalResponse({
-            id: toolCallPart.approval.id,
-            approved: true,
-          })
-
-          // Should update approval state
-          await waitFor(() => {
-            const updatedMessage = result.current.messages.find(
-              (m) => m.role === 'assistant',
-            )
-            const updatedToolCall = updatedMessage?.parts.find(
-              (p) => p.type === 'tool-call' && p.id === toolCallPart.id,
-            )
-            if (updatedToolCall && updatedToolCall.type === 'tool-call') {
-              expect(updatedToolCall.approval?.approved).toBe(true)
-            }
-          })
-        }
-      })
     })
   })
 
@@ -1544,7 +2520,10 @@ describe('useChat', () => {
     it('should send a multimodal message with image URL', async () => {
       const chunks = createTextChunks('I see a cat in the image')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage({
         content: [
@@ -1576,7 +2555,10 @@ describe('useChat', () => {
     it('should send a multimodal message with image data and required mimeType', async () => {
       const chunks = createTextChunks('I see a cat in the image')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage({
         content: [
@@ -1610,7 +2592,10 @@ describe('useChat', () => {
     it('should send a multimodal message with audio data and required mimeType', async () => {
       const chunks = createTextChunks('The audio says hello')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage({
         content: [
@@ -1644,7 +2629,10 @@ describe('useChat', () => {
     it('should send a multimodal message with video URL', async () => {
       const chunks = createTextChunks('The video shows a sunset')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage({
         content: [
@@ -1670,7 +2658,10 @@ describe('useChat', () => {
     it('should send a multimodal message with video data and required mimeType', async () => {
       const chunks = createTextChunks('The video shows a sunset')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage({
         content: [
@@ -1704,7 +2695,10 @@ describe('useChat', () => {
     it('should send a multimodal message with document data and required mimeType', async () => {
       const chunks = createTextChunks('The document discusses AI')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage({
         content: [
@@ -1738,7 +2732,10 @@ describe('useChat', () => {
     it('should send a multimodal message with document URL', async () => {
       const chunks = createTextChunks('The document discusses AI')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage({
         content: [
@@ -1770,7 +2767,10 @@ describe('useChat', () => {
     it('should send complex multimodal message with multiple content parts', async () => {
       const chunks = createTextChunks('I see multiple items')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage({
         content: [
@@ -1828,7 +2828,10 @@ describe('useChat', () => {
     it('should use custom message id when provided in multimodal message', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage({
         content: [{ type: 'text', content: 'Hello' }],
@@ -1845,7 +2848,10 @@ describe('useChat', () => {
     it('should send string content as simple text message via multimodal interface', async () => {
       const chunks = createTextChunks('Response')
       const adapter = createMockConnectionAdapter({ chunks })
-      const { result } = renderUseChat({ connection: adapter })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+      })
 
       await result.current.sendMessage({
         content: 'Hello world',
@@ -1862,7 +2868,151 @@ describe('useChat', () => {
     })
   })
 
+  describe('isHydrating', () => {
+    it('is true on the first render and false once the server transcript is in', async () => {
+      const hydration = createDeferred<{
+        messages: Array<UIMessage>
+        activeRun: null
+        interrupts: null
+      }>()
+      const connection: ResumableConnectConnectionAdapter = {
+        connect: async function* () {},
+        joinRun: async function* () {},
+        hydrate: () => hydration.promise,
+      }
+      const renders: Array<{ isHydrating: boolean; messages: number }> = []
+      const { result } = renderHook(() => {
+        const chat = useChat({ connection, threadId: 't1', persistence: true })
+        renders.push({
+          isHydrating: chat.isHydrating,
+          messages: chat.messages.length,
+        })
+        return chat
+      })
+
+      expect(renders[0]).toEqual({ isHydrating: true, messages: 0 })
+
+      await act(async () => {
+        hydration.resolve({
+          messages: [
+            {
+              id: 'm1',
+              role: 'user',
+              parts: [{ type: 'text', content: 'hi' }],
+            },
+          ],
+          activeRun: null,
+          interrupts: null,
+        })
+      })
+
+      await waitFor(() => expect(result.current.isHydrating).toBe(false))
+      expect(result.current.messages).toHaveLength(1)
+      // No render shows "done hydrating" with an empty thread.
+      expect(renders.some((r) => !r.isHydrating && r.messages === 0)).toBe(
+        false,
+      )
+    })
+
+    it('is true on the first render after a thread switch', async () => {
+      const pending = createDeferred<{
+        messages: Array<UIMessage>
+        activeRun: null
+        interrupts: null
+      }>()
+      const connection: ResumableConnectConnectionAdapter = {
+        connect: async function* () {},
+        joinRun: async function* () {},
+        hydrate: (threadId) =>
+          threadId === 't1'
+            ? Promise.resolve({
+                messages: [],
+                activeRun: null,
+                interrupts: null,
+              })
+            : pending.promise,
+      }
+      const renders: Array<{ threadId: string; isHydrating: boolean }> = []
+      const { result, rerender } = renderHook(
+        ({ threadId }: { threadId: string }) => {
+          const chat = useChat({ connection, threadId, persistence: true })
+          renders.push({ threadId, isHydrating: chat.isHydrating })
+          return chat
+        },
+        { initialProps: { threadId: 't1' } },
+      )
+      await waitFor(() => expect(result.current.isHydrating).toBe(false))
+
+      rerender({ threadId: 't2' })
+      expect(renders.find((r) => r.threadId === 't2')).toEqual({
+        threadId: 't2',
+        isHydrating: true,
+      })
+    })
+
+    it('is false without persistence', () => {
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: createMockConnectionAdapter({ chunks: [] }),
+      })
+      expect(result.current.isHydrating).toBe(false)
+    })
+  })
+
   describe('sessionGenerating', () => {
+    it('updates resume state from live interrupt chunks without a wrapper call', async () => {
+      const chunks: Array<StreamChunk> = [
+        {
+          type: EventType.RUN_STARTED,
+          runId: 'run-live-interrupt',
+          threadId: 'thread-live',
+          timestamp: Date.now(),
+        },
+        {
+          type: EventType.TEXT_MESSAGE_CONTENT,
+          messageId: 'msg-live-interrupt',
+          timestamp: Date.now(),
+          delta: 'needs input',
+        },
+        {
+          type: EventType.RUN_FINISHED,
+          runId: 'run-live-interrupt',
+          threadId: 'thread-live',
+          timestamp: Date.now(),
+          outcome: {
+            type: 'interrupt',
+            interrupts: [
+              {
+                id: 'interrupt-live',
+                reason: 'client_tool_input',
+              },
+            ],
+          },
+        },
+      ]
+      const adapter: SubscribeConnectionAdapter = {
+        subscribe: async function* () {
+          for (const chunk of chunks) yield chunk
+        },
+        send: vi.fn(async () => {}),
+      }
+
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+        live: true,
+      })
+
+      await waitFor(() => {
+        expect(result.current.interrupts).toEqual([
+          expect.objectContaining({ id: 'interrupt-live' }),
+        ])
+      })
+      // A run this client never started (it arrived over the subscription) is
+      // not this client's to cancel, and a paused run is not in flight either.
+      expect(result.current.runId).toBeNull()
+    })
+
     it('should expose sessionGenerating and update from stream run events', async () => {
       // Build chunks as a typed StreamChunk array so each yielded event is
       // checked against the AGUI discriminated union — no inline `as any`.
@@ -1893,7 +3043,11 @@ describe('useChat', () => {
         send: vi.fn(async () => {}),
       }
 
-      const { result } = renderUseChat({ connection: adapter, live: true })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+        live: true,
+      })
 
       await waitFor(() => {
         expect(result.current.isSubscribed).toBe(true)
@@ -1928,7 +3082,11 @@ describe('useChat', () => {
         send: vi.fn(async () => {}),
       }
 
-      const { result } = renderUseChat({ connection: adapter, live: true })
+      const { result } = renderUseChat({
+        threadId: 'thread-1',
+        connection: adapter,
+        live: true,
+      })
 
       await waitFor(() => {
         expect(result.current.isSubscribed).toBe(true)
@@ -1967,6 +3125,7 @@ describe('useChat', () => {
       const { result, rerender } = renderHook(
         ({ live }) =>
           useChat({
+            threadId: 'thread-1',
             connection: adapter,
             live,
             onChunk,
@@ -2000,7 +3159,6 @@ describe('useChat', () => {
           messageId: 'msg-after-toggle',
           timestamp: Date.now(),
           delta: 'after toggle',
-          content: 'after toggle',
         },
         {
           type: EventType.RUN_FINISHED,

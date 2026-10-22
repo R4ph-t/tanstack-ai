@@ -1,6 +1,6 @@
 {
   "name": "@tanstack/ai-openai",
-  "version": "0.17.1",
+  "version": "0.31.0",
   "description": "OpenAI adapter for TanStack AI chat, tools, images, video, speech, transcription, realtime, and structured outputs.",
   "author": "Tanner Linsley",
   "license": "MIT",
@@ -25,9 +25,17 @@
       "types": "./dist/esm/index.d.ts",
       "import": "./dist/esm/index.js"
     },
+    "./byok": {
+      "types": "./dist/esm/byok.d.ts",
+      "import": "./dist/esm/byok.js"
+    },
     "./compatible": {
       "types": "./dist/esm/compatible/index.d.ts",
       "import": "./dist/esm/compatible/index.js"
+    },
+    "./siwc": {
+      "types": "./dist/esm/siwc.d.ts",
+      "import": "./dist/esm/siwc.js"
     },
     "./tools": {
       "types": "./dist/esm/tools/index.d.ts",
@@ -44,6 +52,7 @@
     "lint:fix": "oxlint src --type-aware --fix",
     "test:build": "publint --strict",
     "test:oxlint": "oxlint src --type-aware",
+    "test:coverage": "vitest run --coverage --coverage.include='src/**' --coverage.reporter=text-summary --coverage.reporter=json-summary",
     "test:lib": "vitest run",
     "test:lib:dev": "pnpm test:lib --watch",
     "test:types": "tsc"
@@ -66,18 +75,17 @@
     "realtime"
   ],
   "dependencies": {
-    "@tanstack/ai-utils": "workspace:*",
-    "@tanstack/openai-base": "workspace:*",
-    "openai": "^6.41.0"
+    "@tanstack/ai-utils": "workspace:^",
+    "@tanstack/openai-base": "workspace:^",
+    "openai": "^7.30.0"
   },
   "peerDependencies": {
-    "@tanstack/ai": "workspace:^",
-    "zod": "^4.0.0"
+    "@tanstack/ai": "workspace:^"
   },
   "devDependencies": {
     "@tanstack/ai": "workspace:*",
-    "@vitest/coverage-v8": "4.0.14",
-    "vite": "^8.1.4",
+    "@vitest/coverage-v8": "4.1.10",
+    "vite": "^8.2.1",
     "zod": "^4.2.0"
   }
 }

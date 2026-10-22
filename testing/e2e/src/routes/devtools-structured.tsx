@@ -16,9 +16,9 @@ function DevtoolsStructuredRoute() {
   const [contentDeltaCount, setContentDeltaCount] = useState(0)
   const [structuredObject, setStructuredObject] = useState<unknown>(null)
   const chat = useChat({
-    id: 'devtools-structured:primary',
+    threadId: 'devtools-structured:primary',
     connection: fetchServerSentEvents('/api/chat'),
-    body: {
+    forwardedProps: {
       provider: 'openai',
       feature: 'structured-output-stream',
       testId,

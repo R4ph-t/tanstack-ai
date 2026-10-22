@@ -3,9 +3,7 @@ id: ImageAdapter
 title: ImageAdapter
 ---
 
-# Interface: ImageAdapter\<TModel, TProviderOptions, TModelProviderOptionsByName, TModelSizeByName, TModelInputModalitiesByName\>
-
-Defined in: [packages/ai/src/activities/generateImage/adapter.ts:39](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/generateImage/adapter.ts#L39)
+Defined in: packages/ai/src/activities/generateImage/adapter.ts:39
 
 Image adapter interface with pre-resolved generics.
 
@@ -13,7 +11,7 @@ An adapter is created by a provider function: `provider('model')` → `adapter`
 All type resolution happens at the provider call site, not in this interface.
 
 Generic parameters:
-- TModel: The specific model name (e.g., 'dall-e-3')
+- TModel: The specific model name (e.g., 'gpt-image-2.5-flare')
 - TProviderOptions: Base provider-specific options (already resolved)
 - TModelProviderOptionsByName: Map from model name to its specific provider options
 - TModelSizeByName: Map from model name to its supported sizes
@@ -50,7 +48,7 @@ Generic parameters:
 ~types: object;
 ```
 
-Defined in: [packages/ai/src/activities/generateImage/adapter.ts:60](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/generateImage/adapter.ts#L60)
+Defined in: packages/ai/src/activities/generateImage/adapter.ts:67
 
 **`Internal`**
 
@@ -82,13 +80,13 @@ providerOptions: TProviderOptions;
 
 ***
 
-### generateImages()
+### generateImages
 
 ```ts
 generateImages: (options) => Promise<ImageGenerationResult>;
 ```
 
-Defined in: [packages/ai/src/activities/generateImage/adapter.ts:70](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/generateImage/adapter.ts#L70)
+Defined in: packages/ai/src/activities/generateImage/adapter.ts:77
 
 Generate images from a prompt
 
@@ -110,7 +108,7 @@ Generate images from a prompt
 readonly kind: "image";
 ```
 
-Defined in: [packages/ai/src/activities/generateImage/adapter.ts:51](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/generateImage/adapter.ts#L51)
+Defined in: packages/ai/src/activities/generateImage/adapter.ts:51
 
 Discriminator for adapter kind - used by generate() to determine API shape
 
@@ -122,7 +120,7 @@ Discriminator for adapter kind - used by generate() to determine API shape
 readonly model: TModel;
 ```
 
-Defined in: [packages/ai/src/activities/generateImage/adapter.ts:55](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/generateImage/adapter.ts#L55)
+Defined in: packages/ai/src/activities/generateImage/adapter.ts:62
 
 The model this adapter is configured for
 
@@ -134,6 +132,21 @@ The model this adapter is configured for
 readonly name: string;
 ```
 
-Defined in: [packages/ai/src/activities/generateImage/adapter.ts:53](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/generateImage/adapter.ts#L53)
+Defined in: packages/ai/src/activities/generateImage/adapter.ts:53
 
 Adapter name identifier
+
+***
+
+### supportsFileSources?
+
+```ts
+readonly optional supportsFileSources?: boolean;
+```
+
+Defined in: packages/ai/src/activities/generateImage/adapter.ts:60
+
+Declares that this adapter can consume `{ type: 'file' }` content
+sources (provider Files API references). The activity dispatcher rejects
+file sources in preflight for adapters that don't declare this, so
+adapters written before the file arm existed fail closed.

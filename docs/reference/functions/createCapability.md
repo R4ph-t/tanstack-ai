@@ -3,13 +3,11 @@ id: createCapability
 title: createCapability
 ---
 
-# Function: createCapability()
-
 ```ts
 function createCapability<TValue>(): <TName>(name) => Capability<TValue, TName>;
 ```
 
-Defined in: [packages/ai/src/activities/chat/middleware/capabilities.ts:114](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/middleware/capabilities.ts#L114)
+Defined in: packages/ai/src/activities/chat/middleware/capabilities.ts:114
 
 Create a capability. Returns a hybrid handle that destructures to
 `[get, provide]` and is itself the identity for `requires`/`provides`.
@@ -28,27 +26,11 @@ compile-time coverage check that keys on the literal name.)
 
 ## Returns
 
-```ts
-<TName>(name): Capability<TValue, TName>;
-```
-
-### Type Parameters
-
-#### TName
-
-`TName` *extends* `string`
-
-### Parameters
-
-#### name
-
-`TName`
-
-### Returns
-
-[`Capability`](../type-aliases/Capability.md)\<`TValue`, `TName`\>
+\<`TName`\>(`name`) => [`Capability`](../type-aliases/Capability.md)\<`TValue`, `TName`\>
 
 ## Example
+
+**Provider + consumer middleware**
 
 ```ts
 const counterCapability = createCapability<{ value: number }>()('counter')

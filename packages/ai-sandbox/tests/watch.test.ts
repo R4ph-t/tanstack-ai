@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { diffSnapshots, watchWorkspace } from '../src/watch'
 import { captureLogger } from './fakes'
 import type { SandboxHandle } from '../src/contracts'
-import type { FileEvent } from '../src/watch'
+import type { SandboxFileEvent } from '../src/watch'
 
 /** Let queued microtasks (the native watcher's async classify) settle. */
 function flush(): Promise<void> {
@@ -21,6 +21,7 @@ function fakeHandle(fs: Partial<SandboxHandle['fs']>): SandboxHandle {
       ports: false,
       backgroundProcesses: false,
       writableStdin: true,
+      killableProcesses: true,
       snapshots: false,
       networkPolicy: false,
       durableFilesystem: false,
@@ -95,7 +96,7 @@ describe('watchWorkspace (exec-poll)', () => {
         exitCode: 0,
       })
 
-    const events: Array<FileEvent> = []
+    const events: Array<SandboxFileEvent> = []
     const watcher = await watchWorkspace(handle, {
       onEvent: (e) => events.push(e),
       intervalMs: 100,
@@ -124,7 +125,7 @@ describe('watchWorkspace (exec-poll)', () => {
     handle.process.exec = () =>
       Promise.resolve(results[Math.min(call++, results.length - 1)]!)
 
-    const events: Array<FileEvent> = []
+    const events: Array<SandboxFileEvent> = []
     const { logger, calls } = captureLogger()
     const watcher = await watchWorkspace(handle, {
       onEvent: (e) => events.push(e),
@@ -159,7 +160,7 @@ describe('watchWorkspace (exec-poll)', () => {
     handle.process.exec = () =>
       Promise.resolve(results[Math.min(call++, results.length - 1)]!)
 
-    const events: Array<FileEvent> = []
+    const events: Array<SandboxFileEvent> = []
     const watcher = await watchWorkspace(handle, {
       onEvent: (e) => events.push(e),
       intervalMs: 100,
@@ -184,7 +185,7 @@ describe('watchWorkspace (exec-poll)', () => {
         exitCode: 0,
       })
     }
-    const events: Array<FileEvent> = []
+    const events: Array<SandboxFileEvent> = []
     // Must resolve (not reject) despite the initial exec throwing — otherwise
     // middleware setup crashes and leaks the sandbox.
     const watcher = await watchWorkspace(handle, {
@@ -214,7 +215,7 @@ describe('watchWorkspace (exec-poll)', () => {
     handle.process.exec = () =>
       Promise.resolve(results[Math.min(call++, results.length - 1)]!)
 
-    const events: Array<FileEvent> = []
+    const events: Array<SandboxFileEvent> = []
     const watcher = await watchWorkspace(handle, {
       onEvent: (e) => events.push(e),
       intervalMs: 100,
@@ -250,7 +251,7 @@ describe('watchWorkspace (exec-poll)', () => {
     handle.process.exec = () =>
       Promise.resolve(results[Math.min(call++, results.length - 1)]!)
 
-    const events: Array<FileEvent> = []
+    const events: Array<SandboxFileEvent> = []
     const watcher = await watchWorkspace(handle, {
       onEvent: (e) => events.push(e),
       intervalMs: 100,
@@ -282,7 +283,7 @@ describe('watchWorkspace (exec-poll)', () => {
     handle.process.exec = () =>
       Promise.resolve(results[Math.min(call++, results.length - 1)]!)
 
-    const events: Array<FileEvent> = []
+    const events: Array<SandboxFileEvent> = []
     const watcher = await watchWorkspace(handle, {
       onEvent: (e) => events.push(e),
       intervalMs: 100,
@@ -332,7 +333,7 @@ describe('watchWorkspace (exec-poll)', () => {
             exitCode: 0,
           })
     }
-    const events: Array<FileEvent> = []
+    const events: Array<SandboxFileEvent> = []
     const { logger, calls } = captureLogger()
     const watcher = await watchWorkspace(handle, {
       onEvent: (e) => events.push(e),
@@ -361,7 +362,7 @@ describe('watchWorkspace (exec-poll)', () => {
         ? Promise.resolve({ stdout: '1\t1\t./a.js\n', stderr: '', exitCode: 0 })
         : Promise.reject(new Error('exec wedged'))
     }
-    const events: Array<FileEvent> = []
+    const events: Array<SandboxFileEvent> = []
     const { logger, calls } = captureLogger()
     const watcher = await watchWorkspace(handle, {
       onEvent: (e) => events.push(e),
@@ -389,7 +390,7 @@ describe('watchWorkspace (exec-poll)', () => {
       execCalls++
       return Promise.resolve({ stdout: '', stderr: '', exitCode: 0 })
     }
-    const events: Array<FileEvent> = []
+    const events: Array<SandboxFileEvent> = []
     const watcher = await watchWorkspace(handle, {
       onEvent: (e) => events.push(e),
       intervalMs: 10,
@@ -415,7 +416,7 @@ describe('watchWorkspace (native fs.watch)', () => {
       },
     })
 
-    const events: Array<FileEvent> = []
+    const events: Array<SandboxFileEvent> = []
     const watcher = await watchWorkspace(handle, {
       onEvent: (e) => events.push(e),
     })
@@ -443,7 +444,7 @@ describe('watchWorkspace (native fs.watch)', () => {
         return Promise.resolve({ stop: () => Promise.resolve() })
       },
     })
-    const events: Array<FileEvent> = []
+    const events: Array<SandboxFileEvent> = []
     const watcher = await watchWorkspace(handle, {
       onEvent: (e) => events.push(e),
     })
@@ -467,7 +468,7 @@ describe('watchWorkspace (native fs.watch)', () => {
       },
     })
     const { logger, calls } = captureLogger()
-    const events: Array<FileEvent> = []
+    const events: Array<SandboxFileEvent> = []
     const watcher = await watchWorkspace(handle, {
       onEvent: (e) => events.push(e),
       logger,
@@ -503,7 +504,7 @@ describe('watchWorkspace (native fs.watch)', () => {
         return Promise.resolve({ stop: () => Promise.resolve() })
       },
     })
-    const events: Array<FileEvent> = []
+    const events: Array<SandboxFileEvent> = []
     const watcher = await watchWorkspace(handle, {
       onEvent: (e) => events.push(e),
     })
@@ -528,7 +529,7 @@ describe('watchWorkspace (native fs.watch)', () => {
         return Promise.resolve({ stop: () => Promise.resolve() })
       },
     })
-    const events: Array<FileEvent> = []
+    const events: Array<SandboxFileEvent> = []
     const watcher = await watchWorkspace(handle, {
       onEvent: (e) => events.push(e),
       root: '/workspace/sub',

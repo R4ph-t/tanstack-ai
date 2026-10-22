@@ -40,7 +40,9 @@ describe('null tool input normalization', () => {
         },
       ]
 
-      const result = await drainGenerator(executeToolCalls(toolCalls, [tool]))
+      const result = await drainGenerator(
+        executeToolCalls(toolCalls, [tool], 'thread-1'),
+      )
       expect(receivedInput).toHaveBeenCalledWith({})
       expect(result.results).toHaveLength(1)
       expect(result.results[0]!.state).toBeUndefined()
@@ -66,7 +68,7 @@ describe('null tool input normalization', () => {
         },
       ]
 
-      await drainGenerator(executeToolCalls(toolCalls, [tool]))
+      await drainGenerator(executeToolCalls(toolCalls, [tool], 'thread-1'))
       expect(receivedInput).toHaveBeenCalledWith({})
     })
 
@@ -93,7 +95,7 @@ describe('null tool input normalization', () => {
         },
       ]
 
-      await drainGenerator(executeToolCalls(toolCalls, [tool]))
+      await drainGenerator(executeToolCalls(toolCalls, [tool], 'thread-1'))
       expect(receivedInput).toHaveBeenCalledWith({ location: 'NYC' })
     })
   })
@@ -107,18 +109,18 @@ describe('null tool input normalization', () => {
         type: EventType.TOOL_CALL_START,
         toolCallId: 'tc-1',
         toolCallName: 'test_tool',
-        toolName: 'test_tool',
         timestamp: Date.now(),
       })
-
-      // Complete with null input (simulating Anthropic empty tool_use)
+      manager.addToolCallArgsEvent({
+        type: EventType.TOOL_CALL_ARGS,
+        toolCallId: 'tc-1',
+        delta: '{}',
+        timestamp: Date.now(),
+      })
       manager.completeToolCall({
         type: EventType.TOOL_CALL_END,
         toolCallId: 'tc-1',
-        toolCallName: 'test_tool',
-        toolName: 'test_tool',
         timestamp: Date.now(),
-        input: null as unknown,
       })
 
       const toolCalls = manager.getToolCalls()
@@ -134,17 +136,18 @@ describe('null tool input normalization', () => {
         type: EventType.TOOL_CALL_START,
         toolCallId: 'tc-1',
         toolCallName: 'test_tool',
-        toolName: 'test_tool',
         timestamp: Date.now(),
       })
-
+      manager.addToolCallArgsEvent({
+        type: EventType.TOOL_CALL_ARGS,
+        toolCallId: 'tc-1',
+        delta: '{"location":"NYC"}',
+        timestamp: Date.now(),
+      })
       manager.completeToolCall({
         type: EventType.TOOL_CALL_END,
         toolCallId: 'tc-1',
-        toolCallName: 'test_tool',
-        toolName: 'test_tool',
         timestamp: Date.now(),
-        input: { location: 'NYC' },
       })
 
       const toolCalls = manager.getToolCalls()

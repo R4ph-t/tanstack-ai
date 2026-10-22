@@ -4,7 +4,14 @@ export interface MistralClientConfig {
   /** Mistral API key. */
   apiKey: string
 
-  /** Optional server URL override. */
+  /**
+   * Base URL for every request. Same option name as the other adapters, so a
+   * gateway config can be spread into any of them. Wins over `serverURL` when
+   * both are set.
+   */
+  baseURL?: string
+
+  /** Alias of `baseURL`. */
   serverURL?: string
 
   /** Optional request timeout (ms). */
@@ -12,22 +19,77 @@ export interface MistralClientConfig {
 
   /** Optional default headers to include with every request. */
   defaultHeaders?: Record<string, string>
+
+  /**
+   * Optional Google / Vertex access token. When set, it replaces
+   * `apiKey` on the Authorization header.
+   */
+  getAccessToken?: () => Promise<string>
+
+  /**
+   * Optional chat completions URL. Vertex uses this for
+   * `:rawPredict` and `:streamRawPredict`.
+   */
+  resolveRequestUrl?: (stream: boolean) => string
+
+  /** Optional model id sent on the wire. Vertex uses publisher model ids. */
+  requestModel?: string
 }
 
 /**
- * Creates a Mistral SDK client instance.
+ * Creates a Mistral SDK client instance. A `fetcher` replaces the SDK's fetch.
  */
-export function createMistralClient(config: MistralClientConfig): Mistral {
-  const { apiKey, serverURL, timeoutMs, defaultHeaders } = config
+export function createMistralClient(
+  config: MistralClientConfig,
+  fetcher?: typeof fetch,
+): Mistral {
+  const {
+    apiKey,
+    baseURL,
+    timeoutMs,
+    defaultHeaders,
+    getAccessToken,
+    resolveRequestUrl,
+  } = config
+  const serverURL = baseURL ?? config.serverURL
+
+  const needsHook =
+    (defaultHeaders !== undefined && Object.keys(defaultHeaders).length > 0) ||
+    getAccessToken !== undefined ||
+    resolveRequestUrl !== undefined
 
   let httpClient: HTTPClient | undefined
-  if (defaultHeaders && Object.keys(defaultHeaders).length > 0) {
-    httpClient = new HTTPClient()
-    httpClient.addHook('beforeRequest', (req) => {
-      for (const [key, value] of Object.entries(defaultHeaders)) {
-        req.headers.set(key, value)
+  if (needsHook || fetcher) {
+    httpClient = new HTTPClient({
+      // The SDK sends a Request. Send a URL and an init, as a plain fetch
+      // call does, so a wrapper that reads `init.headers` keeps them.
+      fetcher:
+        fetcher &&
+        (async (input) => {
+          const request = new Request(input)
+          return fetcher(request.url, {
+            method: request.method,
+            headers: request.headers,
+            body: request.body && (await request.arrayBuffer()),
+            signal: request.signal,
+          })
+        }),
+    })
+  }
+  if (httpClient && needsHook) {
+    httpClient.addHook('beforeRequest', async (req) => {
+      const nextUrl =
+        resolveRequestUrl === undefined ? req.url : resolveRequestUrl(false)
+      const next = new Request(nextUrl, req)
+      if (defaultHeaders) {
+        for (const [key, value] of Object.entries(defaultHeaders)) {
+          next.headers.set(key, value)
+        }
       }
-      return req
+      if (getAccessToken !== undefined) {
+        next.headers.set('Authorization', `Bearer ${await getAccessToken()}`)
+      }
+      return next
     })
   }
 

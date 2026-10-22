@@ -84,7 +84,10 @@ function makeRunnerCtx(): ChatMiddlewareContext {
     phase: 'init',
     iteration: 0,
     chunkIndex: 0,
+    callMetadata: {},
     abort: () => {},
+    retry: () => {},
+    emitCustomEvent: () => {},
     context: undefined,
     defer: () => {},
     provider: 'test',
@@ -97,6 +100,7 @@ function makeRunnerCtx(): ChatMiddlewareContext {
     currentMessageId: null,
     accumulatedContent: '',
     messages: [],
+    activities: [],
     createId: (prefix) => `${prefix}-id`,
     capabilities: new CapabilityRegistry(),
     get: (capability) => capability[0](ctx),
@@ -210,6 +214,7 @@ describe('chat() capability integration', () => {
     })
     await collectChunks(
       chat({
+        threadId: 'thread-1',
         adapter,
         messages: [{ role: 'user', content: 'hello' }],
         middleware: [provider, consumer],
@@ -244,6 +249,7 @@ describe('chat() capability integration', () => {
     })
     await collectChunks(
       chat({
+        threadId: 'thread-1',
         adapter,
         messages: [{ role: 'user', content: 'hello' }],
         middleware: [provider, consumer],
@@ -262,6 +268,7 @@ describe('chat() capability integration', () => {
     const { adapter } = createMockAdapter({ iterations: [[]] })
     expect(() =>
       chat({
+        threadId: 'thread-1',
         adapter,
         messages: [{ role: 'user', content: 'x' }],
         middleware: [needsSandbox],

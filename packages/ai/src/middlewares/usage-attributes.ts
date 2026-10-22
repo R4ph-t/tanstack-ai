@@ -6,14 +6,13 @@ import type { TokenUsage } from '../types'
  * Build the full set of `gen_ai.usage.*` span attributes from a `TokenUsage`.
  *
  * Beyond input/output tokens, this emits provider-reported cost, total tokens,
- * cache and reasoning breakdowns, duration-based billing, and media unit counts
- * — every field is guarded so spans stay clean when a provider doesn't report
+ * cache and reasoning breakdowns, and the billed quantity — every field is guarded so spans stay clean when a provider doesn't report
  * it. Cache and reasoning use the official GenAI semconv names;
  * `gen_ai.usage.cost` and `gen_ai.usage.total_tokens` are de-facto extensions
  * consumed by backends like PostHog (which otherwise re-derive cost from their
  * own price tables, losing cache discounts and gateway markup). Fields with no
- * semconv or de-facto convention (`costDetails`, `durationSeconds`,
- * `unitsBilled`) are TanStack-namespaced.
+ * semconv or de-facto convention (`billed`, `costDetails`) are
+ * TanStack-namespaced.
  *
  * Shared by `otelMiddleware` across every activity (chat and the media
  * activities) so usage lands identically whichever activity produced the span.
@@ -30,6 +29,16 @@ export function usageAttributes(
     'gen_ai.usage.input_tokens': usage.promptTokens,
     'gen_ai.usage.output_tokens': usage.completionTokens,
   }
+  // The self-describing billed quantity: the unit rides along as a string
+  // attribute so backends can label/aggregate non-token usage without
+  // out-of-band knowledge of the provider.
+  if (usage.billed !== undefined) {
+    const quantity = firstNumber(usage.billed.quantity)
+    if (quantity !== undefined) {
+      attrs['tanstack.ai.usage.billed_quantity'] = quantity
+      attrs['tanstack.ai.usage.billed_unit'] = usage.billed.unit
+    }
+  }
   const optional: Array<[key: string, value: unknown]> = [
     ['gen_ai.usage.total_tokens', usage.totalTokens],
     ['gen_ai.usage.cost', usage.cost],
@@ -45,8 +54,6 @@ export function usageAttributes(
       'gen_ai.usage.reasoning.output_tokens',
       usage.completionTokensDetails?.reasoningTokens,
     ],
-    ['tanstack.ai.usage.duration_seconds', usage.durationSeconds],
-    ['tanstack.ai.usage.units_billed', usage.unitsBilled],
     ['tanstack.ai.usage.upstream_cost', usage.costDetails?.upstreamCost],
     [
       'tanstack.ai.usage.upstream_input_cost',

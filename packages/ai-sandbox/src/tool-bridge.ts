@@ -20,6 +20,7 @@
  */
 import { createServer } from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { once } from 'node:events'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import {
@@ -27,7 +28,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import type { AddressInfo } from 'node:net'
-import type { AnyTool } from '@tanstack/ai'
+import type { AnyTool, EmitCustomEventOptions } from '@tanstack/ai'
 
 /**
  * Name of the bridged MCP server. The agent sees tools as
@@ -38,7 +39,9 @@ export const BRIDGED_MCP_SERVER_NAME = 'tanstack'
 
 /** Hostname the sandbox uses to reach the bridge endpoint, per provider. */
 export function hostForSandbox(provider: string): string {
-  return provider === 'docker' ? 'host.docker.internal' : '127.0.0.1'
+  return provider === 'docker' || provider === 'sbx'
+    ? 'host.docker.internal'
+    : '127.0.0.1'
 }
 
 /** Result of a permission decision returned to the harness's prompt tool. */
@@ -57,6 +60,8 @@ export interface BridgePermission {
 }
 
 export interface ToolBridgeCoreOptions {
+  /** The thread id of the run, forwarded to each tool's `execute()`. */
+  threadId: string
   /** Runtime context forwarded to each tool's `execute()`. */
   context?: unknown
   /** Abort signal forwarded to each tool's `execute()`. */
@@ -69,7 +74,11 @@ export interface ToolBridgeCoreOptions {
    * `emitCustomEvent` never reaches a bridged tool. The harness adapter supplies
    * one that injects a CUSTOM chunk into its live output stream.
    */
-  emitCustomEvent?: (eventName: string, value: Record<string, unknown>) => void
+  emitCustomEvent?: (
+    eventName: string,
+    value: Record<string, unknown>,
+    options?: EmitCustomEventOptions,
+  ) => void
   /**
    * Optional permission-prompt tool (e.g. for Claude Code's
    * `--permission-prompt-tool`). When set, the bridge exposes an extra MCP tool
@@ -121,11 +130,21 @@ export interface ToolBridgeCore {
   callTool: (name: string, args: unknown) => Promise<ToolCallResult>
 }
 
-/** Build the transport-agnostic bridge core for the given tools. */
+/**
+ * Build the transport-agnostic bridge core for the given tools. Throws if a
+ * tool has `needsApproval`: the bridge runs tools out-of-band and cannot pause
+ * the run for an approval round-trip.
+ */
 export function createToolBridgeCore(
   tools: Array<AnyTool>,
-  options: ToolBridgeCoreOptions = {},
+  options: ToolBridgeCoreOptions,
 ): ToolBridgeCore {
+  const gated = tools.find((tool) => tool.needsApproval)
+  if (gated) {
+    throw new Error(
+      `Tool "${gated.name}" has needsApproval, which harness adapters do not support. Remove needsApproval or use an HTTP adapter.`,
+    )
+  }
   const toolsByName = new Map(tools.map((tool) => [tool.name, tool]))
   const permission = options.permission
 
@@ -159,6 +178,7 @@ export function createToolBridgeCore(
       if (!tool?.execute) throw new Error(`Unknown tool: ${name}`)
       try {
         const result: unknown = await tool.execute(args ?? {}, {
+          threadId: options.threadId,
           context: options.context,
           abortSignal: options.signal,
           // No-op default so tools that always call it (e.g. code mode) don't
@@ -348,9 +368,7 @@ export async function startHostToolBridge(
     })
   })
 
-  await new Promise<void>((resolve) =>
-    httpServer.listen(0, bindAddress, resolve),
-  )
+  await once(httpServer.listen(0, bindAddress), 'listening')
   const port = (httpServer.address() as AddressInfo).port
   const url = `http://${options.hostForSandbox}:${port}/mcp`
 
@@ -358,8 +376,15 @@ export async function startHostToolBridge(
     name: BRIDGED_MCP_SERVER_NAME,
     url,
     token,
-    close: () =>
-      new Promise<void>((resolve) => httpServer.close(() => resolve())),
+    close: () => {
+      const closed = new Promise<void>((resolve) =>
+        httpServer.close(() => resolve()),
+      )
+      // `close()` alone waits for every open connection. An agent that keeps
+      // a request or a keep-alive socket open would hold the run's teardown.
+      httpServer.closeAllConnections()
+      return closed
+    },
   }
 }
 

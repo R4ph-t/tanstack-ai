@@ -3,13 +3,11 @@ id: createRealtimeEventEmitter
 title: createRealtimeEventEmitter
 ---
 
-# Function: createRealtimeEventEmitter()
-
 ```ts
 function createRealtimeEventEmitter(): object;
 ```
 
-Defined in: [packages/ai/src/realtime/event-emitter.ts:16](https://github.com/TanStack/ai/blob/main/packages/ai/src/realtime/event-emitter.ts#L16)
+Defined in: packages/ai/src/realtime/event-emitter.ts:16
 
 ## Returns
 
@@ -65,10 +63,4 @@ on<TEvent>(event, handler): () => void;
 
 #### Returns
 
-```ts
-(): void;
-```
-
-##### Returns
-
-`void`
+() => `void`

@@ -3,9 +3,7 @@ id: TextAdapter
 title: TextAdapter
 ---
 
-# Interface: TextAdapter\<TModel, TProviderOptions, TInputModalities, TMessageMetadataByModality, TToolCapabilities, TToolCallMetadata, TSystemPromptMetadata\>
-
-Defined in: [packages/ai/src/activities/chat/adapter.ts:67](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/adapter.ts#L67)
+Defined in: packages/ai/src/activities/chat/adapter.ts:75
 
 Text adapter interface with pre-resolved generics.
 
@@ -54,6 +52,10 @@ Generic parameters:
 
 `TSystemPromptMetadata` = `never`
 
+### TReasoning
+
+`TReasoning` *extends* [`ReasoningCapability`](ReasoningCapability.md) = `never`
+
 ## Properties
 
 ### ~types
@@ -62,7 +64,7 @@ Generic parameters:
 ~types: object;
 ```
 
-Defined in: [packages/ai/src/activities/chat/adapter.ts:95](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/adapter.ts#L95)
+Defined in: packages/ai/src/activities/chat/adapter.ts:133
 
 **`Internal`**
 
@@ -86,6 +88,17 @@ messageMetadataByModality: TMessageMetadataByModality;
 providerOptions: TProviderOptions;
 ```
 
+#### reasoning?
+
+```ts
+optional reasoning?: TReasoning;
+```
+
+The model's reasoning levels, for `chat({ reasoning })`. `never`: the
+model does not reason (or the adapter does not map `reasoning`), and
+the option is a type error. Optional, so an adapter written before this
+key existed still type-checks (and gets no `reasoning` option).
+
 #### systemPromptMetadata
 
 ```ts
@@ -106,13 +119,25 @@ toolCapabilities: TToolCapabilities;
 
 ***
 
-### chatStream()
+### api?
 
 ```ts
-chatStream: (options) => AsyncIterable<AGUIEvent>;
+readonly optional api?: string;
 ```
 
-Defined in: [packages/ai/src/activities/chat/adapter.ts:107](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/adapter.ts#L107)
+Defined in: packages/ai/src/activities/chat/adapter.ts:90
+
+Wire API identity. Defaults to the adapter kind when omitted.
+
+***
+
+### chatStream
+
+```ts
+chatStream: (options) => AsyncIterable<AdapterYieldChunk>;
+```
+
+Defined in: packages/ai/src/activities/chat/adapter.ts:152
 
 Stream text completions from the model
 
@@ -124,7 +149,82 @@ Stream text completions from the model
 
 #### Returns
 
-`AsyncIterable`\<[`AGUIEvent`](../type-aliases/AGUIEvent.md)\>
+`AsyncIterable`\<[`AdapterYieldChunk`](../type-aliases/AdapterYieldChunk.md)\>
+
+***
+
+### combinedStructuredOutputSource?
+
+```ts
+optional combinedStructuredOutputSource?: (modelOptions?) => "text" | "event";
+```
+
+Defined in: packages/ai/src/activities/chat/adapter.ts:227
+
+Where native-combined structured output is taken from.
+
+- `'text'` (default when omitted): the agent loop's accumulated
+  assistant text is schema JSON. The engine parses it after the loop.
+  HTTP adapters use this.
+- `'event'`: the adapter emits `structured-output.complete` during
+  `chatStream`. The engine must not parse accumulated prose. Harness
+  adapters use this.
+
+#### Parameters
+
+##### modelOptions?
+
+`TProviderOptions`
+
+#### Returns
+
+`"text"` \| `"event"`
+
+***
+
+### compact?
+
+```ts
+optional compact?: (options) => Promise<ModelMessage<
+  | string
+  | ContentPart<unknown, unknown, unknown, unknown, unknown>[]
+| null>[]>;
+```
+
+Defined in: packages/ai/src/activities/chat/adapter.ts:192
+
+Compact the history with the provider's own compaction endpoint.
+Resolves to the history to send from the next call on. It can hold
+provider items that only this provider reads. Optional: adapters
+without native compaction omit it.
+
+#### Parameters
+
+##### options
+
+[`TextCompactOptions`](TextCompactOptions.md)
+
+#### Returns
+
+`Promise`\<[`ModelMessage`](ModelMessage.md)\<
+  \| `string`
+  \| [`ContentPart`](../type-aliases/ContentPart.md)\<`unknown`, `unknown`, `unknown`, `unknown`, `unknown`\>[]
+  \| `null`\>[]\>
+
+***
+
+### inputModalities?
+
+```ts
+readonly optional inputModalities?: readonly ("text" | "image" | "audio" | "video" | "document")[];
+```
+
+Defined in: packages/ai/src/activities/chat/adapter.ts:120
+
+The input kinds the model reads, at runtime, from the provider's model
+metadata. `undefined` means not known. This mirrors the type-level
+`'~types'.inputModalities`, which has no runtime value. `| undefined`
+keeps model lookups assignable under `exactOptionalPropertyTypes`.
 
 ***
 
@@ -134,9 +234,24 @@ Stream text completions from the model
 readonly kind: "text";
 ```
 
-Defined in: [packages/ai/src/activities/chat/adapter.ts:77](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/adapter.ts#L77)
+Defined in: packages/ai/src/activities/chat/adapter.ts:86
 
 Discriminator for adapter kind
+
+***
+
+### midConversationChannels?
+
+```ts
+readonly optional midConversationChannels?: MidConversationChannels;
+```
+
+Defined in: packages/ai/src/activities/chat/adapter.ts:128
+
+The mid-conversation channels of the model: tools and system prompts
+added between model calls can go out with no change to the cached prompt
+prefix. `chat()` passes `TextOptions.midConversationChanges` only when a
+channel is on. `undefined` means no channels.
 
 ***
 
@@ -146,7 +261,7 @@ Discriminator for adapter kind
 readonly model: TModel;
 ```
 
-Defined in: [packages/ai/src/activities/chat/adapter.ts:81](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/adapter.ts#L81)
+Defined in: packages/ai/src/activities/chat/adapter.ts:94
 
 The model this adapter is configured for
 
@@ -158,19 +273,31 @@ The model this adapter is configured for
 readonly name: string;
 ```
 
-Defined in: [packages/ai/src/activities/chat/adapter.ts:79](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/adapter.ts#L79)
+Defined in: packages/ai/src/activities/chat/adapter.ts:88
 
 Provider name identifier (e.g., 'openai', 'anthropic')
+
+***
+
+### provider?
+
+```ts
+readonly optional provider?: string;
+```
+
+Defined in: packages/ai/src/activities/chat/adapter.ts:92
+
+Provider identity. Defaults to `name` when omitted.
 
 ***
 
 ### requires?
 
 ```ts
-readonly optional requires: readonly CapabilityHandle[];
+readonly optional requires?: readonly CapabilityHandle[];
 ```
 
-Defined in: [packages/ai/src/activities/chat/adapter.ts:90](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/adapter.ts#L90)
+Defined in: packages/ai/src/activities/chat/adapter.ts:103
 
 Capabilities this adapter requires at runtime. `chat()` validates that the
 configured middleware provides each one. Model adapters omit this; harness
@@ -180,13 +307,13 @@ this is the declaration/validation surface only.
 
 ***
 
-### structuredOutput()
+### structuredOutput
 
 ```ts
 structuredOutput: (options) => Promise<StructuredOutputResult<unknown>>;
 ```
 
-Defined in: [packages/ai/src/activities/chat/adapter.ts:119](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/adapter.ts#L119)
+Defined in: packages/ai/src/activities/chat/adapter.ts:164
 
 Generate structured output using the provider's native structured output API.
 This method uses stream: false and sends the JSON schema to the provider
@@ -208,13 +335,13 @@ Promise with the raw data (validation is done in the chat function)
 
 ***
 
-### structuredOutputStream()?
+### structuredOutputStream?
 
 ```ts
-optional structuredOutputStream: (options) => AsyncIterable<AGUIEvent>;
+optional structuredOutputStream?: (options) => AsyncIterable<AdapterYieldChunk>;
 ```
 
-Defined in: [packages/ai/src/activities/chat/adapter.ts:136](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/adapter.ts#L136)
+Defined in: packages/ai/src/activities/chat/adapter.ts:182
 
 Stream structured output using the provider's native streaming structured
 output API (stream + response_format json_schema in a single request).
@@ -226,7 +353,8 @@ activity layer synthesizes a stream around the non-streaming
 Implementations must emit standard AG-UI lifecycle events (RUN_STARTED,
 TEXT_MESSAGE_*, RUN_FINISHED) carrying raw JSON text deltas, plus a final
 `CUSTOM` event named `structured-output.complete` whose `value` is
-`{ object, raw, reasoning? }`.
+`{ object, raw, reasoning? }`. Events must be timestamped when emitted so
+their timestamps follow stream order.
 
 #### Parameters
 
@@ -236,17 +364,17 @@ TEXT_MESSAGE_*, RUN_FINISHED) carrying raw JSON text deltas, plus a final
 
 #### Returns
 
-`AsyncIterable`\<[`AGUIEvent`](../type-aliases/AGUIEvent.md)\>
+`AsyncIterable`\<[`AdapterYieldChunk`](../type-aliases/AdapterYieldChunk.md)\>
 
 ***
 
-### supportsCombinedToolsAndSchema()?
+### supportsCombinedToolsAndSchema?
 
 ```ts
-optional supportsCombinedToolsAndSchema: (modelOptions?) => boolean;
+optional supportsCombinedToolsAndSchema?: (modelOptions?) => boolean;
 ```
 
-Defined in: [packages/ai/src/activities/chat/adapter.ts:159](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/adapter.ts#L159)
+Defined in: packages/ai/src/activities/chat/adapter.ts:213
 
 Declares whether the adapter supports combining `tools` and a
 schema-constrained final answer in a single streaming request.
@@ -275,3 +403,19 @@ answer per-request. Most adapters can return a constant.
 #### Returns
 
 `boolean`
+
+***
+
+### supportsFileSources?
+
+```ts
+readonly optional supportsFileSources?: boolean;
+```
+
+Defined in: packages/ai/src/activities/chat/adapter.ts:112
+
+Declares that this adapter can consume `{ type: 'file' }` content sources
+(provider Files API references). `chat()` rejects file sources in preflight
+for adapters that don't declare this, so an adapter written before the
+file arm existed fails closed instead of silently mis-mapping a reference
+onto its URL/data branch.

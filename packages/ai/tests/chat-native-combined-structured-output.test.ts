@@ -19,8 +19,8 @@ import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { chat } from '../src/activities/chat/index'
 import { EventType } from '../src/types'
-import { collectChunks, createMockAdapter } from './test-utils'
-import type { StreamChunk } from '../src/types'
+import { collectChunks, createMockAdapter, ev, serverTool } from './test-utils'
+import type { AdapterYieldChunk } from '../src/utilities/adapter-yield-chunk'
 
 const PersonSchema = z.object({
   name: z.string(),
@@ -30,7 +30,7 @@ type Person = z.infer<typeof PersonSchema>
 
 const validPerson: Person = { name: 'Jane Roe', age: 31 }
 
-function textTurn(json: string): Array<StreamChunk> {
+function textTurn(json: string): Array<AdapterYieldChunk> {
   const ts = Date.now()
   return [
     {
@@ -85,6 +85,7 @@ describe('chat({ outputSchema, stream: true }) — native combined mode (#605)',
     })
 
     const stream = chat({
+      threadId: 'thread-1',
       adapter,
       messages: [{ role: 'user', content: 'extract' }],
       outputSchema: PersonSchema,
@@ -110,6 +111,7 @@ describe('chat({ outputSchema, stream: true }) — native combined mode (#605)',
 
     const chunks = await collectChunks(
       chat({
+        threadId: 'thread-1',
         adapter,
         messages: [{ role: 'user', content: 'extract' }],
         outputSchema: PersonSchema,
@@ -154,6 +156,7 @@ describe('chat({ outputSchema, stream: true }) — native combined mode (#605)',
 
     const chunks = await collectChunks(
       chat({
+        threadId: 'thread-1',
         adapter,
         messages: [{ role: 'user', content: 'extract' }],
         outputSchema: PersonSchema,
@@ -165,6 +168,7 @@ describe('chat({ outputSchema, stream: true }) — native combined mode (#605)',
     const runFinished = chunks.filter((c) => c.type === EventType.RUN_FINISHED)
     expect(runStarted.length).toBe(1)
     expect(runFinished.length).toBe(1)
+    expect(chunks.at(-1)?.type).toBe(EventType.RUN_FINISHED)
   })
 
   it('Promise<T> path skips finalization and returns the validated typed value', async () => {
@@ -179,6 +183,7 @@ describe('chat({ outputSchema, stream: true }) — native combined mode (#605)',
     })
 
     const result = await chat({
+      threadId: 'thread-1',
       adapter,
       messages: [{ role: 'user', content: 'extract' }],
       outputSchema: PersonSchema,
@@ -199,11 +204,107 @@ describe('chat({ outputSchema, stream: true }) — native combined mode (#605)',
 
     await expect(
       chat({
+        threadId: 'thread-1',
         adapter,
         messages: [{ role: 'user', content: 'extract' }],
         outputSchema: PersonSchema,
       }),
     ).rejects.toThrow()
+  })
+
+  // #1426: a final turn cut off at the output cap is a truncation, not a
+  // schema failure, whether it holds partial JSON or no text at all.
+  it.each([
+    ['truncated JSON', '{"name":"Ja'],
+    ['no text', ''],
+  ])(
+    'reports finishReason=length as the token limit (%s)',
+    async (_label, json) => {
+      const turn = textTurn(json)
+        .filter((c) => json || c.type !== EventType.TEXT_MESSAGE_CONTENT)
+        .map((c) =>
+          c.type === EventType.RUN_FINISHED
+            ? { ...c, finishReason: 'length' as const }
+            : c,
+        )
+      const { adapter } = createMockAdapter({
+        iterations: [turn],
+        supportsCombinedToolsAndSchema: true,
+      })
+
+      const chunks = await collectChunks(
+        chat({
+          threadId: 'thread-1',
+          adapter,
+          messages: [{ role: 'user', content: 'extract' }],
+          outputSchema: PersonSchema,
+          stream: true,
+        }),
+      )
+
+      const runError = chunks.find((c) => c.type === EventType.RUN_ERROR) as
+        | { code?: string; message?: string }
+        | undefined
+      expect(runError?.code).toBe('max_tokens')
+      expect(runError?.message).toMatch(/maximum token limit was reached/)
+    },
+  )
+
+  it('ends with one RUN_ERROR when the output limit cuts a tool call', async () => {
+    const { adapter } = createMockAdapter({
+      iterations: [
+        [
+          ev.runStarted(),
+          ev.toolStart('call_1', 'lookup'),
+          ev.toolArgs('call_1', '{"q":'),
+          ev.runFinished('length'),
+        ],
+      ],
+      supportsCombinedToolsAndSchema: true,
+    })
+
+    const chunks = await collectChunks(
+      chat({
+        threadId: 'thread-1',
+        adapter,
+        messages: [{ role: 'user', content: 'extract' }],
+        tools: [serverTool('lookup', () => ({ found: true }))],
+        outputSchema: PersonSchema,
+        stream: true,
+      }),
+    )
+
+    const terminals = chunks.filter(
+      (c) =>
+        c.type === EventType.RUN_FINISHED || c.type === EventType.RUN_ERROR,
+    )
+    expect(terminals).toEqual([
+      expect.objectContaining({
+        type: EventType.RUN_ERROR,
+        code: 'max_tokens',
+      }),
+    ])
+  })
+
+  it('Promise<T> path puts the full raw text on the parse error (#1485)', async () => {
+    const one = JSON.stringify({ ...validPerson, name: 'x'.repeat(150) })
+    const raw = `${one}\n\n${one}`
+    const { adapter } = createMockAdapter({
+      iterations: [textTurn(raw)],
+      supportsCombinedToolsAndSchema: true,
+    })
+
+    const error = await chat({
+      threadId: 'thread-1',
+      adapter,
+      messages: [{ role: 'user', content: 'extract' }],
+      outputSchema: PersonSchema,
+    }).catch((e: unknown) => e)
+
+    expect(error).toMatchObject({
+      code: 'structured-output-parse-failed',
+      rawText: raw,
+    })
   })
 
   it('emits a RUN_ERROR on the streaming path when the final-turn text is not valid JSON', async () => {
@@ -214,6 +315,7 @@ describe('chat({ outputSchema, stream: true }) — native combined mode (#605)',
 
     const chunks = await collectChunks(
       chat({
+        threadId: 'thread-1',
         adapter,
         messages: [{ role: 'user', content: 'extract' }],
         outputSchema: PersonSchema,
@@ -226,6 +328,7 @@ describe('chat({ outputSchema, stream: true }) — native combined mode (#605)',
       | undefined
     expect(runError).toBeDefined()
     expect(runError!.code).toBe('structured-output-parse-failed')
+    expect(chunks.some((c) => c.type === EventType.RUN_FINISHED)).toBe(false)
 
     // No structured-output.complete on the parse-failure path.
     const complete = chunks.find(
@@ -287,6 +390,7 @@ describe('chat({ outputSchema, stream: true }) — native combined mode (#605)',
 
     await collectChunks(
       chat({
+        threadId: 'thread-1',
         adapter,
         messages: [{ role: 'user', content: 'extract' }],
         outputSchema: PersonSchema,

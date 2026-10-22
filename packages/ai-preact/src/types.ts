@@ -1,9 +1,19 @@
-import type { AnyClientTool, ModelMessage, SchemaInput } from '@tanstack/ai'
+import type {
+  AnyClientTool,
+  InterruptDefinition,
+  ModelMessage,
+  RunAgentResumeItem,
+  SchemaInput,
+} from '@tanstack/ai'
 import type {
   AIDevtoolsDisplayOptions,
+  BoundInterrupts,
   ChatClientOptions,
   ChatClientState,
+  ResolvableChatInterrupt,
+  ChatInterruptState,
   ChatRequestBody,
+  ChatResumeState,
   ClientContextOptionFromTools,
   ConnectionStatus,
   DistributedOmit,
@@ -44,14 +54,16 @@ export type {
  * All other callbacks (onResponse, onChunk, onFinish, onError) are
  * passed through to the underlying ChatClient and can be used for side effects.
  *
- * Note: Connection and body changes will recreate the ChatClient instance.
+ * Note: Connection changes will recreate the ChatClient instance.
  * To update these options, remount the component or use a key prop.
  */
 export type UseChatOptions<
   TTools extends ReadonlyArray<AnyClientTool> = any,
   TContext = InferredClientContext<TTools>,
+  TInterrupts extends ReadonlyArray<InterruptDefinition<any, any, any, any>> =
+    readonly [],
 > = DistributedOmit<
-  ChatClientOptions<TTools, TContext>,
+  ChatClientOptions<TTools, TContext, TInterrupts>,
   | 'onMessagesChange'
   | 'onLoadingChange'
   | 'onErrorChange'
@@ -59,7 +71,10 @@ export type UseChatOptions<
   | 'onSubscriptionChange'
   | 'onConnectionStatusChange'
   | 'onSessionGeneratingChange'
+  | 'onHydratingChange'
   | 'onQueueChange'
+  | 'onResumeStateChange'
+  | 'onRunIdChange'
   | 'context'
   | 'devtools'
 > & {
@@ -77,15 +92,19 @@ export type UseChatOptions<
 
 export interface UseChatReturn<
   TTools extends ReadonlyArray<AnyClientTool> = any,
+  TInterrupts extends ReadonlyArray<InterruptDefinition<any, any, any, any>> =
+    readonly [],
 > {
   /**
    * Current messages in the conversation
    */
-  messages: Array<UIMessage<TTools>>
+  messages: ReadonlyArray<UIMessage<TTools>>
 
   /**
    * Send a message and get a response.
    * Can be a simple string or multimodal content with images, audio, etc.
+   * Pass `{ whenBusy }` to override the queue policy for a single send, or
+   * `{ body }` to merge per-call JSON into this request's `forwardedProps`.
    */
   sendMessage: (
     content: string | MultimodalContent,
@@ -95,7 +114,7 @@ export interface UseChatReturn<
   /**
    * Pending messages queued while a stream is in flight.
    */
-  queue: Array<QueuedMessage>
+  queue: ReadonlyArray<QueuedMessage>
 
   /**
    * Cancel a queued message before it drains. No-op if already sent.
@@ -119,12 +138,34 @@ export interface UseChatReturn<
   }) => Promise<void>
 
   /**
-   * Respond to a tool approval request
+   * The id of the run this client has in flight — one it started or rejoined —
+   * or `null` when there is none (including while a run sits paused on an
+   * interrupt, waiting on approval).
+   *
+   * A run is one turn of the conversation, so this changes from turn to turn. A
+   * whole tool loop stays inside one run, while resuming after an interrupt
+   * continues the turn under a new id — so one user message can produce several
+   * run ids. Use it to talk to your own server about that run (cancel it, poll
+   * it, correlate a log line).
    */
-  addToolApprovalResponse: (response: {
-    id: string // approval.id, not toolCallId
-    approved: boolean
-  }) => Promise<void>
+  runId: string | null
+  interrupts: BoundInterrupts<TTools, TInterrupts>
+  interruptErrors: ChatInterruptState<TTools, TInterrupts>['interruptErrors']
+  resuming: boolean
+  resolveInterrupts: {
+    (approved: boolean): void
+    (
+      resolver: (
+        interrupt: ResolvableChatInterrupt<TTools, TInterrupts>,
+      ) => undefined,
+    ): void
+  }
+  cancelInterrupts: () => void
+  retryInterrupts: () => void
+  resumeInterruptsUnsafe: (
+    resume: Array<RunAgentResumeItem>,
+    state?: ChatResumeState,
+  ) => Promise<boolean>
 
   /**
    * Reload the last assistant message
@@ -142,6 +183,16 @@ export interface UseChatReturn<
   isLoading: boolean
 
   /**
+   * True when the last hydrate or older-page response said more messages exist.
+   */
+  hasOlderMessages: boolean
+
+  /**
+   * Fetch the next older window and put it in front of the painted messages.
+   */
+  loadOlderMessages: () => Promise<void>
+
+  /**
    * Current error, if any
    */
   error: Error | undefined
@@ -149,7 +200,7 @@ export interface UseChatReturn<
   /**
    * Set messages manually
    */
-  setMessages: (messages: Array<UIMessage<TTools>>) => void
+  setMessages: (messages: ReadonlyArray<UIMessage<TTools>>) => void
 
   /**
    * Clear all messages
@@ -178,4 +229,12 @@ export interface UseChatReturn<
    * activity visible to all subscribers (e.g. across tabs/devices).
    */
   sessionGenerating: boolean
+
+  /**
+   * Whether the chat is being rebuilt from persistence (the server hydrate, or
+   * an async storage adapter). While it is true, show a loading state instead
+   * of an empty chat. It turns false when the transcript is in place and any
+   * in-flight run is re-joined. From then on `isLoading` covers the stream.
+   */
+  isHydrating: boolean
 }

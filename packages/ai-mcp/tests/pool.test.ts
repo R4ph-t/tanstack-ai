@@ -1,11 +1,19 @@
 import { describe, expect, it } from 'vitest'
+import {
+  InMemoryTransport,
+  SUPPORTED_PROTOCOL_VERSIONS,
+} from '@modelcontextprotocol/client'
+import { Server } from '@modelcontextprotocol/server'
+import { DuplicateToolNameError } from '../src/errors'
 import { createMCPClients } from '../src/pool'
+import { inMemoryMCPEventStore } from '../src/events/memory-store'
+import { createTestEventsServer } from './helpers/events-server'
 import {
   makeServerWithMismatchedResource,
   makeServerWithResource,
   makeServerWithWeatherTool,
 } from './helpers/in-memory-server'
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import type { Transport } from '@modelcontextprotocol/client'
 
 describe('createMCPClients', () => {
   it('connects to many servers and flattens auto-prefixed tools', async () => {
@@ -18,6 +26,21 @@ describe('createMCPClients', () => {
     const names = (await pool.tools()).map((t) => t.name)
     expect(names).toContain('alpha_get_weather')
     expect(names).toContain('beta_get_weather') // no collision despite same server tool name
+  })
+
+  it('passes experimental_events through to each client', async () => {
+    const events = createTestEventsServer({ verify: 'skip' })
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair()
+    await events.server.connect(serverTransport)
+    await using pool = await createMCPClients({
+      a: {
+        transport: clientTransport,
+        experimental_events: { store: inMemoryMCPEventStore() },
+      },
+    })
+    const listed = await pool.clients.a!.experimental_events!.list()
+    expect(listed.map((item) => item.name)).toEqual(['incident.created'])
   })
 
   it('exposes typed per-server access via .clients', async () => {
@@ -169,4 +192,93 @@ describe('createMCPClients', () => {
     ).rejects.toThrow(/beta/)
     expect(alphaClosed).toBe(true)
   })
+
+  it('lists tools from a spec 2026 server and a spec 2025 server', async () => {
+    const modern = await makeModernWeatherTransport()
+    const legacy = await makeServerWithWeatherTool()
+    await using pool = await createMCPClients({
+      modern: { transport: modern },
+      legacy: { transport: legacy.clientTransport },
+    })
+    const names = (await pool.tools()).map((tool) => tool.name).sort()
+    expect(names).toEqual(['legacy_get_weather', 'modern_get_weather'])
+  })
+
+  it('names each server tools with its own toolName', async () => {
+    const a = await makeServerWithWeatherTool()
+    const b = await makeServerWithWeatherTool()
+    const alphaName = (tool: { name: string }) => `mcp__alpha__${tool.name}`
+    await using pool = await createMCPClients({
+      alpha: { transport: a.clientTransport, toolName: alphaName },
+      beta: {
+        transport: b.clientTransport,
+        toolName: (tool) => `mcp__beta__${tool.name}`,
+      },
+    })
+    const names = (await pool.tools()).map((tool) => tool.name).sort()
+    expect(names).toEqual(['mcp__alpha__get_weather', 'mcp__beta__get_weather'])
+    expect(pool.getServers().alpha).toStrictEqual({
+      transport: undefined,
+      prefix: 'alpha',
+      toolName: alphaName,
+    })
+  })
+
+  it('throws DuplicateToolNameError when toolName gives two servers one name', async () => {
+    const a = await makeServerWithWeatherTool()
+    const b = await makeServerWithWeatherTool()
+    await using pool = await createMCPClients({
+      alpha: { transport: a.clientTransport, toolName: (tool) => tool.name },
+      beta: { transport: b.clientTransport, toolName: (tool) => tool.name },
+    })
+    await expect(pool.tools()).rejects.toThrow(DuplicateToolNameError)
+  })
+
+  it('reports each server requestOptions on getServers()', async () => {
+    const a = await makeServerWithWeatherTool()
+    await using pool = await createMCPClients({
+      alpha: {
+        transport: a.clientTransport,
+        requestOptions: { timeout: 5000 },
+      },
+    })
+    expect(pool.getServers()).toStrictEqual({
+      alpha: {
+        transport: undefined,
+        prefix: 'alpha',
+        requestOptions: { timeout: 5000 },
+      },
+    })
+  })
 })
+
+// The server has no public setter for the negotiated era, so the test sets it.
+async function makeModernWeatherTransport() {
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair()
+  const server = new Server(
+    { name: 'modern-weather', version: '1.0.0' },
+    {
+      capabilities: { tools: {} },
+      supportedProtocolVersions: [...SUPPORTED_PROTOCOL_VERSIONS, '2026-07-28'],
+    },
+  )
+  Object.assign(server, { _negotiatedProtocolVersion: '2026-07-28' })
+  server.setRequestHandler('tools/list', () => ({
+    tools: [
+      {
+        name: 'get_weather',
+        description: 'Get weather for a city',
+        inputSchema: {
+          type: 'object',
+          properties: { city: { type: 'string' } },
+        },
+      },
+    ],
+  }))
+  server.setRequestHandler('tools/call', () => ({
+    content: [{ type: 'text' as const, text: 'Sunny' }],
+  }))
+  await server.connect(serverTransport)
+  return clientTransport
+}

@@ -1,13 +1,38 @@
-import { EventType, normalizeSystemPrompts } from '@tanstack/ai'
+import {
+  CONTEXT_OVERFLOW_CODE,
+  EventType,
+  isFileSource,
+  normalizeSystemPrompts,
+  unsupportedFileSourceError,
+} from '@tanstack/ai'
 import { BaseTextAdapter } from '@tanstack/ai/adapters'
 import {
+  getComputerUseToolMetadata,
+  hashToolCallId,
+  resolveReasoning,
   toRunErrorPayload,
+  toRetryAfterMs,
   toRunErrorRawEvent,
+  transformMessagesForReplay,
 } from '@tanstack/ai/adapter-internals'
 import { generateId } from '@tanstack/ai-utils'
-import { extractRequestOptions } from '../utils/request-options'
-import { makeStructuredOutputCompatible } from '../utils/schema-converter'
+import { clientFor, extractRequestOptions } from '../utils/request-options'
+import type { Fetch } from '../utils/request-options'
+import {
+  makeStructuredOutputCompatibleWithMap,
+  warnStrictFallback,
+} from '../utils/schema-converter'
+import { createToolInputNormalizer } from '../utils/tool-input-normalizer'
+import type {
+  OpenAIBaseTextAdapterOptions,
+  StructuredOutputCompatibility,
+} from '../utils/schema-converter'
 import { buildChatCompletionsUsage } from '../usage'
+import {
+  explicitJsonObject,
+  withJsonModePrompt,
+} from '../utils/json-object-mode'
+import { toChatCompletionsToolChoice } from '../tools/tool-choice'
 import { convertToolsToChatCompletionsFormat } from './chat-completions-tool-converter'
 import type OpenAI from 'openai'
 import type {
@@ -25,10 +50,19 @@ import type {
   DefaultMessageMetadataByModality,
   Modality,
   ModelMessage,
-  RunFinishedEvent,
-  StreamChunk,
+  AdapterYieldChunk,
+  ModelReasoning,
+  ReasoningCapability,
   TextOptions,
+  TokenUsage,
 } from '@tanstack/ai'
+
+type ChatStreamState = {
+  runId: string
+  threadId: string
+  messageId: string
+  hasEmittedRunStarted: boolean
+}
 
 /**
  * Shared implementation of the OpenAI Chat Completions API. Holds the
@@ -43,30 +77,79 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
   TMessageMetadata extends DefaultMessageMetadataByModality =
     DefaultMessageMetadataByModality,
   TToolCapabilities extends ReadonlyArray<string> = ReadonlyArray<string>,
+  TReasoning extends ReasoningCapability = never,
 > extends BaseTextAdapter<
   TModel,
   TProviderOptions,
   TInputModalities,
   TMessageMetadata,
-  TToolCapabilities
+  TToolCapabilities,
+  unknown,
+  never,
+  TReasoning
 > {
   override readonly kind = 'text' as const
+  override readonly api: string = 'openai-completions'
   readonly name: string
   protected client: OpenAI
 
-  constructor(model: TModel, name: string, client: OpenAI) {
+  private sourceMetadata(
+    model: string,
+    stopReason?: 'error' | 'aborted',
+  ): Record<string, unknown> {
+    return {
+      tanstack: {
+        source: { provider: this.provider ?? this.name, api: this.api, model },
+        ...(stopReason ? { stopReason } : {}),
+      },
+    }
+  }
+
+  /**
+   * Token usage for a Chat Completions response. `source` is the response or
+   * chunk that carried `usage`, so a subclass can read sibling fields.
+   */
+  protected chatCompletionsTokenUsage(
+    usage:
+      | OpenAI.Chat.Completions.ChatCompletion['usage']
+      | OpenAI.Chat.Completions.ChatCompletionChunk['usage']
+      | undefined
+      | null,
+    _source?: unknown,
+  ): TokenUsage | undefined {
+    return buildChatCompletionsUsage(usage)
+  }
+
+  /** See {@link OpenAIBaseTextAdapterOptions.strictFallbackWarning}. */
+  protected readonly strictFallbackWarning: boolean
+
+  /** The fetch that the adapter gave the client. */
+  private readonly baseFetch: Fetch | undefined
+
+  /**
+   * `options.fetch` must be the fetch that the client uses. A `wrapFetch`
+   * call wraps it.
+   */
+  constructor(
+    model: TModel,
+    name: string,
+    client: OpenAI,
+    options: OpenAIBaseTextAdapterOptions & { fetch?: Fetch | undefined } = {},
+  ) {
     super({}, model)
     this.name = name
     this.client = client
+    this.strictFallbackWarning = options.strictFallbackWarning ?? true
+    this.baseFetch = options.fetch
   }
 
   async *chatStream(
     options: TextOptions<TProviderOptions>,
-  ): AsyncIterable<StreamChunk> {
+  ): AsyncIterable<AdapterYieldChunk> {
     // AG-UI lifecycle tracking (mutable state object for ESLint compatibility)
     const aguiState = {
       runId: generateId(this.name),
-      threadId: options.threadId ?? generateId(this.name),
+      threadId: options.threadId,
       messageId: generateId(this.name),
       hasEmittedRunStarted: false,
     }
@@ -78,12 +161,24 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
       // other failure mode here — callers iterating chatStream then only need
       // one error-handling path instead of both a try/catch around iteration
       // and a RUN_ERROR handler.
+      const hasComputerTool = options.tools?.some(
+        (tool) => getComputerUseToolMetadata(tool) !== undefined,
+      )
+      if (hasComputerTool) {
+        throw new Error(
+          'Computer use needs the Responses API. The Chat Completions API has no computer tool.',
+        )
+      }
       const requestParams = this.mapOptionsToRequest(options)
       options.logger.request(
         `activity=chat provider=${this.name} model=${this.model} messages=${options.messages.length} tools=${options.tools?.length ?? 0} stream=true`,
         { provider: this.name, model: this.model },
       )
-      const stream = await this.client.chat.completions.create(
+      const stream = await clientFor(
+        this.client,
+        options,
+        this.baseFetch,
+      ).chat.completions.create(
         {
           ...requestParams,
           stream: true,
@@ -94,52 +189,126 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
 
       yield* this.processStreamChunks(stream, options, aguiState)
     } catch (error: unknown) {
-      // Narrow before logging: raw SDK errors can carry request metadata
-      // (including auth headers) which we must never surface to user loggers.
-      const errorPayload = toRunErrorPayload(
-        error,
-        `${this.name}.chatStream failed`,
-      )
-      const rawEvent = toRunErrorRawEvent(error)
+      yield* this.handleChatStreamError(error, options, aguiState, 'chatStream')
+    }
+  }
 
-      // Emit RUN_STARTED if not yet emitted
-      if (!aguiState.hasEmittedRunStarted) {
-        aguiState.hasEmittedRunStarted = true
-        yield {
-          type: EventType.RUN_STARTED,
-          runId: aguiState.runId,
-          threadId: aguiState.threadId,
-          model: options.model,
-          timestamp: Date.now(),
-          parentRunId: options.parentRunId,
-        }
-      }
+  private async *handleChatStreamError(
+    error: unknown,
+    options: TextOptions,
+    aguiState: ChatStreamState,
+    source: 'chatStream' | 'processStreamChunks',
+  ): AsyncIterable<AdapterYieldChunk> {
+    // Narrow before logging: raw SDK errors can carry request metadata
+    // (including auth headers) which we must never surface to user loggers.
+    const errorPayload = this.runErrorPayload(
+      error,
+      `${this.name}.${source} failed`,
+    )
+    const rawEvent = toRunErrorRawEvent(error)
+    const retryAfterMs = toRetryAfterMs(error)
 
-      // Emit AG-UI RUN_ERROR. Conditional `code` spread keeps the wire
-      // shape spec-compliant under `exactOptionalPropertyTypes`: AG-UI's
-      // `RunErrorEvent.code` is `string?` (absent vs explicit `undefined`
-      // matter), so we omit the key when there's no code.
+    if (!aguiState.hasEmittedRunStarted) {
+      aguiState.hasEmittedRunStarted = true
       yield {
-        type: EventType.RUN_ERROR,
+        type: EventType.RUN_STARTED,
+        metadata: this.sourceMetadata(options.model),
+        runId: aguiState.runId,
+        threadId: aguiState.threadId,
         model: options.model,
         timestamp: Date.now(),
-        message: errorPayload.message,
-        code: errorPayload.code,
-        // Forward the provider's structured error body so consumers can recover
-        // the upstream detail the `{ message, code }` payload drops. Omitted
-        // when the error carried no provider body (see toRunErrorRawEvent).
-        ...(rawEvent !== undefined && { rawEvent }),
-        error: {
-          message: errorPayload.message,
-          code: errorPayload.code,
-        },
+        parentRunId: options.parentRunId,
       }
-
-      options.logger.errors(`${this.name}.chatStream fatal`, {
-        error: errorPayload,
-        source: `${this.name}.chatStream`,
-      })
     }
+
+    const rejectedToolCall = this.extractRejectedToolCall(
+      rawEvent,
+      errorPayload.message,
+    )
+    if (rejectedToolCall) {
+      const toolCallId = generateId(this.name)
+      yield {
+        type: EventType.TOOL_CALL_START,
+        toolCallId,
+        toolCallName: rejectedToolCall.toolName,
+        parentMessageId: aguiState.messageId,
+        model: options.model,
+        timestamp: Date.now(),
+      }
+      yield {
+        type: EventType.TOOL_CALL_ARGS,
+        toolCallId,
+        delta: rejectedToolCall.arguments,
+        args: rejectedToolCall.arguments,
+        model: options.model,
+        timestamp: Date.now(),
+      }
+      yield {
+        type: EventType.TOOL_CALL_END,
+        toolCallId,
+        toolCallName: rejectedToolCall.toolName,
+        args: rejectedToolCall.arguments,
+        ...(rejectedToolCall.input !== undefined && {
+          input: rejectedToolCall.input,
+        }),
+        result: JSON.stringify({ error: rejectedToolCall.error }),
+        state: 'output-error',
+        model: options.model,
+        timestamp: Date.now(),
+      }
+      yield {
+        type: EventType.RUN_FINISHED,
+        runId: aguiState.runId,
+        threadId: aguiState.threadId,
+        model: options.model,
+        timestamp: Date.now(),
+        finishReason: 'tool_calls',
+      }
+      return
+    }
+
+    options.logger.errors(`${this.name}.${source} fatal`, {
+      error: errorPayload,
+      source: `${this.name}.${source}`,
+    })
+
+    yield {
+      type: EventType.RUN_ERROR,
+      metadata: this.sourceMetadata(
+        options.model,
+        this.isAbortError(error) ? 'aborted' : 'error',
+      ),
+      runId: aguiState.runId,
+      threadId: aguiState.threadId,
+      model: options.model,
+      timestamp: Date.now(),
+      message: errorPayload.message,
+      ...(errorPayload.code !== undefined && { code: errorPayload.code }),
+      ...(rawEvent !== undefined && { rawEvent }),
+      ...(retryAfterMs !== undefined && { retryAfterMs }),
+      error: {
+        message: errorPayload.message,
+        ...(errorPayload.code !== undefined && { code: errorPayload.code }),
+      },
+    }
+  }
+
+  /**
+   * Extracts a rejected tool call from a provider error. Returned calls are
+   * emitted as non-executable `output-error` results so the model can repair them.
+   */
+  protected extractRejectedToolCall(
+    _rawEvent: unknown,
+    _fallbackMessage: string,
+  ):
+    | {
+        toolName: string
+        arguments: string
+        input?: unknown
+        error: string
+      }
+    | undefined {
+    return undefined
   }
 
   /**
@@ -158,11 +327,13 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
     options: StructuredOutputOptions<TProviderOptions>,
   ): Promise<StructuredOutputResult<unknown>> {
     const { chatOptions, outputSchema } = options
-    const requestParams = this.mapOptionsToRequest(chatOptions)
-
-    const jsonSchema = this.makeStructuredOutputCompatible(
+    const jsonMode = this.usesJsonObject(chatOptions)
+    const requestParams = this.mapOptionsToRequest(
+      jsonMode ? withJsonModePrompt(chatOptions, outputSchema) : chatOptions,
+    )
+    const responseFormat = this.chatCompletionsResponseFormat(
+      jsonMode,
       outputSchema,
-      outputSchema.required,
     )
 
     try {
@@ -176,18 +347,15 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
         `activity=structuredOutput provider=${this.name} model=${this.model} messages=${chatOptions.messages.length}`,
         { provider: this.name, model: this.model },
       )
-      const response = await this.client.chat.completions.create(
+      const response = await clientFor(
+        this.client,
+        chatOptions,
+        this.baseFetch,
+      ).chat.completions.create(
         {
           ...cleanParams,
           stream: false,
-          response_format: {
-            type: 'json_schema',
-            json_schema: {
-              name: 'structured_output',
-              schema: jsonSchema,
-              strict: true,
-            },
-          },
+          response_format: responseFormat,
         },
         extractRequestOptions(chatOptions.request),
       )
@@ -196,7 +364,19 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
       // rather than letting it cascade into a JSON-parse error on '' — the
       // root cause (the model returned no content for the structured request)
       // is then visible in logs.
-      const rawText = response.choices[0]?.message.content
+      const choice = response.choices[0]
+
+      // A response cut off at the output cap is a truncated JSON document —
+      // or, for reasoning models, no content at all once the budget went to
+      // reasoning. Report it as truncation before the empty-content and
+      // parse errors, which would read like a schema failure (issue #1426).
+      if (choice?.finish_reason === 'length') {
+        throw new Error(
+          `${this.name}.structuredOutput: the response was cut off because the maximum token limit was reached (finish_reason=length); raise the output token limit (max_completion_tokens or max_tokens, depending on the provider)`,
+        )
+      }
+
+      const rawText = choice?.message.content
       if (typeof rawText !== 'string' || rawText.length === 0) {
         throw new Error(
           `${this.name}.structuredOutput: response contained no content`,
@@ -217,9 +397,15 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
       // from strict mode is undone by the engine, not here.
       const transformed = this.transformStructuredOutput(parsed)
 
+      // Surface usage so non-stream structured paths (and
+      // fallbackStructuredOutputStream) can forward tokens to middleware.
+      const usage = this.chatCompletionsTokenUsage(response.usage, response)
       return {
         data: transformed,
         rawText,
+        ...(response.id ? { responseId: response.id } : {}),
+        ...(response.model ? { model: response.model } : {}),
+        ...(usage && { usage }),
       }
     } catch (error: unknown) {
       // Narrow before logging: raw SDK errors can carry request metadata
@@ -243,21 +429,21 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
    */
   async *structuredOutputStream(
     options: StructuredOutputOptions<TProviderOptions>,
-  ): AsyncIterable<StreamChunk> {
+  ): AsyncIterable<AdapterYieldChunk> {
     const { chatOptions, outputSchema } = options
-    const requestParams = this.mapOptionsToRequest(chatOptions)
-
-    const jsonSchema = this.makeStructuredOutputCompatible(
+    const jsonMode = this.usesJsonObject(chatOptions)
+    const requestParams = this.mapOptionsToRequest(
+      jsonMode ? withJsonModePrompt(chatOptions, outputSchema) : chatOptions,
+    )
+    const responseFormat = this.chatCompletionsResponseFormat(
+      jsonMode,
       outputSchema,
-      outputSchema.required,
     )
 
-    const timestamp = Date.now()
     const aguiState = {
       runId: generateId(this.name),
-      threadId: chatOptions.threadId ?? generateId(this.name),
+      threadId: chatOptions.threadId,
       messageId: generateId(this.name),
-      timestamp,
       hasEmittedRunStarted: false,
     }
 
@@ -266,39 +452,33 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
     let hasEmittedTextMessageStart = false
     let reasoningMessageId: string | undefined
     let hasClosedReasoning = false
-    let stepId: string | undefined
     let lastModel: string | undefined
+    let lastResponseId: string | undefined
+    let finishReason: string | null = null
     let lastUsage:
       | OpenAI.Chat.Completions.ChatCompletionChunk['usage']
       | undefined
+    let lastUsageSource: unknown
 
     const closeReasoningLifecycle = function* (this: {
       name: string
-    }): Generator<StreamChunk> {
+    }): Generator<AdapterYieldChunk> {
       if (reasoningMessageId && !hasClosedReasoning) {
         hasClosedReasoning = true
         yield {
           type: EventType.REASONING_MESSAGE_END,
           messageId: reasoningMessageId,
           model: lastModel || chatOptions.model,
-          timestamp,
+          timestamp: Date.now(),
         }
         yield {
           type: EventType.REASONING_END,
           messageId: reasoningMessageId,
           model: lastModel || chatOptions.model,
-          timestamp,
+          timestamp: Date.now(),
         }
-        if (stepId) {
-          yield {
-            type: EventType.STEP_FINISHED,
-            stepName: stepId,
-            stepId,
-            model: lastModel || chatOptions.model,
-            timestamp,
-            content: accumulatedReasoning,
-          }
-        }
+        reasoningMessageId = undefined
+        hasClosedReasoning = false
       }
     }.bind(this)
 
@@ -318,30 +498,28 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
         { provider: this.name, model: this.model },
       )
 
-      const stream = await this.client.chat.completions.create(
+      const stream = await clientFor(
+        this.client,
+        chatOptions,
+        this.baseFetch,
+      ).chat.completions.create(
         {
           ...cleanParams,
           stream: true,
           stream_options: { include_usage: true },
-          response_format: {
-            type: 'json_schema',
-            json_schema: {
-              name: 'structured_output',
-              schema: jsonSchema,
-              strict: true,
-            },
-          },
+          response_format: responseFormat,
         },
         extractRequestOptions(chatOptions.request),
       )
 
       for await (const chunk of stream) {
-        const choiceForLog = chunk.choices[0]
+        const choiceForLog = chunk.choices?.[0]
         chatOptions.logger.provider(
           `provider=${this.name} finish_reason=${choiceForLog?.finish_reason ?? 'none'} hasContent=${!!choiceForLog?.delta.content} hasUsage=${!!chunk.usage}`,
           { provider: this.name, model: chunk.model },
         )
 
+        if (chunk.id) lastResponseId = chunk.id
         if (chunk.model) lastModel = chunk.model
 
         // Usage may arrive on a chunk with empty `choices` (OpenAI's
@@ -351,16 +529,20 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
         const usage =
           chunk.usage ??
           (chunk as { x_groq?: { usage?: typeof chunk.usage } }).x_groq?.usage
-        if (usage) lastUsage = usage
+        if (usage) {
+          lastUsage = usage
+          lastUsageSource = chunk
+        }
 
         if (!aguiState.hasEmittedRunStarted) {
           aguiState.hasEmittedRunStarted = true
           yield {
             type: EventType.RUN_STARTED,
+            metadata: this.sourceMetadata(chatOptions.model),
             runId: aguiState.runId,
             threadId: aguiState.threadId,
             model: chunk.model || chatOptions.model,
-            timestamp,
+            timestamp: Date.now(),
             parentRunId: chatOptions.parentRunId,
           }
         }
@@ -370,27 +552,18 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
         if (reasoning && reasoning.text) {
           if (!reasoningMessageId) {
             reasoningMessageId = generateId(this.name)
-            stepId = generateId(this.name)
             yield {
               type: EventType.REASONING_START,
               messageId: reasoningMessageId,
               model: chunk.model || chatOptions.model,
-              timestamp,
+              timestamp: Date.now(),
             }
             yield {
               type: EventType.REASONING_MESSAGE_START,
               messageId: reasoningMessageId,
               role: 'reasoning' as const,
               model: chunk.model || chatOptions.model,
-              timestamp,
-            }
-            yield {
-              type: EventType.STEP_STARTED,
-              stepName: stepId,
-              stepId,
-              model: chunk.model || chatOptions.model,
-              timestamp,
-              stepType: 'thinking',
+              timestamp: Date.now(),
             }
           }
           accumulatedReasoning += reasoning.text
@@ -399,12 +572,13 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
             messageId: reasoningMessageId,
             delta: reasoning.text,
             model: chunk.model || chatOptions.model,
-            timestamp,
+            timestamp: Date.now(),
           }
         }
 
-        const choice = chunk.choices[0]
+        const choice = chunk.choices?.[0]
         if (!choice) continue
+        if (choice.finish_reason) finishReason = choice.finish_reason
 
         const deltaContent = choice.delta.content
         if (deltaContent) {
@@ -416,7 +590,7 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
               type: EventType.TEXT_MESSAGE_START,
               messageId: aguiState.messageId,
               model: chunk.model || chatOptions.model,
-              timestamp,
+              timestamp: Date.now(),
               role: 'assistant',
             }
           }
@@ -427,7 +601,7 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
             type: EventType.TEXT_MESSAGE_CONTENT,
             messageId: aguiState.messageId,
             model: chunk.model || chatOptions.model,
-            timestamp,
+            timestamp: Date.now(),
             delta: deltaContent,
             content: accumulatedContent,
           }
@@ -444,16 +618,34 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
           type: EventType.TEXT_MESSAGE_END,
           messageId: aguiState.messageId,
           model: lastModel || chatOptions.model,
-          timestamp,
+          timestamp: Date.now(),
         }
+      }
+
+      // Same truncation check as `structuredOutput()`: report the token limit
+      // before the empty-content and parse errors (issue #1426).
+      if (finishReason === 'length') {
+        const message = `${this.name}.structuredOutputStream: the response was cut off because the maximum token limit was reached (finish_reason=length); raise the output token limit (max_completion_tokens or max_tokens, depending on the provider)`
+        yield {
+          type: EventType.RUN_ERROR,
+          metadata: this.sourceMetadata(chatOptions.model),
+          runId: aguiState.runId,
+          model: lastModel || chatOptions.model,
+          timestamp: Date.now(),
+          message,
+          code: 'max_tokens',
+          error: { message, code: 'max_tokens' },
+        }
+        return
       }
 
       if (accumulatedContent.length === 0) {
         yield {
           type: EventType.RUN_ERROR,
+          metadata: this.sourceMetadata(chatOptions.model),
           runId: aguiState.runId,
           model: lastModel || chatOptions.model,
-          timestamp,
+          timestamp: Date.now(),
           message: `${this.name}.structuredOutputStream: response contained no content`,
           code: 'empty-response',
           error: {
@@ -470,9 +662,10 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
       } catch {
         yield {
           type: EventType.RUN_ERROR,
+          metadata: this.sourceMetadata(chatOptions.model),
           runId: aguiState.runId,
           model: lastModel || chatOptions.model,
-          timestamp,
+          timestamp: Date.now(),
           message: `Failed to parse structured output as JSON. Content: ${accumulatedContent.slice(0, 200)}${accumulatedContent.length > 200 ? '...' : ''}`,
           code: 'parse-error',
           error: {
@@ -494,18 +687,19 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
           ...(accumulatedReasoning ? { reasoning: accumulatedReasoning } : {}),
         },
         model: lastModel || chatOptions.model,
-        timestamp,
+        timestamp: Date.now(),
       }
 
       yield {
         type: EventType.RUN_FINISHED,
+        ...(lastResponseId ? { responseId: lastResponseId } : {}),
         runId: aguiState.runId,
         threadId: aguiState.threadId,
         model: lastModel || chatOptions.model,
-        timestamp,
+        timestamp: Date.now(),
         finishReason: 'stop',
         ...(lastUsage && {
-          usage: buildChatCompletionsUsage(lastUsage),
+          usage: this.chatCompletionsTokenUsage(lastUsage, lastUsageSource),
         }),
       }
     } catch (error: unknown) {
@@ -513,16 +707,17 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
         aguiState.hasEmittedRunStarted = true
         yield {
           type: EventType.RUN_STARTED,
+          metadata: this.sourceMetadata(chatOptions.model),
           runId: aguiState.runId,
           threadId: aguiState.threadId,
           model: chatOptions.model,
-          timestamp,
+          timestamp: Date.now(),
           parentRunId: chatOptions.parentRunId,
         }
       }
 
       const isAbort = this.isAbortError(error)
-      const errorPayload = toRunErrorPayload(
+      const errorPayload = this.runErrorPayload(
         error,
         `${this.name}.structuredOutputStream failed`,
       )
@@ -534,9 +729,13 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
       const rawEvent = isAbort ? undefined : toRunErrorRawEvent(error)
       yield {
         type: EventType.RUN_ERROR,
+        metadata: this.sourceMetadata(
+          chatOptions.model,
+          isAbort ? 'aborted' : 'error',
+        ),
         runId: aguiState.runId,
         model: lastModel || chatOptions.model,
-        timestamp,
+        timestamp: Date.now(),
         message: errorPayload.message,
         ...(resolvedCode !== undefined && { code: resolvedCode }),
         ...(rawEvent !== undefined && { rawEvent }),
@@ -551,6 +750,32 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
         source: `${this.name}.structuredOutputStream`,
       })
     }
+  }
+
+  /**
+   * `toRunErrorPayload`, with `code` set to `CONTEXT_OVERFLOW_CODE` when the
+   * provider says the input does not fit in the model's context window.
+   */
+  protected runErrorPayload(
+    error: unknown,
+    fallbackMessage: string,
+  ): { message: string; code: string | undefined } {
+    const payload = toRunErrorPayload(error, fallbackMessage)
+    return this.isContextOverflow(payload)
+      ? { ...payload, code: CONTEXT_OVERFLOW_CODE }
+      : payload
+  }
+
+  /**
+   * True when a provider error says the input does not fit in the context
+   * window. OpenAI sends `code: 'context_length_exceeded'`. Override this for
+   * a provider that reports it another way.
+   */
+  protected isContextOverflow(error: {
+    message: string
+    code: string | undefined
+  }): boolean {
+    return error.code === 'context_length_exceeded'
   }
 
   /**
@@ -570,14 +795,78 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
   }
 
   /**
+   * Strict conversion plus the inverse null-widening map for this request.
+   * Override this when schema conversion changes, so tool-input undo matches
+   * the wire schema.
+   */
+  protected makeStructuredOutputCompatibleWithMap(
+    schema: Record<string, any>,
+    originalRequired?: Array<string>,
+  ): StructuredOutputCompatibility {
+    return makeStructuredOutputCompatibleWithMap(schema, originalRequired)
+  }
+
+  /**
    * Applies provider-specific transformations for structured output compatibility.
-   * Override this in subclasses to handle provider-specific quirks.
+   * Override `makeStructuredOutputCompatibleWithMap` when you need the inverse map
+   * to match the wire schema.
    */
   protected makeStructuredOutputCompatible(
     schema: Record<string, any>,
     originalRequired?: Array<string>,
   ): Record<string, any> {
-    return makeStructuredOutputCompatible(schema, originalRequired)
+    return this.makeStructuredOutputCompatibleWithMap(schema, originalRequired)
+      .schema
+  }
+
+  /**
+   * `true` when this model takes `json_object` and rejects strict
+   * `json_schema`. Subclasses answer from their model catalog. Default `false`.
+   */
+  protected modelPrefersJsonObject(_model: string): boolean {
+    return false
+  }
+
+  /** JSON mode when `modelOptions` sets it or the model catalog needs it. */
+  protected usesJsonObject(options: {
+    model: string
+    modelOptions?: unknown
+  }): boolean {
+    return (
+      explicitJsonObject(options.modelOptions) ||
+      this.modelPrefersJsonObject(options.model)
+    )
+  }
+
+  protected chatCompletionsResponseFormat(
+    jsonMode: boolean,
+    schema: Record<string, any>,
+  ):
+    | { type: 'json_object' }
+    | {
+        type: 'json_schema'
+        json_schema: {
+          name: string
+          schema: Record<string, any>
+          strict: true
+        }
+      } {
+    if (jsonMode) {
+      return { type: 'json_object' }
+    }
+    return {
+      type: 'json_schema',
+      json_schema: {
+        name: 'structured_output',
+        schema: this.makeStructuredOutputCompatible(
+          schema,
+          Array.isArray(schema.required)
+            ? (schema.required as Array<string>)
+            : undefined,
+        ),
+        strict: true,
+      },
+    }
   }
 
   /**
@@ -613,16 +902,17 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
   protected async *processStreamChunks(
     stream: AsyncIterable<ChatCompletionChunk>,
     options: TextOptions,
-    aguiState: {
-      runId: string
-      threadId: string
-      messageId: string
-      hasEmittedRunStarted: boolean
-    },
-  ): AsyncIterable<StreamChunk> {
+    aguiState: ChatStreamState,
+  ): AsyncIterable<AdapterYieldChunk> {
+    const normalizeToolInput = createToolInputNormalizer(
+      options.tools,
+      (schema, required) =>
+        this.makeStructuredOutputCompatibleWithMap(schema, required),
+    )
     let accumulatedContent = ''
     let hasEmittedTextMessageStart = false
     let lastModel: string | undefined
+    let lastResponseId: string | undefined
     // Track usage from any chunk that carries it. With
     // `stream_options: { include_usage: true }` OpenAI emits a terminal chunk
     // whose `choices` is `[]` and only the `usage` field is populated; the
@@ -630,6 +920,8 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
     // therefore defer RUN_FINISHED until the iterator is exhausted so we can
     // pick up usage from the trailing chunk regardless of arrival order.
     let lastUsage: ChatCompletionChunk['usage'] | undefined
+    let lastUsageSource: unknown
+    let endsWithUsageOnlyChunk = false
     let pendingFinishReason:
       | ChatCompletionChunk['choices'][number]['finish_reason']
       | undefined
@@ -644,17 +936,14 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
         started: boolean // Track if TOOL_CALL_START has been emitted
       }
     >()
+    // Resolved index plus accumulated id and name. Used when a later delta omits index.
+    let latestToolCall: { index: number; id: string; name: string } | undefined
 
     // Reasoning lifecycle (driven by extractReasoning() hook — see method
     // docs). The base wire format (OpenAI Chat Completions) has no reasoning,
     // so these stay unused for openai/grok/groq. OpenRouter etc. opt in.
     let reasoningMessageId: string | undefined
     let hasClosedReasoning = false
-    // Legacy STEP_STARTED/STEP_FINISHED pair emitted alongside REASONING_*
-    // for back-compat with consumers (UI, devtools) that haven't migrated
-    // to the spec REASONING_* events yet.
-    let stepId: string | undefined
-    let accumulatedReasoning = ''
     // Track whether ANY tool call lifecycle was actually completed across the
     // entire stream. Lets us downgrade a `tool_calls` finish_reason to `stop`
     // when the upstream signalled tool calls but never produced a complete
@@ -665,7 +954,8 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
 
     try {
       for await (const chunk of stream) {
-        const choiceForLog = chunk.choices[0]
+        endsWithUsageOnlyChunk = !chunk.choices?.length && chunk.usage != null
+        const choiceForLog = chunk.choices?.[0]
         options.logger.provider(
           `provider=${this.name} finish_reason=${choiceForLog?.finish_reason ?? 'none'} hasContent=${!!choiceForLog?.delta.content} hasToolCalls=${!!choiceForLog?.delta.tool_calls} hasUsage=${!!chunk.usage}`,
           { provider: this.name, model: chunk.model },
@@ -675,7 +965,9 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
         // chunk emitted when `stream_options.include_usage` is on).
         if (chunk.usage) {
           lastUsage = chunk.usage
+          lastUsageSource = chunk
         }
+        if (chunk.id) lastResponseId = chunk.id
         if (chunk.model) {
           lastModel = chunk.model
         }
@@ -690,6 +982,7 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
           aguiState.hasEmittedRunStarted = true
           yield {
             type: EventType.RUN_STARTED,
+            metadata: this.sourceMetadata(options.model),
             runId: aguiState.runId,
             threadId: aguiState.threadId,
             model: chunk.model || options.model,
@@ -706,7 +999,6 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
         if (reasoning && reasoning.text) {
           if (!reasoningMessageId) {
             reasoningMessageId = generateId(this.name)
-            stepId = generateId(this.name)
             yield {
               type: EventType.REASONING_START,
               messageId: reasoningMessageId,
@@ -720,18 +1012,7 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
               model: chunk.model || options.model,
               timestamp: Date.now(),
             }
-            // Legacy STEP_STARTED (single emission, paired with the
-            // STEP_FINISHED below when reasoning closes).
-            yield {
-              type: EventType.STEP_STARTED,
-              stepName: stepId,
-              stepId,
-              model: chunk.model || options.model,
-              timestamp: Date.now(),
-              stepType: 'thinking',
-            }
           }
-          accumulatedReasoning += reasoning.text
           yield {
             type: EventType.REASONING_MESSAGE_CONTENT,
             messageId: reasoningMessageId,
@@ -741,13 +1022,21 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
           }
         }
 
-        const choice = chunk.choices[0]
+        const choice = chunk.choices?.[0]
 
         if (!choice) continue
 
         const delta = choice.delta
-        const deltaContent = delta.content
+        const deltaContent: unknown = delta.content
         const deltaToolCalls = delta.tool_calls
+
+        // Fail loud on a non-string content. Text would show it as
+        // "[object Object]".
+        if (deltaContent != null && typeof deltaContent !== 'string') {
+          throw new Error(
+            `invalid choices[0].delta.content: expected a string, null, or an omitted field; received ${Array.isArray(deltaContent) ? 'an array' : 'an object'}`,
+          )
+        }
 
         // Handle content delta
         if (deltaContent) {
@@ -766,16 +1055,6 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
               messageId: reasoningMessageId,
               model: chunk.model || options.model,
               timestamp: Date.now(),
-            }
-            if (stepId) {
-              yield {
-                type: EventType.STEP_FINISHED,
-                stepName: stepId,
-                stepId,
-                model: chunk.model || options.model,
-                timestamp: Date.now(),
-                content: accumulatedReasoning,
-              }
             }
           }
 
@@ -807,7 +1086,38 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
         // Handle tool calls - they come in as deltas
         if (deltaToolCalls) {
           for (const toolCallDelta of deltaToolCalls) {
-            const index = toolCallDelta.index
+            // Some providers omit `index`. A missing index starts the next call
+            // when the id differs and the latest call already has an id, when
+            // an id arrives with a different name while the latest id is still
+            // empty, or when a name with no id differs from the latest name.
+            // ponytail: two calls of the same tool, both name-first and with no
+            // id, still share a slot. An index or an id is required to split them.
+            const deltaName = toolCallDelta.function?.name
+            const startsNext =
+              latestToolCall !== undefined &&
+              ((!!toolCallDelta.id &&
+                !!latestToolCall.id &&
+                toolCallDelta.id !== latestToolCall.id) ||
+                (!!toolCallDelta.id &&
+                  !latestToolCall.id &&
+                  !!deltaName &&
+                  !!latestToolCall.name &&
+                  deltaName !== latestToolCall.name) ||
+                (!toolCallDelta.id &&
+                  !!deltaName &&
+                  !!latestToolCall.name &&
+                  deltaName !== latestToolCall.name))
+            let index =
+              typeof toolCallDelta.index === 'number'
+                ? toolCallDelta.index
+                : latestToolCall === undefined
+                  ? 0
+                  : startsNext
+                    ? latestToolCall.index + 1
+                    : latestToolCall.index
+            if (typeof toolCallDelta.index !== 'number' && startsNext) {
+              while (toolCallsInProgress.has(index)) index += 1
+            }
 
             // Initialize or update the tool call in progress
             let toolCall = toolCallsInProgress.get(index)
@@ -828,6 +1138,11 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
             if (toolCallDelta.function?.name) {
               toolCall.name = toolCallDelta.function.name
             }
+            latestToolCall = {
+              index,
+              id: toolCall.id,
+              name: toolCall.name,
+            }
             if (toolCallDelta.function?.arguments) {
               toolCall.arguments += toolCallDelta.function.arguments
             }
@@ -839,7 +1154,6 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
                 type: EventType.TOOL_CALL_START,
                 toolCallId: toolCall.id,
                 toolCallName: toolCall.name,
-                toolName: toolCall.name,
                 parentMessageId: aguiState.messageId,
                 model: chunk.model || options.model,
                 timestamp: Date.now(),
@@ -878,18 +1192,17 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
               // upstream never sent both id and name.
               if (!toolCall.started) continue
 
-              // Parse arguments for TOOL_CALL_END. Surface parse failures via
-              // the logger so a model emitting malformed JSON for tool args
-              // is debuggable instead of silently invoking the tool with {}.
-              // Non-object JSON (e.g. a bare string or number) is also coerced
-              // to {} so downstream tool execution doesn't receive a primitive
-              // input, mirroring the Responses adapter's guard.
+              // Leave malformed arguments for the core's tool-error handling.
+              // An undefined input preserves the accumulated argument string.
+              // Non-object JSON still normalizes to {}.
               let parsedInput: unknown = {}
               if (toolCall.arguments) {
                 try {
                   const parsed: unknown = JSON.parse(toolCall.arguments)
-                  parsedInput =
-                    parsed && typeof parsed === 'object' ? parsed : {}
+                  parsedInput = normalizeToolInput(
+                    toolCall.name,
+                    parsed && typeof parsed === 'object' ? parsed : {},
+                  )
                 } catch (parseError) {
                   options.logger.errors(
                     `${this.name}.processStreamChunks tool-args JSON parse failed`,
@@ -904,7 +1217,7 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
                       rawArguments: toolCall.arguments,
                     },
                   )
-                  parsedInput = {}
+                  parsedInput = undefined
                 }
               }
 
@@ -913,10 +1226,10 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
                 type: EventType.TOOL_CALL_END,
                 toolCallId: toolCall.id,
                 toolCallName: toolCall.name,
-                toolName: toolCall.name,
                 model: chunk.model || options.model,
                 timestamp: Date.now(),
-                input: parsedInput,
+                args: toolCall.arguments,
+                ...(parsedInput !== undefined && { input: parsedInput }),
               }
               emittedAnyToolCallEnd = true
             }
@@ -943,11 +1256,8 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
         }
       }
 
-      // Emit a single terminal RUN_FINISHED after the iterator is exhausted.
-      // This both delivers accurate token counts (the trailing usage chunk
-      // may arrive AFTER the finish_reason chunk) and gives consumers a
-      // guaranteed terminal event even when the upstream cuts off mid-stream
-      // (no finish_reason chunk ever arrives).
+      // Drain lifecycles before classifying the exhausted stream. Waiting for
+      // EOF also preserves usage that arrives after the finish_reason chunk.
       if (aguiState.hasEmittedRunStarted) {
         // Close any started tool calls that never got finish_reason. A
         // truncated stream that emitted TOOL_CALL_START but never reached
@@ -960,12 +1270,12 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
           if (toolCall.arguments) {
             try {
               const parsed: unknown = JSON.parse(toolCall.arguments)
-              parsedInput = parsed && typeof parsed === 'object' ? parsed : {}
+              parsedInput = normalizeToolInput(
+                toolCall.name,
+                parsed && typeof parsed === 'object' ? parsed : {},
+              )
             } catch (parseError) {
-              // Mirror the finish_reason path's logger call — a truncated
-              // stream emitting malformed tool-call JSON would otherwise
-              // silently invoke the tool with `{}`, the exact failure the
-              // finish_reason logger was added to prevent.
+              // Preserve malformed arguments for the core, as on finish_reason.
               options.logger.errors(
                 `${this.name}.processStreamChunks tool-args JSON parse failed (drain)`,
                 {
@@ -979,17 +1289,17 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
                   rawArguments: toolCall.arguments,
                 },
               )
-              parsedInput = {}
+              parsedInput = undefined
             }
           }
           yield {
             type: EventType.TOOL_CALL_END,
             toolCallId: toolCall.id,
             toolCallName: toolCall.name,
-            toolName: toolCall.name,
             model: lastModel || options.model,
             timestamp: Date.now(),
-            input: parsedInput,
+            args: toolCall.arguments,
+            ...(parsedInput !== undefined && { input: parsedInput }),
           }
           pendingToolCount += 1
           emittedAnyToolCallEnd = true
@@ -1023,80 +1333,106 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
             model: lastModel || options.model,
             timestamp: Date.now(),
           }
-          if (stepId) {
-            yield {
-              type: EventType.STEP_FINISHED,
-              stepName: stepId,
-              stepId,
-              model: lastModel || options.model,
-              timestamp: Date.now(),
-              content: accumulatedReasoning,
-            }
+        }
+
+        // Preserve the historical usage-only tail fallback. The SDK consumes
+        // [DONE], so this compatibility path cannot verify that marker.
+        if (!pendingFinishReason && !endsWithUsageOnlyChunk) {
+          const message =
+            'Chat Completions stream ended without a finish_reason or usage-only tail'
+          yield {
+            type: EventType.RUN_ERROR,
+            metadata: this.sourceMetadata(options.model),
+            runId: aguiState.runId,
+            model: lastModel || options.model,
+            timestamp: Date.now(),
+            message,
+            code: 'incomplete-stream',
+            error: { message, code: 'incomplete-stream' },
           }
+          return
+        }
+
+        // An unknown finish_reason must not end the run as a success.
+        if (
+          pendingFinishReason &&
+          ![
+            'stop',
+            'length',
+            'content_filter',
+            'tool_calls',
+            'function_call',
+          ].includes(pendingFinishReason)
+        ) {
+          const message = `Provider finish_reason: ${pendingFinishReason}`
+          yield {
+            type: EventType.RUN_ERROR,
+            metadata: this.sourceMetadata(options.model),
+            runId: aguiState.runId,
+            model: lastModel || options.model,
+            timestamp: Date.now(),
+            message,
+            error: { message },
+          }
+          return
         }
 
         // Map upstream finish_reason to AG-UI's narrower vocabulary.
         // Collapsing length / content_filter to 'stop' would hide why the
-        // run terminated — surface it instead. Use `tool_calls` only when
-        // a TOOL_CALL_END was actually emitted: an upstream that signalled
-        // `tool_calls` but never produced a started/ended pair must NOT
-        // surface `tool_calls` here, since downstream consumers wait for
-        // tool results that would never arrive. OpenAI's legacy
-        // `function_call` value (from the v1 function-calling API) is
-        // normalized to `tool_calls` — semantically the same termination.
-        const finishReason: NonNullable<RunFinishedEvent['finishReason']> =
-          emittedAnyToolCallEnd
-            ? 'tool_calls'
-            : pendingFinishReason === 'tool_calls'
-              ? 'stop'
-              : pendingFinishReason === 'function_call'
-                ? 'tool_calls'
-                : (pendingFinishReason ?? 'stop')
+        // run terminated — surface it instead. A tool call cut off by
+        // `length` still emits TOOL_CALL_END (so the lifecycle balances),
+        // but that must not win over `length`: the core would treat the
+        // unfinished arguments as a parse error and call the model again.
+        // Use `tool_calls` only when a TOOL_CALL_END was actually emitted:
+        // an upstream that signalled `tool_calls` but never produced a
+        // started/ended pair must NOT surface `tool_calls` here, since
+        // downstream consumers wait for tool results that would never
+        // arrive. OpenAI's legacy `function_call` value (from the v1
+        // function-calling API) is normalized to `tool_calls`.
+        const finishReason: NonNullable<AdapterYieldChunk['finishReason']> =
+          pendingFinishReason === 'length'
+            ? 'length'
+            : emittedAnyToolCallEnd
+              ? 'tool_calls'
+              : pendingFinishReason === 'tool_calls'
+                ? 'stop'
+                : pendingFinishReason === 'function_call'
+                  ? 'tool_calls'
+                  : (pendingFinishReason ?? 'stop')
 
         // Conditional `usage` spread: AG-UI's `RunFinishedEvent.usage` is
         // optional with no `| undefined`; omit the key entirely when no usage
         // arrived rather than emitting `usage: undefined`.
         yield {
           type: EventType.RUN_FINISHED,
+          ...(lastResponseId ? { responseId: lastResponseId } : {}),
           runId: aguiState.runId,
           threadId: aguiState.threadId,
           model: lastModel || options.model,
           timestamp: Date.now(),
           ...(lastUsage && {
-            usage: buildChatCompletionsUsage(lastUsage),
+            usage: this.chatCompletionsTokenUsage(lastUsage, lastUsageSource),
           }),
           finishReason,
         }
       }
     } catch (error: unknown) {
-      // Narrow before logging: raw SDK errors can carry request metadata
-      // (including auth headers) which we must never surface to user loggers.
-      const errorPayload = toRunErrorPayload(
+      yield* this.handleChatStreamError(
         error,
-        `${this.name}.processStreamChunks failed`,
+        options,
+        aguiState,
+        'processStreamChunks',
       )
-      const rawEvent = toRunErrorRawEvent(error)
-      options.logger.errors(`${this.name}.processStreamChunks fatal`, {
-        error: errorPayload,
-        source: `${this.name}.processStreamChunks`,
-      })
-
-      // Emit AG-UI RUN_ERROR with conditional `code` spread (see chatStream's
-      // catch block for the rationale). `rawEvent` carries the provider's
-      // structured error body when present.
-      yield {
-        type: EventType.RUN_ERROR,
-        model: options.model,
-        timestamp: Date.now(),
-        message: errorPayload.message,
-        ...(errorPayload.code !== undefined && { code: errorPayload.code }),
-        ...(rawEvent !== undefined && { rawEvent }),
-        error: {
-          message: errorPayload.message,
-          ...(errorPayload.code !== undefined && { code: errorPayload.code }),
-        },
-      }
     }
+  }
+
+  /**
+   * The model's reasoning data for `chat({ reasoning })`. The default is
+   * none, so the base sends no reasoning field. A subclass returns the
+   * model's entry from the reasoning map in its `model-meta.ts`.
+   */
+  protected modelReasoning(_model: string): ModelReasoning | undefined {
+    return undefined
   }
 
   /**
@@ -1106,6 +1442,9 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
   protected mapOptionsToRequest(
     options: TextOptions,
   ): ChatCompletionCreateParamsStreaming {
+    if (this.strictFallbackWarning) {
+      warnStrictFallback(options.tools, options.logger)
+    }
     const tools = options.tools
       ? convertToolsToChatCompletionsFormat(
           options.tools,
@@ -1125,10 +1464,58 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
       })
     }
 
-    // Convert messages
-    for (const message of options.messages) {
+    // History from another model loses its signatures, and its tool IDs are
+    // rewritten to a shape this API accepts. Each call stays paired.
+    const replay = transformMessagesForReplay(
+      options.messages,
+      {
+        provider: this.provider ?? this.name,
+        api: this.api,
+        model: options.model,
+      },
+      (id, { attempt }) => {
+        if (attempt > 0) {
+          const hash = hashToolCallId(`${id}:${attempt}`).slice(0, 8)
+          return `${
+            id
+              .split('|')[0]
+              ?.replace(/[^a-zA-Z0-9_-]/g, '_')
+              .slice(0, 31) || 'call'
+          }_${hash}`
+        }
+        if (id.includes('|')) {
+          const separator = id.indexOf('|')
+          const call = id.slice(0, separator).replace(/[^a-zA-Z0-9_-]/g, '_')
+          const item = id.slice(separator + 1).replace(/[^a-zA-Z0-9_-]/g, '_')
+          const combined = item ? `${call}_${item}` : call
+          return combined.length <= 40
+            ? combined
+            : `${call.slice(0, 31)}_${hashToolCallId(id).slice(0, 8)}`
+        }
+        return (this.provider ?? this.name) === 'openai' ? id.slice(0, 40) : id
+      },
+    )
+    // Tool messages cannot carry images. The images of a run of tool results
+    // go in one user message after that run. Other media in a tool result is
+    // not sent.
+    const toolImages: Array<ChatCompletionContentPart> = []
+    for (const message of replay.messages) {
+      if (message.role !== 'tool' && toolImages.length > 0)
+        messages.push({ role: 'user', content: toolImages.splice(0) })
       messages.push(this.convertMessage(message))
+      if (
+        message.role === 'tool' &&
+        Array.isArray(message.content) &&
+        (this.inputModalities?.includes('image') ?? true)
+      ) {
+        for (const part of message.content) {
+          const image = part.type === 'image' && this.convertContentPart(part)
+          if (image) toolImages.push(image)
+        }
+      }
     }
+    if (toolImages.length > 0)
+      messages.push({ role: 'user', content: toolImages })
 
     const modelOptions = options.modelOptions
 
@@ -1139,32 +1526,34 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
     // `response_format` alongside any `tools`. Modern OpenAI-compatible
     // Chat Completions accepts both together and emits the schema-
     // constrained text on the natural final turn.
-    const combinedSchema = options.outputSchema as
-      | Record<string, unknown>
-      | undefined
+    // JSON mode is never combined (see `supportsCombinedToolsAndSchema`).
+    // A caller's own `json_object` reaches the request through the
+    // `modelOptions` spread.
+    const combinedSchema = this.usesJsonObject(options)
+      ? undefined
+      : (options.outputSchema as Record<string, unknown> | undefined)
     const responseFormat = combinedSchema
       ? {
-          response_format: {
-            type: 'json_schema' as const,
-            json_schema: {
-              name: 'structured_output',
-              schema: this.makeStructuredOutputCompatible(
-                combinedSchema,
-                Array.isArray(combinedSchema.required)
-                  ? (combinedSchema.required as Array<string>)
-                  : undefined,
-              ),
-              strict: true,
-            },
-          },
+          response_format: this.chatCompletionsResponseFormat(
+            false,
+            combinedSchema,
+          ),
         }
       : undefined
+
+    // `chat({ toolChoice })` is sent only when the request has tools. It goes
+    // before the `modelOptions` spread, so a `tool_choice` there wins.
+    const toolChoiceField =
+      tools?.length && options.toolChoice !== undefined
+        ? { tool_choice: toChatCompletionsToolChoice(options.toolChoice) }
+        : undefined
 
     // `modelOptions` is the sole sampling surface: callers set provider-native
     // wire names (`temperature`, `top_p`, `max_tokens`/`max_completion_tokens`)
     // there and they flow through the spread below. The root
     // `temperature`/`topP`/`maxTokens` fields are intentionally NOT read here.
-    return {
+    const params: ChatCompletionCreateParamsStreaming = {
+      ...toolChoiceField,
       ...modelOptions,
       model: options.model,
       messages,
@@ -1177,6 +1566,17 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
       ...(responseFormat ?? {}),
       stream: true,
     }
+    // `chat({ reasoning })`: the model's effort for the level. The SDK type
+    // does not list every provider's effort values, so the field goes on
+    // with Object.assign.
+    const reasoning = resolveReasoning(
+      options.reasoning,
+      this.modelReasoning(options.model),
+    )
+    if (reasoning?.value) {
+      Object.assign(params, { reasoning_effort: reasoning.value })
+    }
+    return params
   }
 
   /**
@@ -1186,8 +1586,10 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
    * return `false` because its API rejects schema + tools + stream with a
    * 400.
    */
-  supportsCombinedToolsAndSchema(): boolean {
-    return true
+  supportsCombinedToolsAndSchema(modelOptions?: unknown): boolean {
+    // JSON mode sends the schema as a system prompt on a separate
+    // structured-output request, not on the tool-calling turns.
+    return !this.usesJsonObject({ model: this.model, modelOptions })
   }
 
   /**
@@ -1197,19 +1599,25 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
   protected convertMessage(message: ModelMessage): ChatCompletionMessageParam {
     // Handle tool messages
     if (message.role === 'tool') {
-      // The Chat Completions API has no multimodal `tool` message support
-      // (unlike the Responses API's `function_call_output`). A tool that
-      // returns an `Array<ContentPart>` is therefore stringified here — the
-      // documented fallback for providers on the chat-completions path
-      // (Groq, Ollama, Grok, OpenRouter chat). Multimodal tool results are
-      // only delivered structurally via the Responses adapter.
+      // A Chat Completions `tool` message carries text only. For a result
+      // with images, the text parts go here and `mapOptionsToRequest` sends
+      // the images in a user message after the tool results. Other
+      // `Array<ContentPart>` results are JSON-stringified, text-only arrays
+      // included.
+      const content = message.content
       return {
         role: 'tool',
         tool_call_id: message.toolCallId || '',
         content:
-          typeof message.content === 'string'
-            ? message.content
-            : JSON.stringify(message.content),
+          typeof content === 'string'
+            ? content
+            : Array.isArray(content) &&
+                content.some((part) => part.type === 'image')
+              ? this.extractTextContent(content) ||
+                ((this.inputModalities?.includes('image') ?? true)
+                  ? '(see attached image)'
+                  : '(image omitted: this model has no image input)')
+              : JSON.stringify(content),
       }
     }
 
@@ -1312,6 +1720,22 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
         | { detail?: 'auto' | 'low' | 'high' }
         | undefined
 
+      if (isFileSource(part.source)) {
+        // The Chat Completions API references images only by URL/data URI,
+        // not by an uploaded file_id. Only mention the Responses alternative
+        // for OpenAI itself — compatible providers built on this base have no
+        // file_id-consuming endpoint at all.
+        throw unsupportedFileSourceError(
+          this.name,
+          // Only OpenAI's own chat-completions adapter (name 'openai-chat')
+          // has a Responses sibling to point at; other subclasses (Groq,
+          // Bedrock, BytePlus, compatible providers) have no file_id surface.
+          this.name === 'openai-chat'
+            ? 'on the Chat Completions API — use the Responses adapter (openaiText) to reference an uploaded file by file_id'
+            : 'on the Chat Completions API',
+        )
+      }
+
       // For base64 data, construct a data URI using the mimeType from source.
       // Default to a generic octet-stream MIME if the source didn't provide
       // one — interpolating `undefined` into the URI ("data:undefined;base64,
@@ -1332,6 +1756,17 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
       }
     }
 
+    if (part.type === 'document') {
+      // Documents (PDF) are implemented on the Responses adapter, which maps
+      // them to `input_file`. Model modality arrays are not endpoint-scoped,
+      // so a document part can type-check for a model this adapter serves —
+      // point callers at the supported path instead of a generic error.
+      throw new Error(
+        `${this.name} does not support document parts on the Chat Completions ` +
+          `API; use the Responses adapter, which sends them as input_file.`,
+      )
+    }
+
     // Unsupported content type — subclasses can override to handle more types
     return null
   }
@@ -1341,9 +1776,9 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
    * Handles backward compatibility with string content.
    */
   protected normalizeContent(
-    content: string | null | Array<ContentPart>,
+    content: string | null | undefined | Array<ContentPart>,
   ): Array<ContentPart> {
-    if (content === null) {
+    if (content === null || content === undefined) {
       return []
     }
     if (typeof content === 'string') {
@@ -1356,9 +1791,12 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
    * Extracts text content from a content value that may be string, null, or ContentPart array.
    */
   protected extractTextContent(
-    content: string | null | Array<ContentPart>,
+    content: string | null | undefined | Array<ContentPart>,
   ): string {
-    if (content === null) {
+    // Tool-call-only assistant turns (e.g. an approval resume replaying the
+    // pending call) carry no text and arrive as `null` or `undefined`; both
+    // must collapse to '' rather than crash on `.filter`.
+    if (content === null || content === undefined) {
       return ''
     }
     if (typeof content === 'string') {

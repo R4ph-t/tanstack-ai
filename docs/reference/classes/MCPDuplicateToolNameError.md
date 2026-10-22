@@ -3,9 +3,7 @@ id: MCPDuplicateToolNameError
 title: MCPDuplicateToolNameError
 ---
 
-# Class: MCPDuplicateToolNameError
-
-Defined in: [packages/ai/src/activities/chat/mcp/manager.ts:31](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/mcp/manager.ts#L31)
+Defined in: packages/ai/src/activities/chat/mcp/manager.ts:31
 
 ## Extends
 
@@ -19,7 +17,7 @@ Defined in: [packages/ai/src/activities/chat/mcp/manager.ts:31](https://github.c
 new MCPDuplicateToolNameError(toolName): MCPDuplicateToolNameError;
 ```
 
-Defined in: [packages/ai/src/activities/chat/mcp/manager.ts:32](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/mcp/manager.ts#L32)
+Defined in: packages/ai/src/activities/chat/mcp/manager.ts:32
 
 #### Parameters
 
@@ -45,4 +43,4 @@ Error.constructor
 readonly toolName: string;
 ```
 
-Defined in: [packages/ai/src/activities/chat/mcp/manager.ts:32](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/mcp/manager.ts#L32)
+Defined in: packages/ai/src/activities/chat/mcp/manager.ts:32

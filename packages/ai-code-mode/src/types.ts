@@ -1,4 +1,5 @@
 import type {
+  DebugOption,
   LazyToolsConfig,
   SchemaInput,
   ServerTool,
@@ -183,24 +184,24 @@ export interface CodeModeToolConfig {
 
   /**
    * Optional function to get additional bindings dynamically.
-   * Called at execution time (each execute_typescript call) to get current skill bindings.
+   * Called at execution time (each execute_typescript call) to get current snippet bindings.
    * These are merged with the static external_* bindings.
    *
-   * @returns Record of skill bindings with skill_ prefix
+   * @returns Record of snippet bindings with snippet_ prefix
    *
    * @example
    * ```typescript
-   * getSkillBindings: async () => {
-   *   const skills = await storage.loadAll()
-   *   return skillsToBindings(skills, 'skill_')
+   * getSnippetBindings: async () => {
+   *   const snippets = await storage.loadAll()
+   *   return snippetsToBindings(snippets, 'snippet_')
    * }
    * ```
    */
-  getSkillBindings?: () => Promise<Record<string, ToolBinding>>
+  getSnippetBindings?: () => Promise<Record<string, ToolBinding>>
 
   /**
    * How to surface tool parameters whose names look like secrets.
-   * Defaults to `'warn'` (logs via `console.warn`).
+   * Defaults to `'warn'` (logs through the `debug` logger's `warn` level).
    *
    * - `'warn'`: log a warning for each match.
    * - `'throw'`: throw an Error on the first match — useful in tests/CI.
@@ -233,8 +234,8 @@ export interface CodeModeToolConfig {
    * and `await` in its input (the default wraps the code in an async function
    * internally to allow this).
    *
-   * NOTE: This only affects `createCodeModeTool`. The skills helpers
-   * (`skillsToTools`, `codeModeWithSkills` in `@tanstack/ai-code-mode-skills`)
+   * NOTE: This only affects `createCodeModeTool`. The snippet helpers
+   * (`snippetsToTools`, `codeModeWithSnippets` in `@tanstack/ai-code-mode-snippets`)
    * call the exported `stripTypeScript` directly, so they ignore this hook — but
    * they still get the edge-safe sucrase default, so #487 is fixed for them too;
    * they just can't be pointed at a different transpiler.
@@ -256,6 +257,18 @@ export interface CodeModeToolConfig {
    * ```
    */
   transpile?: (code: string) => string | Promise<string>
+
+  /**
+   * Debug logging for this tool, resolved the same way as `chat({ debug })`.
+   *
+   * - Unset: only the `errors` category is on — failed executions and
+   *   secret-parameter warnings reach the default console logger.
+   * - `false`: silence everything, including errors.
+   * - `true` / `DebugConfig`: also enables the `tools` category, which logs
+   *   one line per successful execution. Pass `{ logger }` to route all of
+   *   it to your own `Logger` (pino, winston, …).
+   */
+  debug?: DebugOption
 }
 
 /**
@@ -285,14 +298,16 @@ export interface CodeModeToolResult {
         message: string
         name?: string | undefined
         line?: number | undefined
+        stack?: string | undefined
       }
     | undefined
 }
 
 /**
- * Return shape of `createCodeMode`. `tool` (execute_typescript) and
- * `systemPrompt` are preserved for backward compatibility; `discoveryTool` and
- * `tools` are additive. Spread `tools` into `chat({ tools })`.
+ * Return shape of `createCodeMode`. `tool` is the execute_typescript tool and
+ * `systemPrompt` tells the model how to use it. `discoveryTool` is set when
+ * there are lazy tools. `tools` holds `tool`, plus `discoveryTool` when it is
+ * set. Spread `tools` into `chat({ tools })`.
  */
 export interface CreateCodeModeResult {
   /** The execute_typescript tool. */

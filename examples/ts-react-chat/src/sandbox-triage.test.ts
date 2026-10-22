@@ -50,8 +50,9 @@ describe('parseVerdict', () => {
 })
 
 describe('registries', () => {
-  it('has 4 harnesses and 4 providers with labels + required env arrays', () => {
+  it('has 5 harnesses and 4 providers with labels + required env arrays', () => {
     expect(Object.keys(HARNESSES).sort()).toEqual([
+      'acp',
       'claude-code',
       'codex',
       'grok',
@@ -61,6 +62,7 @@ describe('registries', () => {
       'daytona',
       'docker',
       'local',
+      'railway',
       'vercel',
     ])
     for (const spec of Object.values(HARNESSES)) {
@@ -76,6 +78,23 @@ describe('registries', () => {
     expect(isProvider(42)).toBe(false)
   })
 
+  it('missingEnv skips harness keys when authMode is host', () => {
+    delete process.env.XAI_API_KEY
+    delete process.env.GROK_API_KEY
+    expect(missingEnv('grok', 'docker', 'host')).not.toContain('XAI_API_KEY')
+    expect(missingEnv('grok', 'local', 'api-key')).toContain(
+      'XAI_API_KEY (or GROK_API_KEY)',
+    )
+  })
+
+  it('missingEnv requires harness keys when authMode is omitted', () => {
+    delete process.env.XAI_API_KEY
+    delete process.env.GROK_API_KEY
+    expect(missingEnv('grok', 'local')).toContain(
+      'XAI_API_KEY (or GROK_API_KEY)',
+    )
+  })
+
   it('missingEnv reports unset required vars', () => {
     delete process.env.ANTHROPIC_API_KEY
     delete process.env.DAYTONA_API_KEY
@@ -85,6 +104,28 @@ describe('registries', () => {
     )
     process.env.ANTHROPIC_API_KEY = 'x'
     expect(missingEnv('claude-code', 'docker')).toEqual([])
+  })
+
+  it('missingEnv requires a Railway token and an environment ID', () => {
+    process.env.ANTHROPIC_API_KEY = 'x'
+    delete process.env.RAILWAY_TOKEN
+    delete process.env.RAILWAY_API_TOKEN
+    delete process.env.RAILWAY_ENVIRONMENT_ID
+    expect(missingEnv('claude-code', 'railway')).toEqual([
+      'RAILWAY_API_TOKEN (or RAILWAY_TOKEN)',
+      'RAILWAY_ENVIRONMENT_ID',
+    ])
+    // Either token kind still needs the environment.
+    for (const token of ['RAILWAY_API_TOKEN', 'RAILWAY_TOKEN']) {
+      process.env[token] = 'x'
+      expect(missingEnv('claude-code', 'railway')).toEqual([
+        'RAILWAY_ENVIRONMENT_ID',
+      ])
+      process.env.RAILWAY_ENVIRONMENT_ID = 'x'
+      expect(missingEnv('claude-code', 'railway')).toEqual([])
+      delete process.env[token]
+      delete process.env.RAILWAY_ENVIRONMENT_ID
+    }
   })
 })
 

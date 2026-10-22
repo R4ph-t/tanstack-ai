@@ -3,13 +3,11 @@ id: InputModalitiesTypes
 title: InputModalitiesTypes
 ---
 
-# Type Alias: InputModalitiesTypes
-
 ```ts
 type InputModalitiesTypes = object;
 ```
 
-Defined in: [packages/ai/src/types.ts:494](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L494)
+Defined in: packages/ai/src/types.ts:801
 
 ## Properties
 
@@ -19,7 +17,7 @@ Defined in: [packages/ai/src/types.ts:494](https://github.com/TanStack/ai/blob/m
 inputModalities: ReadonlyArray<Modality>;
 ```
 
-Defined in: [packages/ai/src/types.ts:495](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L495)
+Defined in: packages/ai/src/types.ts:802
 
 ***
 
@@ -29,4 +27,4 @@ Defined in: [packages/ai/src/types.ts:495](https://github.com/TanStack/ai/blob/m
 messageMetadataByModality: DefaultMessageMetadataByModality;
 ```
 
-Defined in: [packages/ai/src/types.ts:496](https://github.com/TanStack/ai/blob/main/packages/ai/src/types.ts#L496)
+Defined in: packages/ai/src/types.ts:803

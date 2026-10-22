@@ -3,7 +3,11 @@ import { EventType } from '@tanstack/ai/client'
 import { ChatPersistor } from '../src/client-persistor'
 import { createMockPersistence, createUIMessage } from './test-utils'
 import type { StreamChunk } from '@tanstack/ai/client'
-import type { ChatClientPersistence, UIMessage } from '../src/types'
+import type {
+  ChatClientPersistence,
+  ChatPersistedState,
+  UIMessage,
+} from '../src/types'
 
 const CHAT_ID = 'chat-1'
 
@@ -66,9 +70,8 @@ function toolCallStart(
     type: EventType.TOOL_CALL_START,
     toolCallId,
     toolCallName: 'tool',
-    toolName: 'tool',
     ...(parentMessageId ? { parentMessageId } : {}),
-  }
+  } as StreamChunk
 }
 
 function messagesSnapshot(): StreamChunk {
@@ -82,17 +85,76 @@ describe('ChatPersistor', () => {
       const adapter = createMockPersistence(stored)
       const { persistor } = createPersistor(adapter)
 
-      expect(persistor.readInitial()).toBe(stored)
+      expect(persistor.readInitial()).toEqual({ messages: stored })
       expect(adapter.getItem).toHaveBeenCalledWith(CHAT_ID)
+    })
+
+    it('round-trips a mixed transcript that includes activity', () => {
+      let stored: ChatPersistedState | undefined
+      const adapter: ChatClientPersistence = {
+        getItem: vi.fn(() => stored),
+        setItem: vi.fn((_id, state) => {
+          stored = state
+        }),
+        removeItem: vi.fn(),
+      }
+      const mixed: Array<UIMessage> = [
+        { id: 'u1', role: 'user', parts: [{ type: 'text', content: 'hi' }] },
+        {
+          id: 'act-1',
+          role: 'activity',
+          parts: [
+            {
+              type: 'activity',
+              activityType: 'SEARCH',
+              content: { query: 'tanstack' },
+            },
+          ],
+        },
+        {
+          id: 'a1',
+          role: 'assistant',
+          parts: [{ type: 'text', content: 'ok' }],
+        },
+      ]
+
+      const { persistor } = createPersistor(adapter)
+      persistor.notifyMessagesChanged(mixed)
+
+      const { persistor: next } = createPersistor(adapter)
+      expect(next.readInitial()).toEqual({ messages: mixed })
     })
 
     it('returns the promise from an asynchronous getItem', () => {
       const stored = [createUIMessage('m-1')]
       const adapter = createMockPersistence()
-      adapter.getItem = vi.fn(() => Promise.resolve(stored))
+      adapter.getItem = vi.fn(() => Promise.resolve({ messages: stored }))
       const { persistor } = createPersistor(adapter)
 
       expect(persistor.readInitial()).toBeInstanceOf(Promise)
+    })
+
+    it('logs a 0.x bare-array record and does not overwrite it until a clear', () => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const adapter = createMockPersistence()
+      adapter.getItem = vi.fn(() => [createUIMessage('old-1')] as never)
+      const { persistor } = createPersistor(adapter)
+
+      expect(persistor.readInitial()).toBeUndefined()
+      expect(error).toHaveBeenCalledWith(
+        expect.stringContaining(`threadId "${CHAT_ID}" is in the 0.x format`),
+      )
+
+      persistor.notifyMessagesChanged([createUIMessage('new-1')])
+      persistor.persistResumeSnapshot(null)
+      expect(adapter.setItem).not.toHaveBeenCalled()
+      expect(adapter.removeItem).not.toHaveBeenCalled()
+
+      persistor.remove()
+      persistor.notifyMessagesChanged([createUIMessage('new-2')])
+      expect(adapter.removeItem).toHaveBeenCalledWith(CHAT_ID)
+      expect(adapter.setItem).toHaveBeenCalledTimes(1)
+      error.mockRestore()
     })
 
     it('swallows a throwing getItem and returns undefined', () => {
@@ -107,48 +169,42 @@ describe('ChatPersistor', () => {
   })
 
   describe('hydrateAsync', () => {
-    it('applies messages once the promise resolves to an array', async () => {
+    it('applies messages once the promise resolves to a record', async () => {
       const stored = [createUIMessage('persisted-1')]
       const { persistor, applyMessages } = createPersistor(
         createMockPersistence(),
       )
 
-      persistor.hydrateAsync(Promise.resolve(stored))
+      persistor.hydrateAsync(Promise.resolve({ messages: stored }))
       await flushAsync()
 
       expect(applyMessages).toHaveBeenCalledWith(stored)
     })
 
-    it.each([
-      ['null', null],
-      ['undefined', undefined],
-    ])(
-      'does not apply when the promise resolves to %s',
-      async (_label, value) => {
-        const { persistor, applyMessages } = createPersistor(
-          createMockPersistence(),
-        )
+    it('does not apply when the promise resolves to undefined', async () => {
+      const { persistor, applyMessages } = createPersistor(
+        createMockPersistence(),
+      )
 
-        persistor.hydrateAsync(Promise.resolve(value))
-        await flushAsync()
+      persistor.hydrateAsync(Promise.resolve(undefined))
+      await flushAsync()
 
-        expect(applyMessages).not.toHaveBeenCalled()
-      },
-    )
+      expect(applyMessages).not.toHaveBeenCalled()
+    })
 
     it('does nothing for a synchronous (non-promise) value', async () => {
       const { persistor, applyMessages } = createPersistor(
         createMockPersistence(),
       )
 
-      persistor.hydrateAsync([createUIMessage('m-1')])
+      persistor.hydrateAsync({ messages: [createUIMessage('m-1')] })
       await flushAsync()
 
       expect(applyMessages).not.toHaveBeenCalled()
     })
 
     it('does not apply if messages changed before hydration resolves', async () => {
-      const deferred = createDeferred<Array<UIMessage>>()
+      const deferred = createDeferred<ChatPersistedState>()
       const { persistor, applyMessages } = createPersistor(
         createMockPersistence(),
       )
@@ -156,7 +212,7 @@ describe('ChatPersistor', () => {
       persistor.hydrateAsync(deferred.promise)
       // A local change lands before the slow getItem resolves.
       persistor.notifyMessagesChanged([createUIMessage('local-1')])
-      deferred.resolve([createUIMessage('persisted-1')])
+      deferred.resolve({ messages: [createUIMessage('persisted-1')] })
       await flushAsync()
 
       expect(applyMessages).not.toHaveBeenCalled()
@@ -182,7 +238,7 @@ describe('ChatPersistor', () => {
 
       persistor.notifyMessagesChanged(messages)
 
-      expect(adapter.setItem).toHaveBeenCalledWith(CHAT_ID, messages)
+      expect(adapter.setItem).toHaveBeenCalledWith(CHAT_ID, { messages })
     })
 
     it('persists a snapshot, not the live array reference', () => {
@@ -194,7 +250,7 @@ describe('ChatPersistor', () => {
       messages.push(createUIMessage('m-2'))
 
       const persisted = vi.mocked(adapter.setItem).mock.calls[0]?.[1]
-      expect(persisted).toHaveLength(1)
+      expect(persisted?.messages).toHaveLength(1)
     })
 
     it('skips exactly one write after beginClear, then resumes', () => {
@@ -240,9 +296,9 @@ describe('ChatPersistor', () => {
       await flushAsync()
 
       expect(adapter.setItem).toHaveBeenCalledTimes(2)
-      expect(vi.mocked(adapter.setItem).mock.calls[1]?.[1]).toEqual([
-        createUIMessage('b'),
-      ])
+      expect(vi.mocked(adapter.setItem).mock.calls[1]?.[1]).toEqual({
+        messages: [createUIMessage('b')],
+      })
     })
 
     it('keeps writing after an async write rejects', async () => {
@@ -357,6 +413,26 @@ describe('ChatPersistor', () => {
 
       expect(persistor.shouldIgnoreChunk(textContent('late-msg'))).toBe(true)
       expect(persistor.shouldIgnoreChunk(messagesSnapshot())).toBe(true)
+    })
+
+    it.each([
+      { type: 'TEXT_MESSAGE_CHUNK', messageId: 'late-msg', delta: 'hi' },
+      { type: 'TOOL_CALL_CHUNK', toolCallId: 'tc-late', toolCallName: 'x' },
+    ])('ignores a runless $type belonging to a cleared run', (fields) => {
+      const { persistor } = createPersistor(createMockPersistence())
+      persistor.snapshotClear({
+        messages: [],
+        activeRunIds: new Set(['run-1']),
+        currentRunId: null,
+      })
+      persistor.shouldIgnoreChunk(runStarted('run-1'))
+
+      expect(
+        persistor.shouldIgnoreChunk({
+          ...fields,
+          timestamp: Date.now(),
+        } as StreamChunk),
+      ).toBe(true)
     })
 
     it('ignores tool chunks by cleared parentMessageId and remembers the toolCallId', () => {

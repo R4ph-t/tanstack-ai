@@ -1,3 +1,4 @@
+import { ByokMissingError, isByokMissingBody } from '@tanstack/ai/byok'
 import {
   createResponseStreamTextDecoder,
   getResponseStreamReader,
@@ -36,6 +37,12 @@ async function* readStreamLines(
       yield buffer
     }
   } finally {
+    try {
+      // Custom cancellation hooks must not delay errors or iterator return.
+      void reader.cancel().catch(() => {})
+    } catch {
+      // Preserve the original error if cancellation throws synchronously.
+    }
     reader.releaseLock()
   }
 }
@@ -51,6 +58,15 @@ export async function* parseSSEResponse(
   abortSignal?: AbortSignal,
 ): AsyncGenerator<StreamChunk> {
   if (!response.ok) {
+    if (response.status === 401) {
+      const body: unknown = await response
+        .clone()
+        .json()
+        .catch(() => null)
+      if (isByokMissingBody(body)) {
+        throw new ByokMissingError(body.error.provider)
+      }
+    }
     throw new Error(
       `HTTP error! status: ${response.status} ${response.statusText}`,
     )
@@ -60,13 +76,6 @@ export async function* parseSSEResponse(
 
   for await (const line of readStreamLines(reader, abortSignal)) {
     const data = parseSseDataLine(line)
-
-    if (data === '[DONE]') {
-      console.warn(
-        '[@tanstack/ai-client] Received [DONE] sentinel. This is deprecated — upgrade your @tanstack/ai server package. RUN_FINISHED is the stream terminator.',
-      )
-      continue
-    }
 
     try {
       const parsed: StreamChunk = JSON.parse(data)

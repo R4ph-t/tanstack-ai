@@ -629,7 +629,7 @@ describe('OpenAI transcription adapter', () => {
       promptTokens: 0,
       completionTokens: 0,
       totalTokens: 0,
-      durationSeconds: 2.5,
+      billed: { quantity: 2.5, unit: 'seconds' },
     })
   })
 

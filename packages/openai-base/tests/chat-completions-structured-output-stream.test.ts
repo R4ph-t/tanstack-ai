@@ -11,7 +11,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { OpenAIBaseChatCompletionsTextAdapter } from '../src/adapters/chat-completions-text'
 import OpenAI from 'openai'
-import type { JSONSchema, StreamChunk } from '@tanstack/ai'
+import type { AdapterYieldChunk, JSONSchema } from '@tanstack/ai'
 import { resolveDebugOption, type Logger } from '@tanstack/ai/adapter-internals'
 
 /**
@@ -95,9 +95,9 @@ const personSchema: JSONSchema = {
 const testLogger = resolveDebugOption(false)
 
 async function collect(
-  stream: AsyncIterable<StreamChunk>,
-): Promise<Array<StreamChunk>> {
-  const out: Array<StreamChunk> = []
+  stream: AsyncIterable<AdapterYieldChunk>,
+): Promise<Array<AdapterYieldChunk>> {
+  const out: Array<AdapterYieldChunk> = []
   for await (const c of stream) out.push(c)
   return out
 }
@@ -121,6 +121,7 @@ describe('OpenAIBaseChatCompletionsTextAdapter.structuredOutputStream', () => {
       const chunks = await collect(
         adapter.structuredOutputStream!({
           chatOptions: {
+            threadId: 'thread-1',
             model: 'test-model',
             messages: [{ role: 'user', content: 'extract' }],
             logger: testLogger,
@@ -147,6 +148,75 @@ describe('OpenAIBaseChatCompletionsTextAdapter.structuredOutputStream', () => {
       expect(complete!.value.raw).toBe(json)
     })
 
+    it('skips a usage-only chunk that has no choices field at all', async () => {
+      setupStreamingMock([
+        deltaChunk('{"name":"John","age":30}', 'stop'),
+        {
+          id: 'chatcmpl-1',
+          model: 'test-model',
+          usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+        },
+      ])
+      const adapter = new TestAdapter()
+
+      const chunks = await collect(
+        adapter.structuredOutputStream!({
+          chatOptions: {
+            threadId: 'thread-1',
+            model: 'test-model',
+            messages: [{ role: 'user', content: 'extract' }],
+            logger: testLogger,
+          },
+          outputSchema: personSchema,
+        }),
+      )
+
+      expect(chunks.find((c) => c.type === 'RUN_ERROR')).toBeUndefined()
+      const complete = chunks.find(
+        (c) =>
+          c.type === 'CUSTOM' &&
+          (c as { name?: string }).name === 'structured-output.complete',
+      ) as { value: { object: unknown } } | undefined
+      expect(complete?.value.object).toEqual({ name: 'John', age: 30 })
+    })
+
+    it('timestamps lifecycle events when they are emitted', async () => {
+      vi.useFakeTimers()
+      try {
+        vi.setSystemTime(1_000)
+        setupStreamingMock([
+          deltaChunk('{"name":"John","age":30}'),
+          finishChunk(),
+        ])
+        const adapter = new TestAdapter()
+        const chunks: Array<AdapterYieldChunk> = []
+
+        for await (const chunk of adapter.structuredOutputStream!({
+          chatOptions: {
+            threadId: 'thread-1',
+            model: 'test-model',
+            messages: [{ role: 'user', content: 'extract' }],
+            logger: testLogger,
+          },
+          outputSchema: personSchema,
+        })) {
+          chunks.push(chunk)
+          vi.advanceTimersByTime(1)
+        }
+
+        const timestamps = chunks
+          .map((chunk) => chunk.timestamp)
+          .filter(
+            (timestamp): timestamp is number => typeof timestamp === 'number',
+          )
+        expect(timestamps).toHaveLength(chunks.length)
+        expect(timestamps).toEqual([...timestamps].sort((a, b) => a - b))
+        expect(timestamps.at(-1)).toBeGreaterThan(timestamps[0]!)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
     it('passes provider nulls through unchanged (engine un-widens, not the adapter)', async () => {
       // Mirror of the non-streaming `transformStructuredOutput` passthrough test
       // (`chat-completions-text.test.ts`) for the STREAMING path: the adapter no
@@ -161,6 +231,7 @@ describe('OpenAIBaseChatCompletionsTextAdapter.structuredOutputStream', () => {
       const chunks = await collect(
         adapter.structuredOutputStream!({
           chatOptions: {
+            threadId: 'thread-1',
             model: 'test-model',
             messages: [{ role: 'user', content: 'extract' }],
             logger: testLogger,
@@ -192,6 +263,7 @@ describe('OpenAIBaseChatCompletionsTextAdapter.structuredOutputStream', () => {
       await collect(
         adapter.structuredOutputStream!({
           chatOptions: {
+            threadId: 'thread-1',
             model: 'test-model',
             messages: [{ role: 'user', content: 'extract' }],
             logger: testLogger,
@@ -217,6 +289,38 @@ describe('OpenAIBaseChatCompletionsTextAdapter.structuredOutputStream', () => {
       expect(request.tools).toBeUndefined()
     })
 
+    it('sends json_object and the schema as one system prompt when modelOptions sets json_object', async () => {
+      setupStreamingMock([deltaChunk('{"name":"X","age":1}'), finishChunk()])
+      const adapter = new TestAdapter()
+
+      await collect(
+        adapter.structuredOutputStream!({
+          chatOptions: {
+            threadId: 'thread-1',
+            model: 'test-model',
+            messages: [{ role: 'user', content: 'extract' }],
+            logger: testLogger,
+            modelOptions: { response_format: { type: 'json_object' } },
+            // A direct caller can also set it here; the prompt must not repeat.
+            outputSchema: personSchema,
+          },
+          outputSchema: personSchema,
+        }),
+      )
+
+      const request = mockCreate.mock.calls[0]![0] as {
+        response_format?: { type: string; json_schema?: unknown }
+        messages: Array<{ role: string; content: unknown }>
+      }
+      expect(request.response_format).toEqual({ type: 'json_object' })
+      expect(request.messages.filter((m) => m.role === 'system')).toEqual([
+        {
+          role: 'system',
+          content: expect.stringContaining(JSON.stringify(personSchema)),
+        },
+      ])
+    })
+
     it('accumulates JSON text from deltas and emits exactly one structured-output.complete', async () => {
       setupStreamingMock([
         deltaChunk('{"name":"A"'),
@@ -228,6 +332,7 @@ describe('OpenAIBaseChatCompletionsTextAdapter.structuredOutputStream', () => {
       const chunks = await collect(
         adapter.structuredOutputStream!({
           chatOptions: {
+            threadId: 'thread-1',
             model: 'test-model',
             messages: [{ role: 'user', content: 'extract' }],
             logger: testLogger,
@@ -248,6 +353,39 @@ describe('OpenAIBaseChatCompletionsTextAdapter.structuredOutputStream', () => {
   })
 
   describe('error paths', () => {
+    // Issue #1426: `chat({ outputSchema })` takes this path, so a response
+    // cut off at the output cap must say so, not report a parse error.
+    it.each([
+      ['truncated JSON', [deltaChunk('{"name":"A', 'length')]],
+      ['no content', [deltaChunk('', 'length')]],
+    ])(
+      'emits RUN_ERROR { code: "max_tokens" } on finish_reason=length (%s)',
+      async (_label, streamChunks) => {
+        setupStreamingMock(streamChunks)
+        const adapter = new TestAdapter()
+
+        const chunks = await collect(
+          adapter.structuredOutputStream!({
+            chatOptions: {
+              threadId: 'thread-1',
+              model: 'test-model',
+              messages: [{ role: 'user', content: 'extract' }],
+              logger: testLogger,
+            },
+            outputSchema: personSchema,
+          }),
+        )
+
+        const runError = chunks.find((c) => c.type === 'RUN_ERROR') as
+          | { type: 'RUN_ERROR'; code?: string; message?: string }
+          | undefined
+        expect(runError?.code).toBe('max_tokens')
+        expect(runError?.message).toMatch(
+          /cut off because the maximum token limit was reached/,
+        )
+      },
+    )
+
     it('emits RUN_ERROR { code: "empty-response" } when no content was produced', async () => {
       // Stream finishes with no text deltas at all (model returned nothing).
       setupStreamingMock([finishChunk()])
@@ -256,6 +394,7 @@ describe('OpenAIBaseChatCompletionsTextAdapter.structuredOutputStream', () => {
       const chunks = await collect(
         adapter.structuredOutputStream!({
           chatOptions: {
+            threadId: 'thread-1',
             model: 'test-model',
             messages: [{ role: 'user', content: 'extract' }],
             logger: testLogger,
@@ -286,6 +425,7 @@ describe('OpenAIBaseChatCompletionsTextAdapter.structuredOutputStream', () => {
       const chunks = await collect(
         adapter.structuredOutputStream!({
           chatOptions: {
+            threadId: 'thread-1',
             model: 'test-model',
             messages: [{ role: 'user', content: 'extract' }],
             logger: testLogger,
@@ -327,6 +467,7 @@ describe('OpenAIBaseChatCompletionsTextAdapter.structuredOutputStream', () => {
       await collect(
         adapter.structuredOutputStream!({
           chatOptions: {
+            threadId: 'thread-1',
             model: 'test-model',
             messages: [{ role: 'user', content: 'extract' }],
             logger: verboseLogger,

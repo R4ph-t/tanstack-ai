@@ -1,7 +1,31 @@
 import { vi } from 'vitest'
-import type { ConnectConnectionAdapter } from '../src/connection-adapters'
+import { withTanstackMetadata } from '@tanstack/ai/client'
+import type {
+  ConnectConnectionAdapter,
+  SubscribeConnectionAdapter,
+} from '../src/connection-adapters'
 import type { ModelMessage, StreamChunk } from '@tanstack/ai/client'
 import type { ChatClientPersistence, UIMessage } from '../src/types'
+
+function runFinishedChunk(options: {
+  runId: string
+  threadId: string
+  finishReason: 'stop' | 'length' | 'content_filter' | 'tool_calls' | null
+  model?: string
+}): StreamChunk {
+  return withTanstackMetadata(
+    {
+      type: 'RUN_FINISHED',
+      runId: options.runId,
+      threadId: options.threadId,
+      timestamp: Date.now(),
+    },
+    {
+      finishReason: options.finishReason,
+      ...(options.model !== undefined ? { model: options.model } : {}),
+    },
+  ) as StreamChunk
+}
 
 /**
  * Build a minimal text {@link UIMessage} for tests.
@@ -14,20 +38,17 @@ export function createUIMessage(
   return { id, role, parts: [{ type: 'text', content: text }] }
 }
 
-/**
- * Create a persistence adapter whose three methods are vitest spies. `getItem`
- * synchronously returns `initial` (defaults to `undefined`); override individual
- * methods via the returned object's `.mock*` helpers for async/error scenarios.
- */
+/** Mock message persistence adapter for ChatPersistor / ChatClient tests. */
 export function createMockPersistence(
   initial?: Array<UIMessage> | null,
 ): ChatClientPersistence {
   return {
-    getItem: vi.fn(() => initial),
+    getItem: vi.fn(() => (initial ? { messages: initial } : initial)),
     setItem: vi.fn(),
     removeItem: vi.fn(),
   }
 }
+
 /**
  * Options for creating a mock connection adapter
  */
@@ -74,8 +95,8 @@ export interface MockConnectionAdapterOptions {
  * ```typescript
  * const adapter = createMockConnectionAdapter({
  *   chunks: [
- *     { type: "TEXT_MESSAGE_CONTENT", messageId: "1", model: "test", timestamp: Date.now(), delta: "Hello", content: "Hello" },
- *     { type: "RUN_FINISHED", runId: "run-1", model: "test", timestamp: Date.now(), finishReason: "stop" }
+ *     { type: "TEXT_MESSAGE_CONTENT", messageId: "1", timestamp: Date.now(), delta: "Hello" },
+ *     { type: "RUN_FINISHED", runId: "run-1", timestamp: Date.now(), metadata: { tanstack: { finishReason: "stop" } } }
  *   ]
  * });
  * ```
@@ -135,6 +156,72 @@ export function createMockConnectionAdapter(
 }
 
 /**
+ * Subscribe/send adapter that tests can push chunks into at any time.
+ *
+ * A push between reading the queue and parking the waiter would lose the wake
+ * on a naive mock. This helper:
+ * - rechecks the queue after every yielded batch
+ * - rechecks again after parking the waiter, so a push in that window still
+ *   wakes
+ */
+export function createPushableSubscribeConnection(): {
+  connection: SubscribeConnectionAdapter
+  push: (...chunks: Array<StreamChunk>) => void
+} {
+  let wake: (() => void) | null = null
+  const queue: Array<StreamChunk> = []
+
+  const wakeWaiter = () => {
+    const resolve = wake
+    wake = null
+    resolve?.()
+  }
+
+  const connection: SubscribeConnectionAdapter = {
+    subscribe: (signal?: AbortSignal) => {
+      return (async function* () {
+        while (!signal?.aborted) {
+          if (queue.length > 0) {
+            const batch = queue.splice(0)
+            for (const chunk of batch) {
+              yield chunk
+            }
+            continue
+          }
+          await new Promise<void>((resolve) => {
+            if (signal?.aborted) {
+              resolve()
+              return
+            }
+            wake = resolve
+            const onAbort = () => {
+              if (wake === resolve) {
+                wake = null
+              }
+              resolve()
+            }
+            signal?.addEventListener('abort', onAbort, { once: true })
+            if (queue.length > 0 || signal?.aborted) {
+              wakeWaiter()
+            }
+          })
+        }
+      })()
+    },
+    send: async () => {
+      wakeWaiter()
+    },
+  }
+
+  const push = (...chunks: Array<StreamChunk>) => {
+    queue.push(...chunks)
+    wakeWaiter()
+  }
+
+  return { connection, push }
+}
+
+/**
  * Helper to create simple text content chunks (AG-UI format)
  */
 export function createTextChunks(
@@ -143,30 +230,21 @@ export function createTextChunks(
   model: string = 'test',
 ): Array<StreamChunk> {
   const chunks: Array<StreamChunk> = []
-  let accumulated = ''
   const runId = `run-${messageId}`
   const threadId = `thread-${messageId}`
 
-  for (const chunk of text) {
-    accumulated += chunk
+  for (const delta of text) {
     chunks.push({
       type: 'TEXT_MESSAGE_CONTENT',
       messageId,
-      model,
       timestamp: Date.now(),
-      delta: chunk,
-      content: accumulated,
+      delta,
     } as StreamChunk)
   }
 
-  chunks.push({
-    type: 'RUN_FINISHED',
-    runId,
-    threadId,
-    model,
-    timestamp: Date.now(),
-    finishReason: 'stop',
-  } as StreamChunk)
+  chunks.push(
+    runFinishedChunk({ runId, threadId, finishReason: 'stop', model }),
+  )
 
   return chunks
 }
@@ -183,109 +261,32 @@ export function createCustomEventChunks(
   for (const event of events) {
     chunks.push({
       type: 'CUSTOM',
-      model,
       timestamp: Date.now(),
       name: event.name,
       value: event.value,
     } as StreamChunk)
   }
 
-  chunks.push({
-    type: 'RUN_FINISHED',
-    runId: 'run-1',
-    threadId: 'thread-1',
-    model,
-    timestamp: Date.now(),
-    finishReason: 'stop',
-  } as StreamChunk)
+  chunks.push(
+    runFinishedChunk({
+      runId: 'run-1',
+      threadId: 'thread-1',
+      finishReason: 'stop',
+      model,
+    }),
+  )
 
   return chunks
 }
 
 /**
- * Helper to create tool call chunks (AG-UI format)
- * Optionally includes tool-input-available chunks to trigger onToolCall
+ * Helper to create tool call chunks (AG-UI format). The RUN_FINISHED leaves
+ * the calls unanswered, so the client runs them (onToolCall).
  */
 export function createToolCallChunks(
   toolCalls: Array<{ id: string; name: string; arguments: string }>,
   messageId: string = 'msg-1',
   model: string = 'test',
-  includeToolInputAvailable: boolean = true,
-): Array<StreamChunk> {
-  const chunks: Array<StreamChunk> = []
-  const runId = `run-${messageId}`
-
-  for (let i = 0; i < toolCalls.length; i++) {
-    const toolCall = toolCalls[i]!
-
-    // TOOL_CALL_START event
-    chunks.push({
-      type: 'TOOL_CALL_START',
-      toolCallId: toolCall.id,
-      toolCallName: toolCall.name,
-      toolName: toolCall.name,
-      model,
-      timestamp: Date.now(),
-      index: i,
-    } as StreamChunk)
-
-    // TOOL_CALL_ARGS event
-    chunks.push({
-      type: 'TOOL_CALL_ARGS',
-      toolCallId: toolCall.id,
-      model,
-      timestamp: Date.now(),
-      delta: toolCall.arguments,
-    } as StreamChunk)
-
-    // Add tool-input-available CUSTOM chunk if requested
-    if (includeToolInputAvailable) {
-      let parsedInput: any
-      try {
-        parsedInput = JSON.parse(toolCall.arguments)
-      } catch {
-        parsedInput = toolCall.arguments
-      }
-
-      chunks.push({
-        type: 'CUSTOM',
-        model,
-        timestamp: Date.now(),
-        name: 'tool-input-available',
-        value: {
-          toolCallId: toolCall.id,
-          toolName: toolCall.name,
-          input: parsedInput,
-        },
-      } as StreamChunk)
-    }
-  }
-
-  chunks.push({
-    type: 'RUN_FINISHED',
-    runId,
-    threadId: `thread-${messageId}`,
-    model,
-    timestamp: Date.now(),
-    finishReason: 'tool_calls',
-  } as StreamChunk)
-
-  return chunks
-}
-
-/**
- * Helper to create tool call chunks with approval requests (AG-UI format)
- * Tools will be in 'input-complete' state with pending approval
- */
-export function createApprovalToolCallChunks(
-  toolCalls: Array<{
-    id: string
-    name: string
-    arguments: string
-    approvalId: string
-  }>,
-  messageId: string = 'msg-1',
-  model: string = 'test',
 ): Array<StreamChunk> {
   const chunks: Array<StreamChunk> = []
   const runId = `run-${messageId}`
@@ -297,57 +298,31 @@ export function createApprovalToolCallChunks(
       type: 'TOOL_CALL_START',
       toolCallId: toolCall.id,
       toolCallName: toolCall.name,
-      toolName: toolCall.name,
-      model,
       timestamp: Date.now(),
-      index: i,
     } as StreamChunk)
 
     chunks.push({
       type: 'TOOL_CALL_ARGS',
       toolCallId: toolCall.id,
-      model,
       timestamp: Date.now(),
       delta: toolCall.arguments,
     } as StreamChunk)
-
-    chunks.push({
-      type: 'TOOL_CALL_END',
-      toolCallId: toolCall.id,
-      toolCallName: toolCall.name,
-      toolName: toolCall.name,
-      model,
-      timestamp: Date.now(),
-    } as StreamChunk)
-
-    chunks.push({
-      type: 'CUSTOM',
-      model,
-      timestamp: Date.now(),
-      name: 'approval-requested',
-      value: {
-        toolCallId: toolCall.id,
-        toolName: toolCall.name,
-        input: JSON.parse(toolCall.arguments),
-        approval: { id: toolCall.approvalId, needsApproval: true },
-      },
-    } as StreamChunk)
   }
 
-  chunks.push({
-    type: 'RUN_FINISHED',
-    runId,
-    threadId: `thread-${messageId}`,
-    model,
-    timestamp: Date.now(),
-    finishReason: 'tool_calls',
-  } as StreamChunk)
+  chunks.push(
+    runFinishedChunk({
+      runId,
+      threadId: `thread-${messageId}`,
+      finishReason: 'stop',
+      model,
+    }),
+  )
 
   return chunks
 }
 
 /**
- * Helper to create thinking chunks (AG-UI format using STEP_FINISHED for thinking)
+ * Helper to create thinking chunks (AG-UI reasoning events)
  */
 export function createThinkingChunks(
   thinkingContent: string,
@@ -356,48 +331,37 @@ export function createThinkingChunks(
   model: string = 'test',
 ): Array<StreamChunk> {
   const chunks: Array<StreamChunk> = []
-  let accumulatedThinking = ''
   const runId = `run-${messageId}`
-  const stepId = `step-${messageId}`
+  const reasoningId = `reasoning-${messageId}`
 
-  // Add thinking chunks via STEP_FINISHED events
-  for (const chunk of thinkingContent) {
-    accumulatedThinking += chunk
+  for (const delta of thinkingContent) {
     chunks.push({
-      type: 'STEP_FINISHED',
-      stepName: stepId,
-      stepId,
-      model,
+      type: 'REASONING_MESSAGE_CONTENT',
+      messageId: reasoningId,
       timestamp: Date.now(),
-      delta: chunk,
-      content: accumulatedThinking,
+      delta,
     } as StreamChunk)
   }
 
-  // Optionally add text content after thinking
   if (textContent) {
-    let accumulatedText = ''
-    for (const chunk of textContent) {
-      accumulatedText += chunk
+    for (const delta of textContent) {
       chunks.push({
         type: 'TEXT_MESSAGE_CONTENT',
         messageId,
-        model,
         timestamp: Date.now(),
-        delta: chunk,
-        content: accumulatedText,
+        delta,
       } as StreamChunk)
     }
   }
 
-  chunks.push({
-    type: 'RUN_FINISHED',
-    runId,
-    threadId: `thread-${messageId}`,
-    model,
-    timestamp: Date.now(),
-    finishReason: 'stop',
-  } as StreamChunk)
+  chunks.push(
+    runFinishedChunk({
+      runId,
+      threadId: `thread-${messageId}`,
+      finishReason: 'stop',
+      model,
+    }),
+  )
 
   return chunks
 }

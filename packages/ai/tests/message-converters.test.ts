@@ -6,10 +6,81 @@ import {
   normalizeToUIMessage,
   uiMessageToModelMessages,
 } from '../src/activities/chat/messages'
-import type { ContentPart, ModelMessage, UIMessage } from '../src/types'
+import type {
+  ContentPart,
+  ModelMessage,
+  ToolCallPart,
+  UIMessage,
+} from '../src/types'
 
 describe('Message Converters', () => {
   describe('uiMessageToModelMessages', () => {
+    it('keeps the run id and drops the run timings (#1061)', () => {
+      const [assistant] = uiMessageToModelMessages({
+        id: 'a1',
+        role: 'assistant',
+        parts: [{ type: 'text', content: 'hi' }],
+        metadata: {
+          tanstack: { run: { id: 'r1', startedAt: 1, finishedAt: 2 } },
+        },
+      })
+
+      expect(assistant?.metadata).toEqual({ tanstack: { run: { id: 'r1' } } })
+    })
+
+    it('does not inherit assistant id or date for an unowned tool result', () => {
+      const result = uiMessageToModelMessages({
+        id: 'assistant-1',
+        role: 'assistant',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        parts: [
+          {
+            type: 'tool-result',
+            toolCallId: 'call-1',
+            content: 'ok',
+            state: 'complete',
+          },
+        ],
+      })
+
+      expect(result).toEqual([
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: null,
+          createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        },
+        {
+          role: 'tool',
+          content: 'ok',
+          toolCallId: 'call-1',
+        },
+      ])
+    })
+
+    it('persists a tool result outcome in TanStack metadata', () => {
+      const result = uiMessageToModelMessages({
+        id: 'assistant-1',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'tool-result',
+            toolCallId: 'call-1',
+            content: '{"error":"User declined tool execution"}',
+            state: 'error',
+            outcome: 'denied',
+          },
+        ],
+      })
+
+      expect(result).toContainEqual({
+        role: 'tool',
+        content: '{"error":"User declined tool execution"}',
+        toolCallId: 'call-1',
+        metadata: { tanstack: { toolResultOutcome: 'denied' } },
+      })
+    })
+
     it('should convert simple text message', () => {
       const uiMessage: UIMessage = {
         id: 'msg-1',
@@ -21,6 +92,7 @@ describe('Message Converters', () => {
 
       expect(result).toEqual([
         {
+          id: 'msg-1',
           role: 'user',
           content: 'Hello',
         },
@@ -41,6 +113,7 @@ describe('Message Converters', () => {
 
       expect(result).toEqual([
         {
+          id: 'msg-1',
           role: 'user',
           content: 'Hello world!',
         },
@@ -201,6 +274,291 @@ describe('Message Converters', () => {
       expect(result[0]?.thinking).toEqual([{ content: 'Let me think...' }])
     })
 
+    it('should preserve thinking order around provider-executed tool calls', () => {
+      const providerToolMetadata = {
+        providerExecuted: true,
+        anthropic: {
+          serverToolType: 'web_search',
+          resultBlockType: 'web_search_tool_result',
+          result: [
+            {
+              type: 'web_search_result',
+              title: 'Example result',
+              url: 'https://example.com',
+              encrypted_content: 'opaque-provider-payload',
+            },
+          ],
+        },
+      }
+      const uiMessage: UIMessage = {
+        id: 'assistant-message',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'thinking',
+            content: 'First signed thinking block',
+            signature: 'signature-1',
+          },
+          {
+            type: 'tool-call',
+            id: 'srvtoolu_search',
+            name: 'web_search',
+            arguments: '{"query":"top AI companies"}',
+            state: 'input-complete',
+            metadata: providerToolMetadata,
+          },
+          {
+            type: 'thinking',
+            content: 'Second signed thinking block',
+            signature: 'signature-2',
+          },
+          {
+            type: 'tool-call',
+            id: 'toolu_create_block',
+            name: 'createBlock',
+            arguments: '{"block":{"type":"entity-grid"}}',
+            state: 'complete',
+            output: { ok: true },
+          },
+          {
+            type: 'tool-result',
+            toolCallId: 'toolu_create_block',
+            content: '{"ok":true}',
+            state: 'complete',
+          },
+        ],
+      }
+
+      const result = convertMessagesToModelMessages([uiMessage])
+
+      expect(result).toEqual([
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          content: null,
+          toolCalls: [
+            {
+              id: 'srvtoolu_search',
+              type: 'function',
+              function: {
+                name: 'web_search',
+                arguments: '{"query":"top AI companies"}',
+              },
+              metadata: providerToolMetadata,
+            },
+          ],
+          thinking: [
+            {
+              content: 'First signed thinking block',
+              signature: 'signature-1',
+            },
+          ],
+        },
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          content: null,
+          toolCalls: [
+            {
+              id: 'toolu_create_block',
+              type: 'function',
+              function: {
+                name: 'createBlock',
+                arguments: '{"block":{"type":"entity-grid"}}',
+              },
+            },
+          ],
+          thinking: [
+            {
+              content: 'Second signed thinking block',
+              signature: 'signature-2',
+            },
+          ],
+        },
+        {
+          role: 'tool',
+          content: '{"ok":true}',
+          toolCallId: 'toolu_create_block',
+        },
+      ])
+    })
+
+    it('should keep a trailing signed thinking block after a provider-executed tool', () => {
+      const providerToolMetadata = {
+        providerExecuted: true,
+        anthropic: {
+          serverToolType: 'web_search',
+          resultBlockType: 'web_search_tool_result',
+          result: [{ type: 'web_search_result', url: 'https://example.com' }],
+        },
+      }
+      const uiMessage: UIMessage = {
+        id: 'assistant-message',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'thinking',
+            content: 'First signed thinking block',
+            signature: 'signature-1',
+          },
+          {
+            type: 'tool-call',
+            id: 'srvtoolu_search',
+            name: 'web_search',
+            arguments: '{"query":"top AI companies"}',
+            state: 'input-complete',
+            metadata: providerToolMetadata,
+          },
+          {
+            type: 'thinking',
+            content: 'Second signed thinking block',
+            signature: 'signature-2',
+          },
+        ],
+      }
+
+      expect(convertMessagesToModelMessages([uiMessage])).toEqual([
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          content: null,
+          toolCalls: [
+            {
+              id: 'srvtoolu_search',
+              type: 'function',
+              function: {
+                name: 'web_search',
+                arguments: '{"query":"top AI companies"}',
+              },
+              metadata: providerToolMetadata,
+            },
+          ],
+          thinking: [
+            {
+              content: 'First signed thinking block',
+              signature: 'signature-1',
+            },
+          ],
+        },
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          content: null,
+          thinking: [
+            {
+              content: 'Second signed thinking block',
+              signature: 'signature-2',
+            },
+          ],
+        },
+      ])
+    })
+
+    it('should keep local tool calls and results in the same assistant turn', () => {
+      const uiMessage: UIMessage = {
+        id: 'assistant-message',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'tool-call',
+            id: 'tool-call-a',
+            name: 'toolA',
+            arguments: '{"value":"a"}',
+            state: 'input-complete',
+          },
+          {
+            type: 'thinking',
+            content: 'Thinking between local tool calls',
+          },
+          {
+            type: 'tool-call',
+            id: 'tool-call-b',
+            name: 'toolB',
+            arguments: '{"value":"b"}',
+            state: 'input-complete',
+          },
+          {
+            type: 'tool-result',
+            toolCallId: 'tool-call-a',
+            content: '{"result":"a"}',
+            state: 'complete',
+          },
+          {
+            type: 'tool-result',
+            toolCallId: 'tool-call-b',
+            content: '{"result":"b"}',
+            state: 'complete',
+          },
+        ],
+      }
+
+      const modelMessages = uiMessageToModelMessages(uiMessage)
+
+      expect(modelMessages).toEqual([
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          content: null,
+          toolCalls: [
+            {
+              id: 'tool-call-a',
+              type: 'function',
+              function: {
+                name: 'toolA',
+                arguments: '{"value":"a"}',
+              },
+            },
+            {
+              id: 'tool-call-b',
+              type: 'function',
+              function: {
+                name: 'toolB',
+                arguments: '{"value":"b"}',
+              },
+            },
+          ],
+          thinking: [{ content: 'Thinking between local tool calls' }],
+          blockOrder: [
+            { type: 'tool-call', id: 'tool-call-a' },
+            { type: 'thinking', index: 0 },
+            { type: 'tool-call', id: 'tool-call-b' },
+          ],
+        },
+        {
+          role: 'tool',
+          content: '{"result":"a"}',
+          toolCallId: 'tool-call-a',
+        },
+        {
+          role: 'tool',
+          content: '{"result":"b"}',
+          toolCallId: 'tool-call-b',
+        },
+      ])
+
+      const roundTripped = modelMessagesToUIMessages(modelMessages)
+
+      expect(roundTripped).toHaveLength(1)
+      expect(roundTripped[0]?.parts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'thinking',
+            content: 'Thinking between local tool calls',
+          }),
+          expect.objectContaining({ type: 'tool-call', id: 'tool-call-a' }),
+          expect.objectContaining({ type: 'tool-call', id: 'tool-call-b' }),
+          expect.objectContaining({
+            type: 'tool-result',
+            toolCallId: 'tool-call-a',
+          }),
+          expect.objectContaining({
+            type: 'tool-result',
+            toolCallId: 'tool-call-b',
+          }),
+        ]),
+      )
+    })
+
     it('should skip system messages', () => {
       const uiMessage: UIMessage = {
         id: 'msg-1',
@@ -343,6 +701,100 @@ describe('Message Converters', () => {
       expect(result[1]?.role).toBe('tool')
       expect(result[1]?.toolCallId).toBe('tool-1')
       expect(result[1]?.content).toBe('{"temp": 72}')
+    })
+
+    it('keeps assistant identity off synthetic tool results', () => {
+      const uiMessage: UIMessage = {
+        id: 'assistant-1',
+        role: 'assistant',
+        parts: [
+          { type: 'text', content: 'Let me check.' },
+          {
+            type: 'tool-call',
+            id: 'tc-explicit',
+            name: 'getWeather',
+            arguments: '{}',
+            state: 'input-complete',
+          },
+          {
+            type: 'tool-result',
+            toolCallId: 'tc-explicit',
+            content: '{}',
+            state: 'complete',
+          },
+          { type: 'text', content: 'I found it.' },
+          {
+            type: 'tool-call',
+            id: 'tc-output',
+            name: 'getForecast',
+            arguments: '{}',
+            state: 'complete',
+            output: { temperature: 72 },
+          },
+          {
+            type: 'tool-call',
+            id: 'tc-approval',
+            name: 'deleteForecast',
+            arguments: '{}',
+            state: 'approval-responded',
+            approval: {
+              id: 'approval-tc-approval',
+              needsApproval: true,
+              approved: false,
+            },
+          },
+        ],
+      }
+
+      const result = uiMessageToModelMessages(uiMessage)
+
+      expect(result).toHaveLength(5)
+      expect(
+        result
+          .filter((message) => message.role !== 'tool')
+          .every((message) => message.id === uiMessage.id),
+      ).toBe(true)
+      expect(result.map((message) => message.role)).toEqual([
+        'assistant',
+        'tool',
+        'assistant',
+        'tool',
+        'tool',
+      ])
+      expect(result.filter((message) => message.role === 'tool')).toEqual([
+        expect.objectContaining({
+          role: 'tool',
+          toolCallId: 'tc-explicit',
+        }),
+        expect.objectContaining({
+          role: 'tool',
+          toolCallId: 'tc-output',
+        }),
+        expect.objectContaining({
+          role: 'tool',
+          toolCallId: 'tc-approval',
+        }),
+      ])
+      for (const message of result.filter(
+        (candidate) =>
+          candidate.role === 'tool' && candidate.toolCallId !== 'tc-explicit',
+      )) {
+        expect(message).not.toHaveProperty('id')
+        expect(message).not.toHaveProperty('name')
+        expect(message).not.toHaveProperty('createdAt')
+      }
+    })
+
+    it('should preserve the UI message id on an empty assistant fallback', () => {
+      const uiMessage: UIMessage = {
+        id: 'assistant-empty',
+        role: 'assistant',
+        parts: [],
+      }
+
+      expect(uiMessageToModelMessages(uiMessage)).toEqual([
+        { id: uiMessage.id, role: 'assistant', content: null },
+      ])
     })
 
     it('should preserve interleaving of text, tool calls, and tool results', () => {
@@ -513,6 +965,18 @@ describe('Message Converters', () => {
       expect(result.id).toBe('custom-id')
     })
 
+    it('should preserve message metadata', () => {
+      const modelMessage: ModelMessage = {
+        role: 'user',
+        content: 'Hello',
+        metadata: { author: { id: 'user-42' } },
+      }
+
+      const result = modelMessageToUIMessage(modelMessage)
+
+      expect(result.metadata).toEqual({ author: { id: 'user-42' } })
+    })
+
     it('should preserve multimodal content parts', () => {
       const modelMessage: ModelMessage = {
         role: 'user',
@@ -552,6 +1016,128 @@ describe('Message Converters', () => {
         content: '{"result": "success"}',
         state: 'complete',
       })
+    })
+
+    it('should preserve a tool message error', () => {
+      const modelMessage: ModelMessage = {
+        role: 'tool',
+        content: '{"error":"boom"}',
+        toolCallId: 'tool-1',
+        error: 'boom',
+      }
+
+      const result = modelMessageToUIMessage(modelMessage)
+
+      expect(result.parts).toContainEqual({
+        type: 'tool-result',
+        toolCallId: 'tool-1',
+        content: '{"error":"boom"}',
+        state: 'error',
+        error: 'boom',
+      })
+    })
+
+    it('should preserve a cancelled tool result outcome', () => {
+      const modelMessage: ModelMessage = {
+        role: 'tool',
+        content: '{"error":"Tool execution cancelled"}',
+        toolCallId: 'tool-1',
+        metadata: { tanstack: { toolResultOutcome: 'cancelled' } },
+      }
+
+      expect(modelMessageToUIMessage(modelMessage).parts).toContainEqual({
+        type: 'tool-result',
+        toolCallId: 'tool-1',
+        content: '{"error":"Tool execution cancelled"}',
+        state: 'error',
+        outcome: 'cancelled',
+        metadata: { tanstack: { toolResultOutcome: 'cancelled' } },
+      })
+    })
+
+    // A persisted or client-sent value is untrusted: only 'cancelled' and
+    // 'denied' may turn a result into an error or set `outcome`.
+    it.each([null, 'foo', 42])(
+      'ignores an invalid persisted toolResultOutcome (%s)',
+      (value) => {
+        const modelMessage: ModelMessage = {
+          role: 'tool',
+          content: '{"ok":true}',
+          toolCallId: 'tool-1',
+          metadata: { tanstack: { toolResultOutcome: value } },
+        }
+
+        const part = modelMessageToUIMessage(modelMessage).parts.find(
+          (p) => p.type === 'tool-result',
+        )
+        expect(part).toMatchObject({ state: 'complete' })
+        expect(part).not.toHaveProperty('outcome')
+
+        const restored = modelMessagesToUIMessages([
+          {
+            role: 'assistant',
+            content: null,
+            toolCalls: [
+              {
+                id: 'tool-1',
+                type: 'function',
+                function: { name: 'example', arguments: '{}' },
+              },
+            ],
+          },
+          modelMessage,
+        ])
+        expect(restored[0]?.parts).toContainEqual(
+          expect.objectContaining({ type: 'tool-call', state: 'complete' }),
+        )
+        const restoredPart = restored[0]?.parts.find(
+          (p) => p.type === 'tool-result',
+        )
+        expect(restoredPart).toMatchObject({ state: 'complete' })
+        expect(restoredPart).not.toHaveProperty('outcome')
+      },
+    )
+
+    it('does not infer a tool result outcome from arbitrary content', () => {
+      const modelMessage: ModelMessage = {
+        role: 'tool',
+        content: '{"outcome":"cancelled"}',
+        toolCallId: 'tool-1',
+      }
+
+      expect(modelMessageToUIMessage(modelMessage).parts).toContainEqual({
+        type: 'tool-result',
+        toolCallId: 'tool-1',
+        content: '{"outcome":"cancelled"}',
+        state: 'complete',
+      })
+
+      const restored = modelMessagesToUIMessages([
+        {
+          role: 'assistant',
+          content: null,
+          toolCalls: [
+            {
+              id: 'tool-1',
+              type: 'function',
+              function: { name: 'example', arguments: '{}' },
+            },
+          ],
+        },
+        modelMessage,
+      ])
+
+      expect(restored[0]?.parts).toContainEqual(
+        expect.objectContaining({ type: 'tool-call', state: 'complete' }),
+      )
+      const restoredToolResult = restored[0]?.parts.find(
+        (part) => part.type === 'tool-result',
+      )
+      expect(restoredToolResult).toMatchObject({
+        type: 'tool-result',
+        state: 'complete',
+      })
+      expect(restoredToolResult?.outcome).toBeUndefined()
     })
 
     it('should convert assistant message with toolCalls and text', () => {
@@ -763,6 +1349,40 @@ describe('Message Converters', () => {
       })
     })
 
+    it('normalizes a standalone tool createdAt string on the message and part', () => {
+      const source: ModelMessage = {
+        role: 'tool',
+        content: 'ok',
+        toolCallId: 'tool-1',
+        createdAt: new Date('2026-08-20T00:00:00.000Z'),
+      }
+      const modelMessage: ModelMessage = JSON.parse(JSON.stringify(source))
+
+      const result = modelMessageToUIMessage(modelMessage)
+      const part = result.parts[0]
+
+      expect(result.createdAt).toEqual(new Date('2026-08-20T00:00:00.000Z'))
+      expect(part).toHaveProperty('createdAt', result.createdAt)
+      if (part?.type !== 'tool-result')
+        throw new Error('expected a tool result')
+      expect(part.createdAt).toBe(result.createdAt)
+    })
+
+    it('removes an invalid standalone tool createdAt from the message and part', () => {
+      const source = {
+        role: 'tool',
+        content: 'ok',
+        toolCallId: 'tool-1',
+        createdAt: 'invalid',
+      }
+      const modelMessage: ModelMessage = JSON.parse(JSON.stringify(source))
+
+      const result = modelMessageToUIMessage(modelMessage)
+
+      expect(result).not.toHaveProperty('createdAt')
+      expect(result.parts[0]).not.toHaveProperty('createdAt')
+    })
+
     it('should preserve multimodal content with metadata', () => {
       const modelMessage: ModelMessage = {
         role: 'user',
@@ -874,6 +1494,75 @@ describe('Message Converters', () => {
   })
 
   describe('modelMessagesToUIMessages', () => {
+    it('preserves per-tool identity and metadata across a multi-tool round-trip', () => {
+      const original: Array<ModelMessage> = [
+        {
+          id: 'a1',
+          role: 'assistant',
+          content: '',
+          toolCalls: [
+            {
+              id: 'c1',
+              type: 'function',
+              function: { name: 'one', arguments: '{}' },
+            },
+            {
+              id: 'c2',
+              type: 'function',
+              function: { name: 'two', arguments: '{}' },
+            },
+          ],
+        },
+        {
+          id: 'r1',
+          name: 'one',
+          role: 'tool',
+          toolCallId: 'c1',
+          content: '1',
+          metadata: { n: 1 },
+          createdAt: new Date('2026-08-20T00:00:00Z'),
+        },
+        {
+          id: 'r2',
+          name: 'two',
+          role: 'tool',
+          toolCallId: 'c2',
+          content: '2',
+          metadata: { n: 2 },
+          createdAt: new Date('2026-08-20T00:00:01Z'),
+        },
+      ]
+      const ui = modelMessagesToUIMessages(original)
+      const results = ui
+        .flatMap((message) => message.parts)
+        .filter((part) => part.type === 'tool-result')
+      expect(results).toMatchObject([
+        { id: 'r1', name: 'one', metadata: { n: 1 } },
+        { id: 'r2', name: 'two', metadata: { n: 2 } },
+      ])
+      const roundTripped = ui.flatMap(uiMessageToModelMessages)
+      const toolResults = roundTripped.filter(
+        (message) => message.role === 'tool',
+      )
+      expect(toolResults).toMatchObject([
+        {
+          id: 'r1',
+          name: 'one',
+          toolCallId: 'c1',
+          content: '1',
+          metadata: { n: 1 },
+          createdAt: new Date('2026-08-20T00:00:00Z'),
+        },
+        {
+          id: 'r2',
+          name: 'two',
+          toolCallId: 'c2',
+          content: '2',
+          metadata: { n: 2 },
+          createdAt: new Date('2026-08-20T00:00:01Z'),
+        },
+      ])
+    })
     it('should convert simple user + assistant conversation', () => {
       const modelMessages: Array<ModelMessage> = [
         { role: 'user', content: 'Hello' },
@@ -932,6 +1621,40 @@ describe('Message Converters', () => {
           state: 'complete',
         },
       ])
+    })
+
+    it('should restore a cancelled tool result and its call as errors', () => {
+      const result = modelMessagesToUIMessages([
+        {
+          role: 'assistant',
+          content: null,
+          toolCalls: [
+            {
+              id: 'tc-1',
+              type: 'function',
+              function: { name: 'deleteData', arguments: '{}' },
+            },
+          ],
+        },
+        {
+          role: 'tool',
+          content: '{"error":"Tool execution cancelled"}',
+          toolCallId: 'tc-1',
+          metadata: { tanstack: { toolResultOutcome: 'cancelled' } },
+        },
+      ])
+
+      const parts = result[0]?.parts ?? []
+      expect(parts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'tool-call', state: 'error' }),
+          expect.objectContaining({
+            type: 'tool-result',
+            state: 'error',
+            outcome: 'cancelled',
+          }),
+        ]),
+      )
     })
 
     it('should handle multi-round tool flow with proper merging', () => {
@@ -1132,7 +1855,163 @@ describe('Message Converters', () => {
 
       const result = convertMessagesToModelMessages(messages)
 
-      expect(result).toEqual([{ role: 'user', content: 'Hello' }])
+      expect(result).toEqual([{ id: 'msg-1', role: 'user', content: 'Hello' }])
+    })
+
+    it('preserves an explicit model message createdAt over metadata', () => {
+      const createdAt = new Date('2026-08-21T00:00:00.000Z')
+      const model = convertMessagesToModelMessages([
+        {
+          id: 'u1',
+          role: 'user',
+          content: 'hi',
+          createdAt,
+          metadata: {
+            tanstack: { createdAt: '2026-08-20T00:00:00.000Z' },
+          },
+        },
+      ])
+
+      expect(model[0]?.createdAt).toBe(createdAt)
+    })
+
+    it('ignores an invalid metadata.tanstack.createdAt', () => {
+      const model = convertMessagesToModelMessages([
+        {
+          id: 'u1',
+          role: 'user',
+          content: 'hi',
+          metadata: { tanstack: { createdAt: 'not-a-date' } },
+        },
+      ])
+
+      expect(model[0]).not.toHaveProperty('createdAt')
+    })
+
+    it('restores a valid metadata.tanstack.createdAt when the field is absent', () => {
+      const result = convertMessagesToModelMessages([
+        {
+          id: 'u1',
+          role: 'user',
+          content: 'hi',
+          metadata: { tanstack: { createdAt: '2026-08-20T00:00:00.000Z' } },
+        },
+      ])
+      expect(result[0]?.createdAt).toEqual(new Date('2026-08-20T00:00:00.000Z'))
+    })
+
+    it('preserves tool identity when tool-result ownership metadata is an array', () => {
+      const createdAt = new Date('2026-08-20T00:00:00.000Z')
+      const result = convertMessagesToModelMessages([
+        {
+          id: 'result-1',
+          role: 'tool',
+          toolCallId: 'call-1',
+          content: 'ok',
+          createdAt,
+          metadata: { tanstack: { toolResult: [] } },
+        },
+      ])
+
+      expect(result[0]).toMatchObject({ id: 'result-1', createdAt })
+    })
+
+    it.each([
+      [{ type: 'text', content: 1 }],
+      { type: 'text', content: 'owned' },
+    ])(
+      'preserves inbound tool fields when ownership content is malformed',
+      (ownedContent) => {
+        const createdAt = new Date('2026-08-20T00:00:00.000Z')
+        const message: ModelMessage = {
+          id: 'safe-result',
+          role: 'tool',
+          toolCallId: 'call-1',
+          content: 'safe content',
+          createdAt,
+        }
+        Object.assign(message, {
+          metadata: { tanstack: { toolResult: { content: ownedContent } } },
+        })
+
+        const result = convertMessagesToModelMessages([message])
+
+        expect(result[0]).toMatchObject({
+          id: 'safe-result',
+          content: 'safe content',
+          createdAt,
+        })
+      },
+    )
+
+    it('preserves null tool-call metadata across UI to model conversion', () => {
+      const result = uiMessageToModelMessages({
+        id: 'assistant-1',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'tool-call',
+            id: 'call-1',
+            name: 'lookup',
+            arguments: '{}',
+            state: 'input-complete',
+            metadata: null,
+          },
+        ],
+      })
+
+      expect(result[0]).toHaveProperty('toolCalls.0.metadata', null)
+    })
+
+    it('coerces a JSON-revived createdAt string into a Date', () => {
+      const iso = '2026-08-21T00:00:00.000Z'
+      const message: ModelMessage = {
+        id: 'u1',
+        role: 'user',
+        content: 'hi',
+        createdAt: new Date(iso),
+      }
+      Object.assign(message, {
+        createdAt: JSON.parse(JSON.stringify(message.createdAt)),
+      })
+      expect(typeof message.createdAt).toBe('string')
+
+      const model = convertMessagesToModelMessages([message])
+      expect(model[0]?.createdAt).toEqual(new Date(iso))
+    })
+
+    it('drops an invalid createdAt string on the model message', () => {
+      const message: ModelMessage = {
+        id: 'u1',
+        role: 'user',
+        content: 'hi',
+      }
+      Object.assign(message, { createdAt: 'not-a-date' })
+
+      const model = convertMessagesToModelMessages([message])
+      expect(model[0]).not.toHaveProperty('createdAt')
+    })
+
+    it('should preserve message metadata from UIMessages', () => {
+      const messages: Array<UIMessage> = [
+        {
+          id: 'msg-1',
+          role: 'user',
+          parts: [{ type: 'text', content: 'Hello' }],
+          metadata: { author: { id: 'user-42' } },
+        },
+      ]
+
+      const result = convertMessagesToModelMessages(messages)
+
+      expect(result).toEqual([
+        {
+          id: 'msg-1',
+          role: 'user',
+          content: 'Hello',
+          metadata: { author: { id: 'user-42' } },
+        },
+      ])
     })
 
     it('should handle mixed UIMessage and ModelMessage array', () => {
@@ -1148,7 +2027,7 @@ describe('Message Converters', () => {
       const result = convertMessagesToModelMessages(messages)
 
       expect(result).toEqual([
-        { role: 'user', content: 'Hello' },
+        { id: 'msg-1', role: 'user', content: 'Hello' },
         { role: 'assistant', content: 'Hi there!' },
       ])
     })
@@ -1202,14 +2081,29 @@ describe('Message Converters', () => {
       expect(result.parts).toEqual([{ type: 'text', content: 'Hello' }])
       expect(result.createdAt).toBeTruthy()
     })
+
+    it('should preserve createdAt when converting a ModelMessage', () => {
+      const createdAt = new Date('2025-01-01')
+      const message: ModelMessage = {
+        role: 'user',
+        content: 'Hello',
+        createdAt,
+      }
+
+      const result = normalizeToUIMessage(message, () => 'generated-id')
+
+      expect(result.createdAt).toBe(createdAt)
+    })
   })
 
   describe('Round-trip symmetry: UI -> Model -> UI', () => {
     it('should round-trip simple text user message', () => {
+      const createdAt = new Date('2025-01-01')
       const original: UIMessage = {
         id: 'msg-1',
         role: 'user',
         parts: [{ type: 'text', content: 'Hello world' }],
+        createdAt,
       }
 
       const modelMessages = uiMessageToModelMessages(original)
@@ -1218,6 +2112,59 @@ describe('Message Converters', () => {
       expect(uiMessages.length).toBe(1)
       expect(uiMessages[0]?.role).toBe(original.role)
       expect(uiMessages[0]?.parts).toEqual(original.parts)
+      expect(uiMessages[0]?.createdAt).toBe(createdAt)
+    })
+
+    it('should preserve createdAt for assistant segments and tool results', () => {
+      const createdAt = new Date('2025-01-01')
+      const original: UIMessage = {
+        id: 'msg-1',
+        role: 'assistant',
+        parts: [
+          { type: 'text', content: 'Checking inventory.' },
+          {
+            type: 'tool-call',
+            id: 'tc-1',
+            name: 'getInventory',
+            arguments: '{}',
+            state: 'input-complete',
+          },
+          {
+            type: 'tool-result',
+            toolCallId: 'tc-1',
+            content: '{"ok":true}',
+            state: 'complete',
+          },
+        ],
+        createdAt,
+      }
+
+      const modelMessages = uiMessageToModelMessages(original)
+
+      expect(modelMessages).toEqual([
+        {
+          id: 'msg-1',
+          role: 'assistant',
+          content: 'Checking inventory.',
+          toolCalls: [
+            {
+              id: 'tc-1',
+              type: 'function',
+              function: { name: 'getInventory', arguments: '{}' },
+            },
+          ],
+          createdAt,
+        },
+        {
+          role: 'tool',
+          content: '{"ok":true}',
+          toolCallId: 'tc-1',
+        },
+      ])
+
+      const uiMessages = modelMessagesToUIMessages(modelMessages)
+      expect(uiMessages).toHaveLength(1)
+      expect(uiMessages[0]?.createdAt).toBe(createdAt)
     })
 
     it('should round-trip assistant with tool-call + tool-result', () => {
@@ -1313,11 +2260,9 @@ describe('Message Converters', () => {
       const modelMessages = uiMessageToModelMessages(original)
       const uiMessages = modelMessagesToUIMessages(modelMessages)
 
-      // Multi-round should produce multiple UIMessages (one per segment)
-      // but when recombined, the structure should match segments
-      expect(uiMessages.length).toBe(2)
-
-      // First segment: text + tool-call + tool-result
+      // The segments share the original UI message id and should merge back.
+      expect(uiMessages).toHaveLength(1)
+      expect(uiMessages[0]?.id).toBe(original.id)
       expect(uiMessages[0]?.parts).toEqual([
         { type: 'text', content: 'Checking inventory.' },
         {
@@ -1334,10 +2279,6 @@ describe('Message Converters', () => {
           content: '[{"id":7}]',
           state: 'complete',
         },
-      ])
-
-      // Second segment: text + tool-call + tool-result
-      expect(uiMessages[1]?.parts).toEqual([
         { type: 'text', content: 'Found one!' },
         {
           type: 'tool-call',
@@ -1356,13 +2297,82 @@ describe('Message Converters', () => {
         },
       ])
     })
+
+    it('round-trips name, metadata, tool error, and ui-resource parts', () => {
+      const uiResource = {
+        type: 'ui-resource' as const,
+        resource: {
+          uri: 'ui://widget/todos',
+          mimeType: 'text/html',
+          text: '<div>todos</div>',
+        },
+        toolCallId: 'tc-1',
+        toolName: 'getTodos',
+      }
+      const original: UIMessage = {
+        id: 'msg-1',
+        role: 'assistant',
+        name: 'Ada',
+        metadata: { author: { id: 'user-42' } },
+        parts: [
+          { type: 'text', content: 'Checking.' },
+          {
+            type: 'tool-call',
+            id: 'tc-1',
+            name: 'getTodos',
+            arguments: '{}',
+            state: 'input-complete',
+          },
+          {
+            type: 'tool-result',
+            toolCallId: 'tc-1',
+            content: '{"error":"boom"}',
+            state: 'error',
+            error: 'boom',
+          },
+          uiResource,
+        ],
+      }
+
+      const modelMessages = uiMessageToModelMessages(original)
+      expect(
+        modelMessages.find((msg) => msg.role === 'assistant'),
+      ).toMatchObject({
+        name: 'Ada',
+        metadata: {
+          author: { id: 'user-42' },
+          tanstack: { uiResources: [uiResource] },
+        },
+      })
+      expect(modelMessages.find((msg) => msg.role === 'tool')).toMatchObject({
+        error: 'boom',
+      })
+      expect(
+        modelMessages.find((msg) => msg.role === 'tool'),
+      ).not.toHaveProperty('metadata')
+
+      const uiMessages = modelMessagesToUIMessages(modelMessages)
+      expect(uiMessages).toHaveLength(1)
+      expect(uiMessages[0]?.name).toBe('Ada')
+      expect(uiMessages[0]?.metadata).toMatchObject({
+        author: { id: 'user-42' },
+      })
+      expect(uiMessages[0]?.parts).toContainEqual(uiResource)
+      expect(uiMessages[0]?.parts).toContainEqual({
+        type: 'tool-result',
+        toolCallId: 'tc-1',
+        content: '{"error":"boom"}',
+        state: 'error',
+        error: 'boom',
+      })
+    })
   })
 
   describe('Round-trip symmetry: Model -> UI -> Model', () => {
     it('should round-trip simple text messages', () => {
       const original: Array<ModelMessage> = [
-        { role: 'user', content: 'Hello' },
-        { role: 'assistant', content: 'Hi there!' },
+        { id: 'user-1', role: 'user', content: 'Hello' },
+        { id: 'assistant-1', role: 'assistant', content: 'Hi there!' },
       ]
 
       const uiMessages = modelMessagesToUIMessages(original)
@@ -1374,6 +2384,7 @@ describe('Message Converters', () => {
     it('should round-trip assistant with toolCalls + tool result', () => {
       const original: Array<ModelMessage> = [
         {
+          id: 'assistant-1',
           role: 'assistant',
           content: 'Let me check.',
           toolCalls: [
@@ -1400,6 +2411,7 @@ describe('Message Converters', () => {
     it('should round-trip multimodal content array', () => {
       const original: Array<ModelMessage> = [
         {
+          id: 'user-1',
           role: 'user',
           content: [
             { type: 'text', content: 'What is this?' },
@@ -1419,8 +2431,9 @@ describe('Message Converters', () => {
 
     it('should round-trip multi-round tool conversation', () => {
       const original: Array<ModelMessage> = [
-        { role: 'user', content: 'Check guitars' },
+        { id: 'user-1', role: 'user', content: 'Check guitars' },
         {
+          id: 'assistant-1',
           role: 'assistant',
           content: 'Checking.',
           toolCalls: [
@@ -1431,8 +2444,13 @@ describe('Message Converters', () => {
             },
           ],
         },
-        { role: 'tool', content: '[{"id":7}]', toolCallId: 'tc-1' },
         {
+          role: 'tool',
+          content: '[{"id":7}]',
+          toolCallId: 'tc-1',
+        },
+        {
+          id: 'assistant-2',
           role: 'assistant',
           content: 'Found one!',
           toolCalls: [
@@ -1448,7 +2466,11 @@ describe('Message Converters', () => {
           content: '{"recommended":true}',
           toolCallId: 'tc-2',
         },
-        { role: 'assistant', content: 'Here is my recommendation.' },
+        {
+          id: 'assistant-3',
+          role: 'assistant',
+          content: 'Here is my recommendation.',
+        },
       ]
 
       const uiMessages = modelMessagesToUIMessages(original)
@@ -1460,6 +2482,7 @@ describe('Message Converters', () => {
     it('should round-trip assistant with null content and toolCalls', () => {
       const original: Array<ModelMessage> = [
         {
+          id: 'assistant-1',
           role: 'assistant',
           content: null,
           toolCalls: [
@@ -1470,7 +2493,38 @@ describe('Message Converters', () => {
             },
           ],
         },
-        { role: 'tool', content: '{"temp":72}', toolCallId: 'tc-1' },
+        {
+          role: 'tool',
+          content: '{"temp":72}',
+          toolCallId: 'tc-1',
+        },
+      ]
+
+      const uiMessages = modelMessagesToUIMessages(original)
+      const modelMessages = convertMessagesToModelMessages(uiMessages)
+
+      expect(modelMessages).toEqual(original)
+    })
+
+    it('round-trips ModelMessage name and ui-resource metadata', () => {
+      const uiResource = {
+        type: 'ui-resource' as const,
+        resource: {
+          uri: 'ui://widget/todos',
+          mimeType: 'text/html',
+          text: '<div>todos</div>',
+        },
+        toolCallId: 'tc-1',
+        toolName: 'getTodos',
+      }
+      const original: Array<ModelMessage> = [
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: 'here',
+          name: 'Ada',
+          metadata: { tanstack: { uiResources: [uiResource] } },
+        },
       ]
 
       const uiMessages = modelMessagesToUIMessages(original)
@@ -1592,6 +2646,9 @@ describe('Message Converters', () => {
       expect(content.approved).toBe(false)
       expect(content.pendingExecution).toBeUndefined()
       expect(content.message).toBe('User denied this action')
+      expect(toolMsg?.metadata).toEqual({
+        tanstack: { toolResultOutcome: 'denied' },
+      })
     })
   })
 
@@ -1618,6 +2675,10 @@ describe('Message Converters', () => {
       expect(result).toHaveLength(1)
       expect(result[0]!.role).toBe('assistant')
       expect(result[0]!.content).toBe('{"title":"Cheese Toast","servings":2}')
+      expect(result[0]!.structuredOutput).toEqual(uiMessage.parts[0])
+      expect(modelMessagesToUIMessages(result)[0]!.parts).toEqual(
+        uiMessage.parts,
+      )
     })
 
     it('falls back to JSON.stringify(data) when complete but raw is empty', () => {
@@ -1641,6 +2702,7 @@ describe('Message Converters', () => {
       const result = uiMessageToModelMessages(uiMessage)
       expect(result).toHaveLength(1)
       expect(result[0]!.content).toBe(JSON.stringify(data))
+      expect(result[0]!.structuredOutput).toEqual(uiMessage.parts[0])
     })
 
     it('skips streaming structured-output parts (no in-flight JSON in history)', () => {
@@ -1720,5 +2782,234 @@ describe('Message Converters', () => {
       )
       expect(assistantWithContent).toBeUndefined()
     })
+  })
+
+  describe('block order', () => {
+    function callPart(id: string): ToolCallPart {
+      return {
+        type: 'tool-call',
+        id,
+        name: 'lookup',
+        arguments: '{}',
+        state: 'input-complete',
+      }
+    }
+
+    it('writes blockOrder when the parts leave the default order', () => {
+      const [message] = uiMessageToModelMessages({
+        id: 'a1',
+        role: 'assistant',
+        parts: [
+          { type: 'thinking', content: 'plan', signature: 'sig-a' },
+          callPart('call_1'),
+          { type: 'thinking', content: 'next', signature: 'sig-b' },
+          callPart('call_2'),
+        ],
+      })
+
+      expect(message).toEqual({
+        id: 'a1',
+        role: 'assistant',
+        content: null,
+        toolCalls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'lookup', arguments: '{}' },
+          },
+          {
+            id: 'call_2',
+            type: 'function',
+            function: { name: 'lookup', arguments: '{}' },
+          },
+        ],
+        thinking: [
+          { content: 'plan', signature: 'sig-a' },
+          { content: 'next', signature: 'sig-b' },
+        ],
+        blockOrder: [
+          { type: 'thinking', index: 0 },
+          { type: 'tool-call', id: 'call_1' },
+          { type: 'thinking', index: 1 },
+          { type: 'tool-call', id: 'call_2' },
+        ],
+      })
+    })
+
+    it('writes no blockOrder for parts in the default order', () => {
+      const [message] = uiMessageToModelMessages({
+        id: 'a1',
+        role: 'assistant',
+        parts: [
+          { type: 'thinking', content: 'plan', signature: 'sig-a' },
+          { type: 'text', content: 'Hello' },
+          callPart('call_1'),
+        ],
+      })
+
+      expect(message).not.toHaveProperty('blockOrder')
+    })
+
+    it('builds UIMessage parts in map order', () => {
+      const ui = modelMessageToUIMessage(
+        {
+          role: 'assistant',
+          content: 'AB',
+          thinking: [{ content: 'plan' }, { content: 'check' }],
+          blockOrder: [
+            { type: 'thinking', index: 0 },
+            { type: 'text', length: 1 },
+            { type: 'thinking', index: 1 },
+            { type: 'text', length: 1 },
+          ],
+        },
+        'a1',
+      )
+
+      expect(ui.parts).toEqual([
+        { type: 'thinking', content: 'plan' },
+        { type: 'text', content: 'A' },
+        { type: 'thinking', content: 'check' },
+        { type: 'text', content: 'B' },
+      ])
+    })
+
+    it('keeps the default order when the map does not match the message', () => {
+      const ui = modelMessageToUIMessage(
+        {
+          role: 'assistant',
+          content: 'AB',
+          thinking: [{ content: 'plan' }, { content: 'check' }],
+          // The text lengths add up to 1, not 2.
+          blockOrder: [
+            { type: 'thinking', index: 0 },
+            { type: 'text', length: 1 },
+            { type: 'thinking', index: 1 },
+          ],
+        },
+        'a1',
+      )
+
+      expect(ui.parts).toEqual([
+        { type: 'thinking', content: 'plan' },
+        { type: 'thinking', content: 'check' },
+        { type: 'text', content: 'AB' },
+      ])
+    })
+
+    it('keeps the order from UIMessage to ModelMessage and back', () => {
+      const original: UIMessage = {
+        id: 'a1',
+        role: 'assistant',
+        parts: [
+          { type: 'thinking', content: 'plan', signature: 'sig-a' },
+          { type: 'text', content: 'Let me look.' },
+          callPart('call_1'),
+          { type: 'thinking', content: 'next', signature: 'sig-b' },
+          { type: 'text', content: 'And again.' },
+          callPart('call_2'),
+        ],
+      }
+
+      const back = modelMessagesToUIMessages(uiMessageToModelMessages(original))
+
+      expect(back).toHaveLength(1)
+      expect(
+        back[0]?.parts.map((part) =>
+          part.type === 'tool-call'
+            ? `tool-call:${part.id}`
+            : part.type === 'text' || part.type === 'thinking'
+              ? `${part.type}:${part.content}`
+              : part.type,
+        ),
+      ).toEqual([
+        'thinking:plan',
+        'text:Let me look.',
+        'tool-call:call_1',
+        'thinking:next',
+        'text:And again.',
+        'tool-call:call_2',
+      ])
+    })
+  })
+
+  it('preserves createdAt fields inside tool content and metadata', () => {
+    const metadata = {
+      createdAt: 'tool-metadata',
+      tanstack: { createdAt: '2026-08-20T00:00:00.000Z' },
+    }
+    const ui = modelMessagesToUIMessages([
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: null,
+        toolCalls: [
+          {
+            id: 'tc1',
+            type: 'function',
+            function: { name: 'x', arguments: '{}' },
+          },
+        ],
+      },
+      {
+        id: 'r1',
+        role: 'tool',
+        toolCallId: 'tc1',
+        metadata,
+        content: [
+          {
+            type: 'text',
+            content: 'ok',
+            metadata: { createdAt: 'content-metadata' },
+          },
+        ],
+      },
+    ])
+    const result = ui[0]!.parts.find((part) => part.type === 'tool-result')!
+    expect(result.metadata).toEqual(metadata)
+    expect(result).toHaveProperty('content.0.metadata', {
+      createdAt: 'content-metadata',
+    })
+  })
+})
+
+describe('assistant replay metadata preservation', () => {
+  it('drops only run timings and keeps supported metadata without changing UI history', () => {
+    const message: UIMessage = {
+      id: 'metadata-row',
+      role: 'assistant',
+      parts: [{ type: 'text', content: 'Hi' }],
+      metadata: {
+        caller: 'keep',
+        tanstack: {
+          run: { id: 'run', startedAt: 1, finishedAt: 2 },
+          source: {
+            provider: 'anthropic',
+            api: 'anthropic-messages',
+            model: 'claude-sonnet-5',
+          },
+          responseId: 'response',
+          model: 'actual-model',
+          stopReason: 'end_turn',
+        },
+      },
+    }
+    const before = structuredClone(message)
+    const [result] = uiMessageToModelMessages(message)
+    expect(result?.metadata).toEqual({
+      caller: 'keep',
+      tanstack: {
+        run: { id: 'run' },
+        source: {
+          provider: 'anthropic',
+          api: 'anthropic-messages',
+          model: 'claude-sonnet-5',
+        },
+        responseId: 'response',
+        model: 'actual-model',
+        stopReason: 'end_turn',
+      },
+    })
+    expect(message).toEqual(before)
   })
 })

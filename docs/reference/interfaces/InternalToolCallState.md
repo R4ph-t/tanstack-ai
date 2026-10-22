@@ -3,9 +3,7 @@ id: InternalToolCallState
 title: InternalToolCallState
 ---
 
-# Interface: InternalToolCallState
-
-Defined in: [packages/ai/src/activities/chat/stream/types.ts:21](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/stream/types.ts#L21)
+Defined in: packages/ai/src/activities/chat/stream/types.ts:21
 
 Internal state for a tool call being tracked
 
@@ -17,7 +15,7 @@ Internal state for a tool call being tracked
 arguments: string;
 ```
 
-Defined in: [packages/ai/src/activities/chat/stream/types.ts:24](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/stream/types.ts#L24)
+Defined in: packages/ai/src/activities/chat/stream/types.ts:24
 
 ***
 
@@ -27,7 +25,7 @@ Defined in: [packages/ai/src/activities/chat/stream/types.ts:24](https://github.
 id: string;
 ```
 
-Defined in: [packages/ai/src/activities/chat/stream/types.ts:22](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/stream/types.ts#L22)
+Defined in: packages/ai/src/activities/chat/stream/types.ts:22
 
 ***
 
@@ -37,17 +35,17 @@ Defined in: [packages/ai/src/activities/chat/stream/types.ts:22](https://github.
 index: number;
 ```
 
-Defined in: [packages/ai/src/activities/chat/stream/types.ts:27](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/stream/types.ts#L27)
+Defined in: packages/ai/src/activities/chat/stream/types.ts:27
 
 ***
 
 ### metadata?
 
 ```ts
-optional metadata: Record<string, unknown>;
+optional metadata?: Record<string, unknown>;
 ```
 
-Defined in: [packages/ai/src/activities/chat/stream/types.ts:32](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/stream/types.ts#L32)
+Defined in: packages/ai/src/activities/chat/stream/types.ts:32
 
 Provider-specific metadata that round-trips with the tool call
 (e.g. Gemini's `thoughtSignature`). Untyped at this layer because
@@ -62,17 +60,17 @@ via their `TToolCallMetadata` generic.
 name: string;
 ```
 
-Defined in: [packages/ai/src/activities/chat/stream/types.ts:23](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/stream/types.ts#L23)
+Defined in: packages/ai/src/activities/chat/stream/types.ts:23
 
 ***
 
 ### parsedArguments?
 
 ```ts
-optional parsedArguments: any;
+optional parsedArguments?: any;
 ```
 
-Defined in: [packages/ai/src/activities/chat/stream/types.ts:26](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/stream/types.ts#L26)
+Defined in: packages/ai/src/activities/chat/stream/types.ts:26
 
 ***
 
@@ -82,4 +80,4 @@ Defined in: [packages/ai/src/activities/chat/stream/types.ts:26](https://github.
 state: ToolCallState;
 ```
 
-Defined in: [packages/ai/src/activities/chat/stream/types.ts:25](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/stream/types.ts#L25)
+Defined in: packages/ai/src/activities/chat/stream/types.ts:25

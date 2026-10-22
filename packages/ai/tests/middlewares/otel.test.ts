@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { SpanKind, SpanStatusCode } from '@opentelemetry/api'
 import { otelMiddleware } from '../../src/middlewares/otel'
 import { usageAttributes } from '../../src/middlewares/usage-attributes'
+import { applyGenerationResultTransforms } from '../../src/activities/middleware/run'
 import {
   createFakeTracer,
   createFakeMeter,
@@ -9,7 +10,8 @@ import {
   makeToolCall,
   type FakeSpan,
 } from './fake-otel'
-import type { TokenUsage } from '../../src/types'
+import { EventType } from '../../src/types'
+import type { StreamChunk, TokenUsage } from '../../src/types'
 import type {
   ChatMiddleware,
   ChatMiddlewareContext,
@@ -20,6 +22,22 @@ import type {
   GenerationMiddlewareContext,
 } from '../../src/activities/middleware/types'
 import { ev } from '../test-utils'
+import type { RunFinishedEvent } from '../../src/types'
+
+function finishedChunk(
+  finishReason: 'stop' | 'tool_calls' = 'stop',
+  usage?: TokenUsage,
+  model = 'gpt-4o',
+): RunFinishedEvent {
+  const chunk = ev.runFinished(finishReason, 'run-1', usage)
+  return {
+    ...chunk,
+    metadata: {
+      ...chunk.metadata,
+      tanstack: { ...chunk.metadata?.tanstack, model },
+    },
+  }
+}
 
 /**
  * Build a minimal base GenerationMiddlewareContext for the media-activity unit
@@ -37,6 +55,7 @@ function makeGenCtx(
     source: 'server',
     context: undefined,
     createId: (prefix: string) => `${prefix}-1`,
+    resultTransforms: [],
     ...overrides,
   }
 }
@@ -54,6 +73,32 @@ async function runToIterationStart(
     tools: [],
     ...config,
   })
+}
+
+async function runUsageIterations(
+  mw: ChatMiddleware,
+  ctx: ChatMiddlewareContext,
+  usages: Array<TokenUsage | undefined>,
+) {
+  await mw.onStart?.(ctx)
+  for (const [iteration, usage] of usages.entries()) {
+    ctx.iteration = iteration
+    ctx.phase = 'beforeModel'
+    await mw.onConfig?.(ctx, {
+      messages: [],
+      systemPrompts: [],
+      tools: [],
+    })
+    await mw.onChunk?.(
+      ctx,
+      ev.runFinished(
+        iteration === usages.length - 1 ? 'stop' : 'tool_calls',
+        'run-1',
+        usage,
+      ),
+    )
+    if (usage !== undefined) await mw.onUsage?.(ctx, usage)
+  }
 }
 
 class RateLimitError extends Error {
@@ -114,7 +159,7 @@ describe('otelMiddleware — iteration span lifecycle', () => {
     expect(iterSpan!.attributes['gen_ai.request.top_p']).toBe(0.9)
     expect(iterSpan!.attributes['gen_ai.request.max_tokens']).toBe(512)
 
-    await mw.onChunk?.(ctx, { ...ev.runFinished('stop'), model: 'gpt-4o' })
+    await mw.onChunk?.(ctx, finishedChunk())
     // The iteration span stays open across RUN_FINISHED so tool spans can
     // nest under it and onUsage still has a target. It closes on onFinish.
     expect(iterSpan!.ended).toBe(false)
@@ -130,6 +175,42 @@ describe('otelMiddleware — iteration span lifecycle', () => {
     })
     expect(iterSpan!.ended).toBe(true)
     expect(rootSpan!.ended).toBe(true)
+  })
+
+  it('sets model, finish reason, and usage from metadata.tanstack + spec usage[]', async () => {
+    const { tracer, spans } = createFakeTracer()
+    const mw = otelMiddleware({ tracer })
+    const ctx = makeCtx()
+
+    await runToIterationStart(mw, ctx)
+    await mw.onChunk?.(ctx, {
+      type: EventType.RUN_FINISHED,
+      threadId: 'thread-1',
+      runId: 'run-1',
+      timestamp: Date.now(),
+      usage: [
+        {
+          model: 'gpt-4o',
+          inputTokens: 100,
+          outputTokens: 50,
+          totalTokens: 150,
+        },
+      ],
+      metadata: {
+        tanstack: {
+          model: 'gpt-4o',
+          finishReason: 'stop',
+        },
+      },
+    } as StreamChunk)
+
+    expect(spans[1]!.attributes['gen_ai.response.finish_reasons']).toEqual([
+      'stop',
+    ])
+    expect(spans[1]!.attributes['gen_ai.response.model']).toBe('gpt-4o')
+    expect(spans[1]!.attributes['gen_ai.usage.input_tokens']).toBe(100)
+    expect(spans[1]!.attributes['gen_ai.usage.output_tokens']).toBe(50)
+    expect(spans[1]!.attributes['gen_ai.usage.total_tokens']).toBe(150)
   })
 
   it('reads sampling attributes from Ollama-nested modelOptions.options', async () => {
@@ -197,6 +278,110 @@ describe('otelMiddleware — iteration span lifecycle', () => {
     expect(spans[1]!.name).toBe('chat gpt-4o #0')
     expect(spans[2]!.name).toBe('chat gpt-4o #1')
   })
+
+  // #1054 — no-tools + outputSchema skips the agent loop, so the only
+  // onConfig that fires is phase=structuredOutput. That must open a
+  // generation (iteration) span or captureContent is a silent no-op and
+  // backends that key off iteration spans (PostHog $ai_generation) see
+  // an empty trace.
+  it('opens an iteration span on onConfig(structuredOutput) — no-tools + outputSchema path', async () => {
+    const { tracer, spans } = createFakeTracer()
+    const mw = otelMiddleware({ tracer, captureContent: true })
+    const ctx = makeCtx()
+
+    await mw.onStart?.(ctx)
+    ctx.phase = 'structuredOutput'
+    await mw.onConfig?.(ctx, {
+      messages: [{ role: 'user', content: 'Describe this scene' }],
+      systemPrompts: [],
+      tools: [],
+    })
+
+    expect(spans).toHaveLength(2)
+    const [rootSpan, iterSpan] = spans
+    expect(iterSpan!.parent).toBe(rootSpan)
+    expect(iterSpan!.name).toBe('chat gpt-4o #0')
+    expect(iterSpan!.kind).toBe(SpanKind.CLIENT)
+    expect(iterSpan!.attributes['gen_ai.operation.name']).toBe('chat')
+    expect(iterSpan!.attributes['tanstack.ai.iteration']).toBe(0)
+    expect(iterSpan!.attributes['gen_ai.input.messages']).toBe(
+      JSON.stringify([{ role: 'user', content: 'Describe this scene' }]),
+    )
+
+    await mw.onChunk?.(ctx, ev.textContent('{"description":"a sunny park"}'))
+    await mw.onChunk?.(
+      ctx,
+      finishedChunk('stop', {
+        promptTokens: 12,
+        completionTokens: 8,
+        totalTokens: 20,
+      }),
+    )
+    expect(iterSpan!.attributes['gen_ai.output.messages']).toBe(
+      JSON.stringify([
+        { role: 'assistant', content: '{"description":"a sunny park"}' },
+      ]),
+    )
+    expect(iterSpan!.attributes['gen_ai.usage.input_tokens']).toBe(12)
+
+    await mw.onFinish?.(ctx, {
+      finishReason: 'stop',
+      duration: 10,
+      content: '',
+    })
+    expect(iterSpan!.ended).toBe(true)
+    expect(rootSpan!.ended).toBe(true)
+  })
+
+  it('does not open an iteration span for non-model-call phases', async () => {
+    const { tracer, spans } = createFakeTracer()
+    const mw = otelMiddleware({ tracer })
+    const ctx = makeCtx()
+
+    await mw.onStart?.(ctx)
+    for (const phase of [
+      'init',
+      'modelStream',
+      'beforeTools',
+      'afterTools',
+    ] as const) {
+      ctx.phase = phase
+      await mw.onConfig?.(ctx, {
+        messages: [],
+        systemPrompts: [],
+        tools: [],
+      })
+    }
+
+    // Root span only — none of those phases are a provider model call.
+    expect(spans).toHaveLength(1)
+  })
+
+  it('numbers structuredOutput finalization after a prior beforeModel span (#N+1)', async () => {
+    // Tools + outputSchema: agent loop opens #0, then finalization must open
+    // a distinct #1 rather than reusing ctx.iteration from the last turn.
+    const { tracer, spans } = createFakeTracer()
+    const mw = otelMiddleware({ tracer })
+    const ctx = makeCtx()
+
+    await runToIterationStart(mw, ctx)
+    await mw.onChunk?.(ctx, ev.runFinished('tool_calls'))
+    // Engine leaves ctx.iteration at 0 for finalization; middleware must
+    // still mint a distinct leaf.
+    ctx.phase = 'structuredOutput'
+    ctx.iteration = 0
+    await mw.onConfig?.(ctx, {
+      messages: [{ role: 'user', content: 'hi' }],
+      systemPrompts: [],
+      tools: [],
+    })
+
+    expect(spans).toHaveLength(3)
+    expect(spans[1]!.ended).toBe(true)
+    expect(spans[1]!.name).toBe('chat gpt-4o #0')
+    expect(spans[2]!.name).toBe('chat gpt-4o #1')
+    expect(spans[2]!.attributes['tanstack.ai.iteration']).toBe(1)
+  })
 })
 
 describe('otelMiddleware — token histogram', () => {
@@ -210,11 +395,14 @@ describe('otelMiddleware — token histogram', () => {
     const ctx = makeCtx()
 
     await runToIterationStart(mw, ctx)
-    await mw.onChunk?.(ctx, {
-      ...ev.runFinished('stop'),
-      model: 'gpt-4o',
-      usage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 },
-    })
+    await mw.onChunk?.(
+      ctx,
+      finishedChunk('stop', {
+        promptTokens: 100,
+        completionTokens: 50,
+        totalTokens: 150,
+      }),
+    )
 
     expect(spans[1]!.attributes['gen_ai.usage.input_tokens']).toBe(100)
     expect(spans[1]!.attributes['gen_ai.usage.output_tokens']).toBe(50)
@@ -232,7 +420,7 @@ describe('otelMiddleware — token histogram', () => {
     // Production order: onChunk(RUN_FINISHED) fires first, then runOnUsage.
     // This test is the regression guard for the "onUsage no-op" bug.
     await runToIterationStart(mw, ctx)
-    await mw.onChunk?.(ctx, { ...ev.runFinished('stop'), model: 'gpt-4o' })
+    await mw.onChunk?.(ctx, finishedChunk())
     await mw.onUsage?.(ctx, {
       promptTokens: 42,
       completionTokens: 17,
@@ -286,6 +474,63 @@ describe('otelMiddleware — token histogram', () => {
   })
 })
 
+describe('otelMiddleware — root usage rollup', () => {
+  it('rolls up mixed multi-iteration usage without changing iteration data or metrics', async () => {
+    const usages: Array<TokenUsage | undefined> = [
+      {
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        promptTokensDetails: { cachedTokens: 0, cacheWriteTokens: 0 },
+        completionTokensDetails: { reasoningTokens: 0 },
+      },
+      undefined,
+      {
+        promptTokens: 100,
+        completionTokens: 10,
+        totalTokens: 110,
+        promptTokensDetails: { cachedTokens: 20, cacheWriteTokens: 5 },
+        completionTokensDetails: { reasoningTokens: 1 },
+      },
+      { promptTokens: 200, completionTokens: 20, totalTokens: 220 },
+    ]
+    const expected: TokenUsage = {
+      promptTokens: 300,
+      completionTokens: 30,
+      totalTokens: 330,
+      promptTokensDetails: { cachedTokens: 20, cacheWriteTokens: 5 },
+      completionTokensDetails: { reasoningTokens: 1 },
+    }
+    const { tracer, spans } = createFakeTracer()
+    const { meter, records } = createFakeMeter()
+    const mw = otelMiddleware({ tracer, meter })
+    const ctx = makeCtx()
+
+    await runUsageIterations(mw, ctx, usages)
+    await mw.onFinish?.(ctx, {
+      finishReason: 'stop',
+      duration: 10,
+      content: '',
+      usage: usages.at(-1)!,
+    })
+
+    const [root, ...iterations] = spans
+    expect(root!.attributes).toMatchObject(usageAttributes(expected))
+    expect(root!.attributes['tanstack.ai.iterations']).toBe(usages.length)
+    expect(iterations).toHaveLength(usages.length)
+    expect(
+      iterations.map((span) => span.attributes['gen_ai.usage.input_tokens']),
+    ).toEqual([0, undefined, 100, 200])
+
+    const tokenRecords = records.filter(
+      (record) => record.name === 'gen_ai.client.token.usage',
+    )
+    expect(tokenRecords.map((record) => record.value)).toEqual([
+      0, 0, 100, 10, 200, 20,
+    ])
+  })
+})
+
 describe('otelMiddleware — duration histogram and rollup', () => {
   it('records duration histogram on onFinish and rolls up tokens onto root', async () => {
     const { tracer, spans } = createFakeTracer()
@@ -299,7 +544,7 @@ describe('otelMiddleware — duration histogram and rollup', () => {
       completionTokens: 50,
       totalTokens: 150,
     })
-    await mw.onChunk?.(ctx, { ...ev.runFinished('stop'), model: 'gpt-4o' })
+    await mw.onChunk?.(ctx, finishedChunk())
     await mw.onFinish?.(ctx, {
       finishReason: 'stop',
       duration: 1250,
@@ -345,7 +590,6 @@ describe('otelMiddleware — full usage emission', () => {
     totalTokens: 165,
     promptTokensDetails: { cachedTokens: 80, cacheWriteTokens: 10 },
     completionTokensDetails: { reasoningTokens: 15 },
-    durationSeconds: 2.5,
     cost: 0.0123,
     costDetails: {
       upstreamCost: 0.01,
@@ -362,7 +606,6 @@ describe('otelMiddleware — full usage emission', () => {
     expect(span.attributes['gen_ai.usage.cache_read.input_tokens']).toBe(80)
     expect(span.attributes['gen_ai.usage.cache_creation.input_tokens']).toBe(10)
     expect(span.attributes['gen_ai.usage.reasoning.output_tokens']).toBe(15)
-    expect(span.attributes['tanstack.ai.usage.duration_seconds']).toBe(2.5)
     expect(span.attributes['tanstack.ai.usage.upstream_cost']).toBe(0.01)
     expect(span.attributes['tanstack.ai.usage.upstream_input_cost']).toBe(0.004)
     expect(span.attributes['tanstack.ai.usage.upstream_output_cost']).toBe(
@@ -376,11 +619,7 @@ describe('otelMiddleware — full usage emission', () => {
     const ctx = makeCtx()
 
     await runToIterationStart(mw, ctx)
-    await mw.onChunk?.(ctx, {
-      ...ev.runFinished('stop'),
-      model: 'gpt-4o',
-      usage: fullUsage,
-    })
+    await mw.onChunk?.(ctx, finishedChunk('stop', fullUsage))
 
     expectFullUsageAttrs(spans[1]!)
   })
@@ -402,7 +641,7 @@ describe('otelMiddleware — full usage emission', () => {
     const ctx = makeCtx()
 
     await runToIterationStart(mw, ctx)
-    await mw.onChunk?.(ctx, { ...ev.runFinished('stop'), model: 'gpt-4o' })
+    await mw.onChunk?.(ctx, finishedChunk())
     await mw.onFinish?.(ctx, {
       finishReason: 'stop',
       duration: 1250,
@@ -438,9 +677,6 @@ describe('otelMiddleware — full usage emission', () => {
     ).toBeUndefined()
     expect(
       span.attributes['gen_ai.usage.reasoning.output_tokens'],
-    ).toBeUndefined()
-    expect(
-      span.attributes['tanstack.ai.usage.duration_seconds'],
     ).toBeUndefined()
     expect(span.attributes['tanstack.ai.usage.upstream_cost']).toBeUndefined()
     expect(
@@ -484,10 +720,7 @@ describe('otelMiddleware — tool spans', () => {
     const iterSpan = spans[1]!
     // Real flow: RUN_FINISHED(tool_calls) fires before onBeforeToolCall.
     // Tool span must still nest under the iteration span.
-    await mw.onChunk?.(ctx, {
-      ...ev.runFinished('tool_calls'),
-      model: 'gpt-4o',
-    })
+    await mw.onChunk?.(ctx, finishedChunk('tool_calls'))
     await mw.onBeforeToolCall?.(ctx, {
       toolCall: makeToolCall({ id: 'tc-1', function: { name: 'get_weather' } }),
       tool: undefined,
@@ -728,6 +961,64 @@ describe('otelMiddleware — captureContent', () => {
     expect(userEvt.attributes!['content']).toBe('look at this [image]')
   })
 
+  it('keeps multimodal parts structured in gen_ai.input.messages', async () => {
+    const { tracer, spans } = createFakeTracer()
+    const mw = otelMiddleware({
+      tracer,
+      captureContent: true,
+      redact: (s) => s.replace('secret', '***'),
+    })
+    const ctx = makeCtx()
+
+    await runToIterationStart(mw, ctx, {
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', content: 'describe secret' },
+            {
+              type: 'image',
+              source: {
+                type: 'url',
+                value: 'https://x.test/a.png',
+                mimeType: 'image/png',
+              },
+            },
+            { type: 'audio', source: { type: 'file', value: 'file_123' } },
+            {
+              type: 'video',
+              source: { type: 'data', value: 'AAAA', mimeType: 'video/mp4' },
+            },
+            {
+              type: 'image',
+              source: { type: 'url', value: 'data:image/png;base64,AAAA' },
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(
+      JSON.parse(spans[1]!.attributes['gen_ai.input.messages'] as string),
+    ).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', content: 'describe ***' },
+          {
+            type: 'uri',
+            modality: 'image',
+            uri: 'https://x.test/a.png',
+            mime_type: 'image/png',
+          },
+          { type: 'file', modality: 'audio', file_id: 'file_123' },
+          { type: 'text', content: '[video]' },
+          { type: 'text', content: '[image]' },
+        ],
+      },
+    ])
+  })
+
   it('emits redaction sentinel and never raw content when redact throws', async () => {
     const { tracer, spans } = createFakeTracer()
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -768,7 +1059,7 @@ describe('otelMiddleware — captureContent', () => {
     await mw.onChunk?.(ctx, ev.textContent('abcdefghij'))
     // Over the cap — should truncate and stop accumulating.
     await mw.onChunk?.(ctx, ev.textContent('klmnopqrstuvwxyz'))
-    await mw.onChunk?.(ctx, { ...ev.runFinished('stop'), model: 'gpt-4o' })
+    await mw.onChunk?.(ctx, finishedChunk())
 
     const iter = spans[1]!
     const choice = iter.events.find((e) => e.name === 'gen_ai.choice')!
@@ -833,9 +1124,15 @@ describe('otelMiddleware — error and abort paths', () => {
       toolCallId?: string | undefined
       ended: boolean
     }> = []
+    let rootInputAtEnd: unknown
     const mw = otelMiddleware({
       tracer,
       onSpanEnd: (info, span) => {
+        if (info.kind === 'chat') {
+          rootInputAtEnd = (span as FakeSpan).attributes[
+            'gen_ai.usage.input_tokens'
+          ]
+        }
         seen.push({
           kind: info.kind,
           toolName: info.kind === 'tool' ? info.toolName : undefined,
@@ -847,6 +1144,11 @@ describe('otelMiddleware — error and abort paths', () => {
     const ctx = makeCtx({ hasTools: true })
 
     await runToIterationStart(mw, ctx)
+    await mw.onUsage?.(ctx, {
+      promptTokens: 12,
+      completionTokens: 3,
+      totalTokens: 15,
+    })
     await mw.onBeforeToolCall?.(ctx, {
       toolCall: makeToolCall({ id: 'tc-err', function: { name: 'my_tool' } }),
       tool: undefined,
@@ -862,6 +1164,7 @@ describe('otelMiddleware — error and abort paths', () => {
     const toolCall = seen.find((s) => s.kind === 'tool')!
     expect(toolCall.toolName).toBe('my_tool')
     expect(toolCall.toolCallId).toBe('tc-err')
+    expect(rootInputAtEnd).toBe(12)
   })
 
   it('onAbort fires onSpanEnd for iteration, open tool spans, then root — in depth-first order', async () => {
@@ -872,9 +1175,15 @@ describe('otelMiddleware — error and abort paths', () => {
       toolCallId?: string | undefined
       ended: boolean
     }> = []
+    let rootInputAtEnd: unknown
     const mw = otelMiddleware({
       tracer,
       onSpanEnd: (info, span) => {
+        if (info.kind === 'chat') {
+          rootInputAtEnd = (span as FakeSpan).attributes[
+            'gen_ai.usage.input_tokens'
+          ]
+        }
         seen.push({
           kind: info.kind,
           toolName: info.kind === 'tool' ? info.toolName : undefined,
@@ -886,6 +1195,11 @@ describe('otelMiddleware — error and abort paths', () => {
     const ctx = makeCtx({ hasTools: true })
 
     await runToIterationStart(mw, ctx)
+    await mw.onUsage?.(ctx, {
+      promptTokens: 8,
+      completionTokens: 2,
+      totalTokens: 10,
+    })
     await mw.onBeforeToolCall?.(ctx, {
       toolCall: makeToolCall({
         id: 'tc-abort',
@@ -901,6 +1215,7 @@ describe('otelMiddleware — error and abort paths', () => {
 
     expect(seen.map((s) => s.kind)).toEqual(['iteration', 'tool', 'chat'])
     expect(seen.every((s) => s.ended === false)).toBe(true)
+    expect(rootInputAtEnd).toBe(8)
   })
 
   it('onFinish sweeps dangling tool spans with outcome=unknown before closing the iteration span', async () => {
@@ -971,7 +1286,7 @@ describe('otelMiddleware — tool-message and choice events', () => {
     await runToIterationStart(mw, ctx)
     await mw.onChunk?.(ctx, ev.textContent('Hello '))
     await mw.onChunk?.(ctx, ev.textContent('world'))
-    await mw.onChunk?.(ctx, { ...ev.runFinished('stop'), model: 'gpt-4o' })
+    await mw.onChunk?.(ctx, finishedChunk())
 
     const iter = spans[1]!
     const choice = iter.events.find((e) => e.name === 'gen_ai.choice')!
@@ -1177,7 +1492,10 @@ describe('otelMiddleware — media activities', () => {
       ['video', 'video_generation'],
       ['audio', 'audio_generation'],
       ['tts', 'text_to_speech'],
+      ['voice', 'voice_generation'],
       ['transcription', 'transcription'],
+      ['world', 'world_generation'],
+      ['liveVideo', 'live_video_generation'],
     ]
     for (const [activity, operation] of cases) {
       const { tracer, spans } = createFakeTracer()
@@ -1196,7 +1514,6 @@ describe('otelMiddleware — media activities', () => {
       promptTokens: 0,
       completionTokens: 0,
       totalTokens: 0,
-      unitsBilled: 1,
       cost: 0.04,
     }
 
@@ -1207,7 +1524,6 @@ describe('otelMiddleware — media activities', () => {
     const span = spans[0]!
     expect(span.ended).toBe(true)
     expect(span.attributes['gen_ai.usage.cost']).toBe(0.04)
-    expect(span.attributes['tanstack.ai.usage.units_billed']).toBe(1)
 
     // Media records the duration histogram but NOT the chat token histogram.
     expect(records).toHaveLength(1)
@@ -1300,6 +1616,154 @@ describe('otelMiddleware — media activities', () => {
     expect(spans[0]!.attributes['app.tenant']).toBe('acme')
   })
 
+  it('captures no content by default', async () => {
+    const { tracer, spans } = createFakeTracer()
+    const mw = otelMiddleware({ tracer })
+    const ctx = makeGenCtx({ artifactInputs: { prompt: 'a cat' } })
+
+    mw.onStart?.(ctx)
+    await applyGenerationResultTransforms(ctx, {
+      images: [{ url: 'https://cdn.example/out.png' }],
+    })
+
+    expect(ctx.resultTransforms).toHaveLength(0)
+    expect(spans[0]!.attributes['gen_ai.input.messages']).toBeUndefined()
+    expect(spans[0]!.attributes['gen_ai.output.messages']).toBeUndefined()
+  })
+
+  it('captures the prompt, input media and output URLs with captureContent', async () => {
+    const { tracer, spans } = createFakeTracer()
+    const mw = otelMiddleware({
+      tracer,
+      captureContent: true,
+      redact: (s) => s.replace('secret', '***'),
+    })
+    const ctx = makeGenCtx({
+      activity: 'video',
+      artifactInputs: {
+        prompt: [
+          { type: 'text', content: 'animate secret' },
+          {
+            type: 'image',
+            source: { type: 'url', value: 'https://cdn.example/start.png' },
+          },
+          {
+            type: 'image',
+            source: { type: 'data', value: 'AAAA', mimeType: 'image/png' },
+          },
+        ],
+      },
+    })
+
+    mw.onStart?.(ctx)
+    const result = { url: 'https://cdn.example/out.mp4' }
+    expect(await applyGenerationResultTransforms(ctx, result)).toBe(result)
+    mw.onFinish?.(ctx, { duration: 1 })
+
+    const span = spans[0]!
+    const input = JSON.parse(span.attributes['gen_ai.input.messages'] as string)
+    expect(input).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', content: 'animate ***' },
+          {
+            type: 'uri',
+            modality: 'image',
+            uri: 'https://cdn.example/start.png',
+          },
+          { type: 'text', content: '[image]' },
+        ],
+      },
+    ])
+    expect(span.attributes['langfuse.observation.input']).toBe(
+      span.attributes['gen_ai.input.messages'],
+    )
+    const output = JSON.parse(
+      span.attributes['gen_ai.output.messages'] as string,
+    )
+    expect(output).toEqual([
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'uri',
+            modality: 'video',
+            uri: 'https://cdn.example/out.mp4',
+          },
+        ],
+      },
+    ])
+    expect(span.attributes['langfuse.observation.output']).toBe(
+      span.attributes['gen_ai.output.messages'],
+    )
+  })
+
+  it('captures image outputs, keeping base64 as a placeholder', async () => {
+    const { tracer, spans } = createFakeTracer()
+    const mw = otelMiddleware({ tracer, captureContent: true })
+    const ctx = makeGenCtx({ artifactInputs: { prompt: 'a cat' } })
+
+    mw.onStart?.(ctx)
+    await applyGenerationResultTransforms(ctx, {
+      images: [{ url: 'https://cdn.example/a.png' }, { b64Json: 'AAAA' }],
+    })
+
+    expect(
+      JSON.parse(spans[0]!.attributes['gen_ai.output.messages'] as string),
+    ).toEqual([
+      {
+        role: 'assistant',
+        content: [
+          { type: 'uri', modality: 'image', uri: 'https://cdn.example/a.png' },
+          { type: 'text', content: '[image]' },
+        ],
+      },
+    ])
+  })
+
+  it('captures transcription source audio and transcript text, capped by maxContentLength', async () => {
+    const { tracer, spans } = createFakeTracer()
+    const mw = otelMiddleware({
+      tracer,
+      captureContent: true,
+      maxContentLength: 5,
+    })
+    const urlCtx = makeGenCtx({
+      activity: 'transcription',
+      artifactInputs: { audio: 'https://cdn.example/in.mp3' },
+    })
+    const blobCtx = makeGenCtx({
+      activity: 'transcription',
+      artifactInputs: { audio: new Blob(['x']) },
+    })
+
+    mw.onStart?.(urlCtx)
+    mw.onStart?.(blobCtx)
+    await applyGenerationResultTransforms(urlCtx, { text: 'hello world' })
+
+    expect(
+      JSON.parse(spans[0]!.attributes['gen_ai.input.messages'] as string),
+    ).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'uri', modality: 'audio', uri: 'https://cdn.example/in.mp3' },
+        ],
+      },
+    ])
+    expect(
+      JSON.parse(spans[1]!.attributes['gen_ai.input.messages'] as string),
+    ).toEqual([
+      { role: 'user', content: [{ type: 'text', content: '[audio]' }] },
+    ])
+    expect(
+      JSON.parse(spans[0]!.attributes['gen_ai.output.messages'] as string),
+    ).toEqual([
+      { role: 'assistant', content: [{ type: 'text', content: 'hello…' }] },
+    ])
+  })
+
   it('keeps the span when a formatter throws', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const { tracer, spans } = createFakeTracer()
@@ -1319,20 +1783,49 @@ describe('otelMiddleware — media activities', () => {
 })
 
 describe('usageAttributes', () => {
-  it('emits guarded media + cost fields, omitting absent ones', () => {
+  it('emits guarded fields, omitting absent ones', () => {
     const usage: TokenUsage = {
       promptTokens: 10,
       completionTokens: 0,
       totalTokens: 10,
-      durationSeconds: 12.5,
-      unitsBilled: 3,
     }
     const attrs = usageAttributes(usage)
 
     expect(attrs['gen_ai.usage.input_tokens']).toBe(10)
-    expect(attrs['tanstack.ai.usage.duration_seconds']).toBe(12.5)
-    expect(attrs['tanstack.ai.usage.units_billed']).toBe(3)
     // No cost reported → key absent.
     expect('gen_ai.usage.cost' in attrs).toBe(false)
+  })
+
+  it('emits the self-describing billed quantity with its unit', () => {
+    const usage: TokenUsage = {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      billed: { quantity: 8, unit: 'seconds' },
+    }
+    const attrs = usageAttributes(usage)
+
+    expect(attrs['tanstack.ai.usage.billed_quantity']).toBe(8)
+    expect(attrs['tanstack.ai.usage.billed_unit']).toBe('seconds')
+  })
+
+  it('omits both billed attributes when billed is absent or non-numeric', () => {
+    const attrs = usageAttributes({
+      promptTokens: 1,
+      completionTokens: 2,
+      totalTokens: 3,
+    })
+    expect('tanstack.ai.usage.billed_quantity' in attrs).toBe(false)
+    expect('tanstack.ai.usage.billed_unit' in attrs).toBe(false)
+
+    // A NaN quantity (bad provider data) must not emit a dangling unit.
+    const bad = usageAttributes({
+      promptTokens: 1,
+      completionTokens: 2,
+      totalTokens: 3,
+      billed: { quantity: Number.NaN, unit: 'units' },
+    })
+    expect('tanstack.ai.usage.billed_quantity' in bad).toBe(false)
+    expect('tanstack.ai.usage.billed_unit' in bad).toBe(false)
   })
 })

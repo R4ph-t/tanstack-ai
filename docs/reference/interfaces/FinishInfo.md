@@ -3,9 +3,7 @@ id: FinishInfo
 title: FinishInfo
 ---
 
-# Interface: FinishInfo
-
-Defined in: [packages/ai/src/activities/chat/middleware/types.ts:357](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/middleware/types.ts#L357)
+Defined in: packages/ai/src/activities/chat/middleware/types.ts:562
 
 Information passed to onFinish.
 
@@ -17,7 +15,7 @@ Information passed to onFinish.
 content: string;
 ```
 
-Defined in: [packages/ai/src/activities/chat/middleware/types.ts:363](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/middleware/types.ts#L363)
+Defined in: packages/ai/src/activities/chat/middleware/types.ts:568
 
 Final accumulated text content
 
@@ -29,7 +27,7 @@ Final accumulated text content
 duration: number;
 ```
 
-Defined in: [packages/ai/src/activities/chat/middleware/types.ts:361](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/middleware/types.ts#L361)
+Defined in: packages/ai/src/activities/chat/middleware/types.ts:566
 
 Total duration of the chat run in milliseconds
 
@@ -41,7 +39,7 @@ Total duration of the chat run in milliseconds
 finishReason: string | null;
 ```
 
-Defined in: [packages/ai/src/activities/chat/middleware/types.ts:359](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/middleware/types.ts#L359)
+Defined in: packages/ai/src/activities/chat/middleware/types.ts:564
 
 The finish reason from the last model response
 
@@ -50,9 +48,9 @@ The finish reason from the last model response
 ### usage?
 
 ```ts
-optional usage: TokenUsage<ProviderUsageDetails>;
+optional usage?: TokenUsage<ProviderUsageDetails>;
 ```
 
-Defined in: [packages/ai/src/activities/chat/middleware/types.ts:365](https://github.com/TanStack/ai/blob/main/packages/ai/src/activities/chat/middleware/types.ts#L365)
+Defined in: packages/ai/src/activities/chat/middleware/types.ts:570
 
 Final usage totals, if available (optionally including provider-reported cost)

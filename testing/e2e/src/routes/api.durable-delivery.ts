@@ -23,12 +23,24 @@ import type { StreamChunk } from '@tanstack/ai'
  * `?transport=ndjson` switches the wire encoding from SSE to newline-delimited
  * JSON (each durable line is an `{ id, chunk }` envelope). The durability layer
  * — logging, offsets, resume, terminalization — is identical for both.
+ *
+ * `?scenario=slow` spaces the content chunks 300ms apart and keeps the default
+ * batch size, so a test can check that text reaches the client while the run
+ * is still going.
  */
 // Emits bare TEXT_MESSAGE_CONTENT chunks without TEXT_MESSAGE_START/END
 // bracketing: this harness deliberately exercises raw chunk delivery + resume,
 // not UIMessage reassembly. The durability layer terminalizes on RUN_FINISHED
 // (emitted below), which is all resume/join needs.
-function fixedRun(threadId: string, runId: string): AsyncIterable<StreamChunk> {
+//
+// `delayMs` waits before each content chunk, like a model that is still
+// producing tokens. The `slow` scenario uses it to prove that the durability
+// batch does not hold live text until the run ends.
+export function fixedRun(
+  threadId: string,
+  runId: string,
+  delayMs = 0,
+): AsyncIterable<StreamChunk> {
   return (async function* () {
     yield {
       type: 'RUN_STARTED',
@@ -37,6 +49,9 @@ function fixedRun(threadId: string, runId: string): AsyncIterable<StreamChunk> {
       timestamp: Date.now(),
     } as StreamChunk
     for (let i = 1; i <= 5; i++) {
+      if (delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs))
+      }
       yield {
         type: 'TEXT_MESSAGE_CONTENT',
         messageId: 'm',
@@ -55,6 +70,92 @@ function fixedRun(threadId: string, runId: string): AsyncIterable<StreamChunk> {
       timestamp: Date.now(),
     } as StreamChunk
   })()
+}
+
+/**
+ * An agent-loop run: one RUN_STARTED/RUN_FINISHED pair PER iteration. The first
+ * terminal carries `finishReason: 'tool_calls'` (the model paused to call a
+ * tool); the tool result and a second iteration (the real answer) follow, ending
+ * on a `'stop'` terminal. This is the shape a tool-calling run takes on the
+ * wire, and the case that regressed: a durability sink that ended the log on the
+ * FIRST terminal truncated the run at the tool call.
+ */
+function agentLoopRun(
+  threadId: string,
+  runId: string,
+): AsyncIterable<StreamChunk> {
+  return (async function* () {
+    const now = () => Date.now()
+    yield {
+      type: 'RUN_STARTED',
+      threadId,
+      runId,
+      timestamp: now(),
+    } as StreamChunk
+    yield {
+      type: 'TOOL_CALL_START',
+      toolCallId: 'call-1',
+      toolCallName: 'rollDice',
+      timestamp: now(),
+    } as StreamChunk
+    yield {
+      type: 'TOOL_CALL_ARGS',
+      toolCallId: 'call-1',
+      delta: '{"sides":20}',
+      timestamp: now(),
+    } as StreamChunk
+    yield {
+      type: 'TOOL_CALL_END',
+      toolCallId: 'call-1',
+      timestamp: now(),
+    } as StreamChunk
+    // First per-iteration terminal. A sink that stops here drops everything below.
+    yield {
+      type: 'RUN_FINISHED',
+      threadId,
+      runId,
+      model: 'fixed',
+      finishReason: 'tool_calls',
+      timestamp: now(),
+    } as StreamChunk
+    // The tool result and the second iteration must survive the first terminal.
+    yield {
+      type: 'TOOL_CALL_RESULT',
+      toolCallId: 'call-1',
+      content: '{"rolls":[14],"total":14}',
+      timestamp: now(),
+    } as StreamChunk
+    yield {
+      type: 'RUN_STARTED',
+      threadId,
+      runId,
+      timestamp: now(),
+    } as StreamChunk
+    yield {
+      type: 'TEXT_MESSAGE_CONTENT',
+      messageId: 'm2',
+      model: 'fixed',
+      delta: 'done',
+      content: 'done',
+      timestamp: now(),
+    } as StreamChunk
+    yield {
+      type: 'RUN_FINISHED',
+      threadId,
+      runId,
+      model: 'fixed',
+      finishReason: 'stop',
+      timestamp: now(),
+    } as StreamChunk
+  })()
+}
+
+function scenarioOf(request: Request): string | null {
+  try {
+    return new URL(request.url).searchParams.get('scenario')
+  } catch {
+    return null
+  }
 }
 
 function durableRun(request: Request) {
@@ -93,7 +194,11 @@ function durableResponse(
   durability: ReturnType<typeof memoryStream>,
   batch?: number,
 ): Response {
-  const stream = fixedRun('thread-durable', runId)
+  const scenario = scenarioOf(request)
+  const stream =
+    scenario === 'agent-loop'
+      ? agentLoopRun('thread-durable', runId)
+      : fixedRun('thread-durable', runId, scenario === 'slow' ? 300 : 0)
   const durabilityOption = { adapter: durability, ...(batch ? { batch } : {}) }
   return isNdjson(request)
     ? toHttpResponse(stream, { durability: durabilityOption })
@@ -105,8 +210,11 @@ export const Route = createFileRoute('/api/durable-delivery')({
     handlers: {
       POST: async ({ request }) => {
         const { durability, runId, advertiseRunId } = durableRun(request)
+        // `slow` keeps the default batch (32): its point is that live text
+        // still flows while the batch is far from full.
+        const batch = scenarioOf(request) === 'slow' ? undefined : 2
         return withRunId(
-          durableResponse(request, runId, durability, 2),
+          durableResponse(request, runId, durability, batch),
           advertiseRunId,
         )
       },

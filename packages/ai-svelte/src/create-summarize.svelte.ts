@@ -1,4 +1,9 @@
 import { createGeneration } from './create-generation.svelte'
+import { reconstructSummarizeResult } from '@tanstack/ai-client'
+import type {
+  CreateGenerationOptions,
+  CreateGenerationReturn,
+} from './create-generation.svelte'
 import type { StreamChunk, SummarizationResult } from '@tanstack/ai'
 import type {
   AIDevtoolsDisplayOptions,
@@ -14,13 +19,21 @@ import type {
  *
  * @template TOutput - The output type after optional transform (defaults to SummarizationResult)
  */
-export interface CreateSummarizeOptions<TOutput = SummarizationResult> {
+export interface CreateSummarizeOptions<
+  TOutput = SummarizationResult,
+> extends Pick<
+  CreateGenerationOptions<SummarizeGenerateInput, SummarizationResult, TOutput>,
+  | 'persistence'
+  | 'threadId'
+  | 'hydrateGeneration'
+  | 'joinRun'
+  | 'byok'
+  | 'byokProvider'
+> {
   /** Connect-based adapter for streaming transport (SSE, HTTP stream, custom) */
   connection?: ConnectConnectionAdapter
   /** Direct async function for summarization */
   fetcher?: GenerationFetcher<SummarizeGenerateInput, SummarizationResult>
-  /** Unique identifier for this generation instance */
-  id?: string
   /** Additional body parameters to send with connect-based adapter requests */
   body?: Record<string, any>
   /** Display options for TanStack AI Devtools. */
@@ -46,7 +59,9 @@ export interface CreateSummarizeOptions<TOutput = SummarizationResult> {
  *
  * @template TOutput - The output type (after optional transform)
  */
-export interface CreateSummarizeReturn<TOutput = SummarizationResult> {
+export interface CreateSummarizeReturn<
+  TOutput = SummarizationResult,
+> extends Omit<CreateGenerationReturn<TOutput>, 'generate'> {
   /** The summarization result, or null */
   readonly result: TOutput | null
   /** Whether summarization is in progress */
@@ -57,12 +72,6 @@ export interface CreateSummarizeReturn<TOutput = SummarizationResult> {
   readonly status: GenerationClientState
   /** Trigger summarization */
   generate: (input: SummarizeGenerateInput) => Promise<void>
-  /** Abort the current summarization */
-  stop: () => void
-  /** Clear result, error, and return to idle */
-  reset: () => void
-  /** Update additional body parameters */
-  updateBody: (body: Record<string, any>) => void
 }
 
 /**
@@ -74,6 +83,7 @@ export interface CreateSummarizeReturn<TOutput = SummarizationResult> {
  *   import { createSummarize, fetchServerSentEvents } from '@tanstack/ai-svelte'
  *
  *   const summarizer = createSummarize({
+ *     threadId: 'article-summary',
  *     connection: fetchServerSentEvents('/api/summarize'),
  *   })
  * </script>
@@ -115,6 +125,7 @@ export function createSummarize<TTransformed = void>(
   >({
     ...options,
     devtools,
+    reconstructResult: reconstructSummarizeResult,
   })
 
   return {
@@ -130,9 +141,13 @@ export function createSummarize<TTransformed = void>(
     get status() {
       return gen.status
     },
-    generate: gen.generate as (input: SummarizeGenerateInput) => Promise<void>,
+    generate: gen.generate,
     stop: gen.stop,
     reset: gen.reset,
     updateBody: gen.updateBody,
+    dispose: gen.dispose,
+    get runId() {
+      return gen.runId
+    },
   }
 }
