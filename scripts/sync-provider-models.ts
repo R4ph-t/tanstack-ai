@@ -87,8 +87,8 @@ interface ProviderConfig {
   /**
    * Runtime set of models that accept tools plus `output_config.format` in
    * one request. New Anthropic ids are inserted here. `-fast` variants stay
-   * out: fast mode is a request parameter, and the model-meta test pins
-   * `claude-opus-5-fast` as excluded.
+   * out: fast mode is a request parameter, not a model id, and the model-meta
+   * test expects every registered model in the set.
    */
   combinedToolsAndSchemaSetName?: string
   /** Valid input modality types for this provider's ModelMeta interface */
