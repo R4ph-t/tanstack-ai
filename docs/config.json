@@ -1960,6 +1960,16 @@
           "addedAt": "2026-10-21"
         },
         {
+          "label": "TanStack useChat with a pi agent",
+          "to": "migration/pi-agent-tanstack-client",
+          "addedAt": "2026-10-26"
+        },
+        {
+          "label": "pi bridge compatibility",
+          "to": "migration/pi-compatibility",
+          "addedAt": "2026-10-26"
+        },
+        {
           "label": "AG-UI Client Compliance",
           "to": "migration/ag-ui-compliance",
           "addedAt": "2026-05-16",

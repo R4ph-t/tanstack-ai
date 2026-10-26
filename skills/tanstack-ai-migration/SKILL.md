@@ -1,7 +1,7 @@
 ---
 name: tanstack-ai-migration
 description: >
-  Move an app to TanStack AI from the Vercel AI SDK or raw provider SDKs, or
+  Move an app to TanStack AI from the Vercel AI SDK, pi, or raw provider SDKs, or
   upgrade it from TanStack AI 0.x to 1.0. Use when someone asks
   whether to switch AI libraries, when code mixes streamText, generateText,
   generateObject, createOpenAI, or @ai-sdk/* with TanStack AI, when an upgrade
@@ -35,6 +35,19 @@ The shape of the change:
 Read the guide, then load the target API's own skill with
 `npx @tanstack/intent@latest load @tanstack/ai#ai-core`. Do not port from memory: a half-remembered mapping produces
 code that type-checks in neither SDK.
+
+To put TanStack `useChat` in front of a pi agent (`@earendil-works/pi-ai`,
+`pi-agent-core`), `@tanstack/ai-pi-stream` streams the pi agent events as
+AG-UI events. Serve
+`toServerSentEventsResponse(runPiAgent(await chatParamsFromRequest(request), { config, streamFn, tools, needsApproval, systemPrompts }))`.
+pi tools in `needsApproval` pause for a `useChat` approval, and the client
+tools of `useChat` run in the browser. For a hand-run `agentLoop()`, use
+`fromPiAgentEvents` and `toPiMessages`.
+https://tanstack.com/ai/latest/docs/migration/pi-agent-tanstack-client
+
+Structured output and subagents from pi do not cross. Image URLs, audio, video
+and documents sent to pi end the run with a `RUN_ERROR`. See
+https://tanstack.com/ai/latest/docs/migration/pi-compatibility
 
 ## Upgrading TanStack AI itself
 
