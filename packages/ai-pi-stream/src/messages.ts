@@ -25,13 +25,19 @@ export function emptyUsage(): Usage {
   }
 }
 
+/**
+ * Tool call arguments as a JSON object. Empty text is a call with no
+ * arguments.
+ *
+ * @throws An error when the text is not a JSON object.
+ */
 export function parseJsonObject(text: string): JsonObject {
-  try {
-    const value: unknown = JSON.parse(text)
-    return isJsonObject(value) ? value : {}
-  } catch {
-    return {}
+  if (text.trim() === '') return {}
+  const value: unknown = JSON.parse(text)
+  if (!isJsonObject(value)) {
+    throw new Error('Tool call arguments must be a JSON object.')
   }
+  return value
 }
 
 function isJsonObject(value: unknown): value is JsonObject {
@@ -91,6 +97,9 @@ function fromPiContent(
  * pi model fields) so pi providers can replay reasoning signatures from the
  * same model. Without it the fields are empty strings, and pi treats the
  * messages as from another model.
+ *
+ * @throws An error when a tool message has no matching tool call before it,
+ * or a tool call has arguments that are not a JSON object.
  */
 export function toPiMessages(
   messages: ReadonlyArray<ModelMessage>,
@@ -116,11 +125,19 @@ export function toPiMessages(
       continue
     }
     if (message.role === 'tool') {
-      const toolCallId = message.toolCallId ?? ''
+      const toolName =
+        message.toolCallId === undefined
+          ? undefined
+          : toolNames.get(message.toolCallId)
+      if (message.toolCallId === undefined || toolName === undefined) {
+        throw new Error(
+          `Tool message ${message.toolCallId ?? '(no toolCallId)'} has no tool call before it.`,
+        )
+      }
       out.push({
         role: 'toolResult',
-        toolCallId,
-        toolName: toolNames.get(toolCallId) ?? '',
+        toolCallId: message.toolCallId,
+        toolName,
         content:
           message.error === undefined
             ? toPiToolContent(message.content)

@@ -5,11 +5,13 @@ import {
   convertMessagesToModelMessages,
   digestInterruptJson,
   hashSchemaInput,
+  interruptItemError,
   withInterruptBinding,
   withTanstackMetadata,
 } from '@tanstack/ai'
 import type {
   Interrupt,
+  InterruptSubmissionError,
   JSONSchema,
   ModelMessage,
   RunAgentResumeItem,
@@ -47,6 +49,8 @@ export interface PiAgentRequest {
   }>
   /** The answers to the interrupts of the paused run. */
   resume?: ReadonlyArray<RunAgentResumeItem>
+  /** The paused run, with `resume`. */
+  parentRunId?: string
 }
 
 /** Options for {@link runPiAgent}. */
@@ -322,30 +326,82 @@ export function runPiAgent(
           : [],
       ),
     )
+    // Each answer kind fits one kind of tool, as in chat(): an approval runs
+    // only a tool in `needsApproval`, and a client output answers only a
+    // client tool. The history comes from the client, so any other pending
+    // call gets an error result and never runs.
+    const allCalls = (assistant?.content ?? []).flatMap((block) =>
+      block.type === 'toolCall' ? [block] : [],
+    )
+    const calls = allCalls.filter((call) => !answered.has(call.id))
+    const pendingId = (call: AgentToolCall) =>
+      clientNames.has(call.name)
+        ? `client_tool_${call.id}`
+        : needsApproval.includes(call.name)
+          ? `approval_${call.id}`
+          : undefined
+    const expected = new Set(calls.flatMap((call) => pendingId(call) ?? []))
+    // The client also sends its tool outputs in the history, so an answer to
+    // a call that has a result is known, and is not run again.
+    const known = new Set(allCalls.flatMap((call) => pendingId(call) ?? []))
+    const entries = new Map(resume.map((item) => [item.interruptId, item]))
+    // As in chat(), every paused call needs exactly one known answer.
+    const scope = {
+      threadId,
+      interruptedRunId: request.parentRunId ?? runId,
+      generation: 0,
+    }
+    const errors: Array<InterruptSubmissionError> = [
+      ...[...expected]
+        .filter((id) => !entries.has(id))
+        .map((id) =>
+          interruptItemError(
+            scope,
+            id,
+            'unknown-interrupt',
+            `Missing resume entry for interrupt ${id}.`,
+          ),
+        ),
+      ...[...entries.keys()]
+        .filter((id) => !known.has(id))
+        .map((id) =>
+          interruptItemError(
+            scope,
+            id,
+            'unknown-interrupt',
+            `Interrupt ${id} is not pending.`,
+          ),
+        ),
+    ]
+    if (errors.length > 0) {
+      yield { type: EventType.RUN_STARTED, threadId, runId }
+      yield withTanstackMetadata(
+        {
+          type: EventType.RUN_ERROR as const,
+          threadId,
+          runId,
+          message: errors.map((error) => error.message).join(' '),
+          code: 'unknown-interrupt',
+        },
+        { runId, threadId, interruptErrors: errors },
+      )
+      return
+    }
+
     const results: Array<ToolResultMessage> = []
     const denied = new Set<string>()
-    for (const call of assistant ? assistant.content : []) {
-      if (!assistant) break
-      if (call.type !== 'toolCall' || answered.has(call.id)) continue
-      // Each answer kind fits one kind of tool, as in chat(): an approval
-      // runs only a tool in `needsApproval`, and a client output answers
-      // only a client tool. The history comes from the client, so any other
-      // pending call gets an error result and never runs.
+    for (const call of calls) {
       const isClient = clientNames.has(call.name)
-      const isApproval = !isClient && needsApproval.includes(call.name)
-      const entry = resume.find((item) =>
-        isClient
-          ? item.interruptId === `client_tool_${call.id}`
-          : isApproval && item.interruptId === `approval_${call.id}`,
-      )
-      const payload: unknown = entry?.payload
-      if (!isClient && !isApproval) {
+      const id = pendingId(call)
+      const answer = id === undefined ? undefined : entries.get(id)
+      const payload: unknown = answer?.payload
+      if (!assistant || !answer) {
         results.push(textResult(call, UNANSWERED, true))
-      } else if (!entry || entry.status === 'cancelled') {
+      } else if (answer.status === 'cancelled') {
         denied.add(call.id)
         results.push(textResult(call, DENIED, true))
       } else if (isClient) {
-        const error = errorOf(entry)
+        const error = errorOf(answer)
         results.push(
           error !== undefined
             ? textResult(call, error, true)
@@ -391,17 +447,6 @@ export function runPiAgent(
       }
     }
     history.push(...results)
-    const last = history.at(-1)
-    if (!last || !('role' in last) || last.role === 'assistant') {
-      // Nothing to continue from: the answers matched no paused call.
-      yield* fromPiAgentEvents(
-        (async function* () {
-          yield { type: 'agent_end', messages: [] } as const
-        })(),
-        { threadId, runId, results },
-      )
-      return
-    }
     // A denial has the denied outcome, as in chat().
     for await (const event of fromPiAgentEvents(
       agentLoopContinue(

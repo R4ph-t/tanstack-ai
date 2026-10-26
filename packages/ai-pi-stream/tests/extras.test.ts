@@ -10,6 +10,7 @@ import {
   toPiAgentEvents,
   toPiMessages,
 } from '../src'
+import { emptyUsage } from '../src/messages'
 import type { AgentEvent } from '@earendil-works/pi-agent-core'
 import type { AssistantMessage, ToolResultMessage } from '@earendil-works/pi-ai'
 import type { AnyTextAdapter, StreamChunk } from '@tanstack/ai'
@@ -396,6 +397,18 @@ describe('TanStack to pi client', () => {
   it('round-trips images in tool results through the history', () => {
     const history = fromPiMessages([
       {
+        role: 'assistant',
+        content: [
+          { type: 'toolCall', id: 'c1', name: 'screenshot', arguments: {} },
+        ],
+        api: '',
+        provider: '',
+        model: '',
+        usage: emptyUsage(),
+        stopReason: 'toolUse',
+        timestamp: 1,
+      },
+      {
         role: 'toolResult',
         toolCallId: 'c1',
         toolName: 'screenshot',
@@ -404,13 +417,36 @@ describe('TanStack to pi client', () => {
         timestamp: 1,
       },
     ])
-    expect(history.messages[0]).toMatchObject({
+    expect(history.messages[1]).toMatchObject({
       role: 'tool',
       content: [{ type: 'text', content: 'Here.' }, { type: 'image' }],
     })
-    expect(toPiMessages(history.messages)[0]).toMatchObject({
+    expect(toPiMessages(history.messages)[1]).toMatchObject({
       role: 'toolResult',
+      toolName: 'screenshot',
       content: [{ type: 'text', text: 'Here.' }, image],
     })
+  })
+
+  it('rejects a broken history', () => {
+    const call = (args: string) => ({
+      role: 'assistant' as const,
+      content: null,
+      toolCalls: [
+        {
+          id: 'c1',
+          type: 'function' as const,
+          function: { name: 'screenshot', arguments: args },
+        },
+      ],
+    })
+    expect(() => toPiMessages([call('{not json')])).toThrow()
+    expect(() => toPiMessages([call('[1]')])).toThrow(/JSON object/)
+    expect(toPiMessages([call('')])[0]).toMatchObject({
+      content: [{ type: 'toolCall', arguments: {} }],
+    })
+    expect(() =>
+      toPiMessages([{ role: 'tool', toolCallId: 'c9', content: 'x' }]),
+    ).toThrow(/no tool call/)
   })
 })

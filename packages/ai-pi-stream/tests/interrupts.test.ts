@@ -157,6 +157,83 @@ describe('runPiAgent interrupts', () => {
     expect(executed).toEqual([])
   })
 
+  it('rejects a resume with a missing or an unknown answer, as chat() does', async () => {
+    const faux = createFauxCore({})
+    faux.setResponses([fauxAssistantMessage('ok')])
+    const executed: Array<string> = []
+    const deleteFile: AgentTool<typeof deleteParams> = {
+      name: 'deleteFile',
+      label: 'Delete',
+      description: 'Delete a file',
+      parameters: deleteParams,
+      execute: (_id, { path }) => {
+        executed.push(path)
+        return Promise.resolve({
+          content: [{ type: 'text', text: 'done' }],
+          details: undefined,
+        })
+      },
+    }
+    const history = [
+      { role: 'user' as const, content: 'hi' },
+      {
+        role: 'assistant' as const,
+        content: null,
+        toolCalls: ['y1', 'y2'].map((id) => ({
+          id,
+          type: 'function' as const,
+          function: { name: 'deleteFile', arguments: `{"path":"/${id}"}` },
+        })),
+      },
+    ]
+    const errorsOf = async (ids: Array<string>) => {
+      const events = []
+      for await (const event of runPiAgent(
+        {
+          threadId: 't',
+          runId: 'r',
+          messages: history,
+          resume: ids.map((interruptId) => ({
+            interruptId,
+            status: 'resolved' as const,
+            payload: { approved: true },
+          })),
+        },
+        {
+          config: { model: faux.getModel(), convertToLlm: (m) => m },
+          streamFn: (model, context, options) =>
+            faux.streamSimple(model, context, options),
+          tools: [deleteFile],
+          needsApproval: ['deleteFile'],
+        },
+      )) {
+        events.push(event)
+      }
+      return events
+    }
+
+    const missing = await errorsOf(['approval_y1'])
+    expect(missing.at(-1)).toMatchObject({
+      type: EventType.RUN_ERROR,
+      code: 'unknown-interrupt',
+      metadata: {
+        tanstack: { interruptErrors: [{ interruptId: 'approval_y2' }] },
+      },
+    })
+    const unknown = await errorsOf([
+      'approval_y1',
+      'approval_y2',
+      'approval_zz',
+    ])
+    expect(unknown.at(-1)).toMatchObject({
+      type: EventType.RUN_ERROR,
+      metadata: {
+        tanstack: { interruptErrors: [{ interruptId: 'approval_zz' }] },
+      },
+    })
+    expect(executed).toEqual([])
+  })
+
   it('pauses a pi tool for approval and runs it after the user approves', async () => {
     const route = piRoute([
       fauxAssistantMessage(

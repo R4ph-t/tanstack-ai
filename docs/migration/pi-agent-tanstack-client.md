@@ -150,6 +150,7 @@ export function Approvals() {
 - A denied call gets an error result with the `denied` outcome, and the model sees the denial.
 - The other tool calls of the same model call run at once.
 - The history comes from the client, as in a stateless `chat()` route. An approval runs only a tool in `needsApproval`, and never a call that already has a result. A pending call to any other pi tool gets an error result and does not run. If a person other than the user approves, keep the history on the server.
+- Each paused call needs one answer. A missing answer, or an answer to a call that did not pause, ends the run with a `RUN_ERROR` (code `unknown-interrupt`), as in `chat()`.
 
 ## 5. Run client tools
 
