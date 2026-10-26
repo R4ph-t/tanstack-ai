@@ -1,7 +1,7 @@
 /**
  * Writes each provider package's model catalog (its `./models` subpath) from
  * modelschemas, and a patch changeset for each package whose models changed.
- * One call: modelschemas allows 60 anonymous calls an hour.
+ * One call. Set `MODELSCHEMAS_API_KEY` for a higher rate limit.
  *
  * Usage:
  *   node scripts/sync-model-catalogs.ts
@@ -11,18 +11,19 @@ import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { createModelschemasClient, listModels } from '@modelschemas/client'
+import { listModels } from '@modelschemas/client'
 import { writeSyncChangeset } from './model-sync/changeset.ts'
 import {
   CATALOGS,
   buildRecords,
   isChatModel,
 } from './model-sync/model-catalog.ts'
+import { createSyncClient } from './model-sync/client.ts'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 const { data: body, error } = await listModels({
-  client: createModelschemasClient({ baseUrl: 'https://modelschemas.com' }),
+  client: createSyncClient(),
   query: { activity: 'chat', pricing: '1', provenance: '0' },
 })
 if (!body) throw new Error(`modelschemas list failed: ${JSON.stringify(error)}`)

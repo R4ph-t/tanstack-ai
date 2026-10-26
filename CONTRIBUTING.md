@@ -55,19 +55,25 @@ For deeper architecture details (adapter system, isomorphic tools, framework int
 
 1. Fetches OpenRouter, Vercel AI Gateway, Lovable AI Gateway, and Neon AI Gateway catalogs.
 2. Regenerates `packages/ai-openrouter/src/model-meta.ts` and the Vercel Gateway and Neon model lists.
-3. Inserts **new** native-provider models into `packages/ai-openai`, `ai-anthropic`, `ai-gemini`, and `ai-grok`.
-4. Inserts **new** ElevenLabs text-to-speech, music, sound-effect, and voice-design ids from [modelschemas](https://modelschemas.com/v1/schemas/elevenlabs) into `packages/ai-elevenlabs/src/model-meta.ts`. Transcription ids stay hand-maintained.
+3. Inserts **new** native-provider models from [modelschemas](https://modelschemas.com) (`@modelschemas/client`) into `ai-openai`, `ai-anthropic`, `ai-gemini`, `ai-grok`, `ai-groq`, `ai-mistral`, and `ai-byteplus`. Native ids, activity, limits, modalities, pricing, and capabilities come from each provider catalog. OpenRouter fills a field only when the native row left it empty. OpenAI, Anthropic, Gemini, and Grok hold an id back until the OpenRouter catalog has a matching row and both prices are known. The log names each held-back id. Groq and Mistral insert even when a price is unknown: the generator leaves that price out (`pricing: {}` when both are unknown) and never writes `0`. BytePlus does not write pricing.
+4. Inserts **new** ElevenLabs text-to-speech, music, sound-effect, and voice-design ids from [modelschemas](https://modelschemas.com/v1/schemas/elevenlabs) into `packages/ai-elevenlabs/src/model-meta.ts` (`scripts/sync-elevenlabs-models.ts`, also through `@modelschemas/client`). Text-to-speech ids are catalog rows with `providerMetadata.canDoTextToSpeech`. Music, sound-effect, and voice-design ids are the `model_id` enums of their request schemas. Transcription ids stay hand-maintained.
 5. Rewrites each provider package's `./models` catalog (`src/models.ts`) from modelschemas, with `pnpm generate:models:catalogs`. The provider list is `CATALOGS` in `scripts/model-sync/model-catalog.ts`. A value modelschemas does not list stays `undefined`, and a value the script does not know stops the sync. Fix a wrong value upstream in modelschemas, not in the generated file.
 6. Writes a patch changeset for the packages that changed.
+
+The sync stops with an error when modelschemas is down, when a catalog is empty, when no row has a `rawId`, `firstSeenAt`, or `deprecatedAt` key, or when an array or type map it must update is missing from a `model-meta.ts`.
+
+Reads against modelschemas work without a key (60 req/h per IP). Set `MODELSCHEMAS_API_KEY` on the workflow when you want the higher limit.
 
 Rules the generator follows:
 
 - Keep OpenRouter routing aliases (ids that start with `~`) in the OpenRouter catalog. Users can pass `chat({ model: '~anthropic/claude-haiku-latest' })`. The generated constant name maps `~` to `_`.
-- Do **not** copy those aliases into native provider files (`ai-openai`, `ai-anthropic`, `ai-gemini`, `ai-grok`). Those adapters only accept the provider's own ids.
-- For a new native-provider model, write id, modalities, and pricing. Infer features from OpenRouter `supported_parameters` when that field exists. Do **not** copy another model's tool list (`computer_use`, `google_search`, `x_search`, and similar).
-- Anthropic first-party ids use dashes (`claude-fable-5-1`). OpenRouter uses dots (`claude-fable-5.1`). The generator hyphenates Anthropic ids on insert. Do not copy the dotted OpenRouter slug into `ai-anthropic`.
+- Do **not** copy those aliases into native provider files (any of the eight packages above). Those adapters only accept the provider's own ids.
+- For a new native-provider model, write id, modalities, and (where the provider has a `pricing` field) pricing. Infer features from native catalog capabilities (a list of parameter names, or a feature object, as BytePlus sends). Do **not** copy another model's tool list (`computer_use`, `google_search`, `x_search`, and similar). Do **not** copy OpenRouter flags onto a native row that already listed capabilities. BytePlus, Groq, and Mistral insert from the native catalog even when OpenRouter has no row. BytePlus inserts never claim `structured_outputs`: that gate is a live-probed list.
+- ElevenLabs music and voice-design ids are pinned to SDK unions. An id the ElevenLabs SDK does not know yet fails the type-check, so wait for the SDK. BytePlus video and image duration/size tables stay hand-curated.
+- Anthropic first-party ids use dashes (`claude-fable-5-1`). OpenRouter uses dots (`claude-fable-5.1`). The generator takes the modelschemas native id (already hyphenated) and does not copy the dotted OpenRouter slug into `ai-anthropic`. Dated Anthropic snapshots (`claude-haiku-4-5-20251001`) are skipped; the undated alias is the public id.
 - Write a row in the provider's `*ChatModelToolCapabilitiesByName` map for every new chat model, even when `supports.tools` is still `[]`. Missing that row makes `ResolveToolCapabilities` fall back to `readonly []`.
-- For new Anthropic models, infer the provider-options mix from the catalog: no sampling parameters → `AnthropicMaxTokensOptions`; `reasoning.mandatory` → `AnthropicAdaptiveOnlyThinkingOptions` plus `AnthropicOutputConfigOptions`.
+- For new Anthropic models, infer the provider-options mix from the catalog: no sampling parameters → `AnthropicMaxTokensOptions`; `reasoning.mandatory` → `AnthropicAdaptiveOnlyThinkingOptions` plus `AnthropicOutputConfigOptions`; reasoning params without sampling → adaptive-or-disabled thinking. Every new Claude model gets `AnthropicCacheControlOptions`.
+- `firstSeenAt` is when modelschemas first crawled an id, not its release date. The first sync of a new provider can need a one-off older cutoff in `scripts/.sync-models-last-run`.
 - Leave curated tools and flags on existing models alone. Edit those by hand after the sync PR opens.
 
 Do not rebase or hand-edit `automated/sync-models`. The next scheduled run force-pushes that branch from `main`. Merge generator fixes to `main` first, then let the workflow rebuild the sync PR.
