@@ -6,14 +6,32 @@ import {
   pricesFrom,
   reasoningFrom,
 } from './model-catalog'
+import type { RateCard } from '@modelschemas/client'
 import type { SchemaModel } from './model-catalog'
 
 const row = (fields: Partial<SchemaModel> = {}): SchemaModel => ({
   provider: 'p',
   rawId: 'm',
+  displayName: null,
   activity: 'chat',
+  deprecatedAt: null,
+  aliases: null,
+  contextWindow: null,
+  maxOutput: null,
   modalities: { input: ['text'], output: ['text'] },
+  capabilities: null,
+  reasoning: null,
+  requestMap: null,
+  pricing: null,
   ...fields,
+})
+
+const card = (price: unknown, tables: RateCard['tables'] = {}): RateCard => ({
+  inputs: {},
+  tables,
+  price,
+  examples: [],
+  source: { url: 'https://example.com', hash: '', extractedAt: '' },
 })
 
 const rate = (name: string) => ({
@@ -35,9 +53,25 @@ describe('reasoningFrom', () => {
     expect(
       reasoningFrom(
         row({
-          reasoning: { mode: 'effort', efforts: ['instant', 'low', 'high'] },
+          reasoning: {
+            mode: 'effort',
+            mandatory: true,
+            efforts: ['instant', 'low', 'high'],
+          },
           requestMap: {
-            thinking: { levels: { off: null, low: 'low', high: 'high' } },
+            thinking: {
+              on: {},
+              off: null,
+              levels: {
+                off: null,
+                minimal: null,
+                low: 'low',
+                medium: null,
+                high: 'high',
+                xhigh: null,
+                max: null,
+              },
+            },
           },
         }),
       ),
@@ -48,7 +82,11 @@ describe('reasoningFrom', () => {
     expect(
       reasoningFrom(
         row({
-          reasoning: { mode: 'effort', efforts: ['none', 'default', 'HIGH'] },
+          reasoning: {
+            mode: 'effort',
+            mandatory: false,
+            efforts: ['none', 'default', 'HIGH'],
+          },
         }),
       ),
     ).toEqual({ levels: { off: 'none', high: 'HIGH' }, budget: false })
@@ -56,12 +94,18 @@ describe('reasoningFrom', () => {
 
   it('throws on an effort it does not know', () => {
     expect(() =>
-      reasoningFrom(row({ reasoning: { mode: 'effort', efforts: ['ultra'] } })),
+      reasoningFrom(
+        row({
+          reasoning: { mode: 'effort', mandatory: null, efforts: ['ultra'] },
+        }),
+      ),
     ).toThrow("unknown reasoning effort 'ultra'")
   })
 
   it('invents no levels for a budget model', () => {
-    expect(reasoningFrom(row({ reasoning: { mode: 'budget' } }))).toEqual({
+    expect(
+      reasoningFrom(row({ reasoning: { mode: 'budget', mandatory: false } })),
+    ).toEqual({
       levels: {},
       budget: true,
     })
@@ -76,14 +120,8 @@ describe('pricesFrom', () => {
   it('reads each rate the card prices, and leaves the others undefined', () => {
     const prices = pricesFrom(
       row({
-        pricing: {
-          tables: {
-            rate: {
-              base: { input_tokens: 3e-6, output_tokens: 15e-6 },
-              '200000': { input_tokens: 6e-6, output_tokens: 22.5e-6 },
-            },
-          },
-          price: {
+        pricing: card(
+          {
             currency: [
               'CNY',
               {
@@ -110,7 +148,13 @@ describe('pricesFrom', () => {
               },
             ],
           },
-        },
+          {
+            rate: {
+              base: { input_tokens: 3e-6, output_tokens: 15e-6 },
+              '200000': { input_tokens: 6e-6, output_tokens: 22.5e-6 },
+            },
+          },
+        ),
       }),
     )
     expect(prices).toEqual({
@@ -122,17 +166,28 @@ describe('pricesFrom', () => {
   })
 
   it('throws on a price operator it does not know', () => {
+    expect(() => pricesFrom(row({ pricing: card({ max: [1, 2] }) }))).toThrow(
+      "Unknown price operator 'max'",
+    )
+  })
+
+  it('throws on a price summary, which has no rate card', () => {
     expect(() =>
-      pricesFrom(row({ pricing: { price: { max: [1, 2] } } })),
-    ).toThrow("Unknown price operator 'max'")
+      pricesFrom(
+        row({ pricing: { currency: 'USD', per: 'token', inputPerMillion: 3 } }),
+      ),
+    ).toThrow('a price summary, not a rate card')
   })
 
   it('prices the 1-hour cache write with its own rate', () => {
     expect(
       pricesFrom(
         row({
-          pricing: {
-            tables: {
+          pricing: card(
+            {
+              '+': [rate('cache_write_tokens'), rate('cache_write_1h_tokens')],
+            },
+            {
               rate: {
                 base: {
                   cache_write_tokens: 3.75e-6,
@@ -140,10 +195,7 @@ describe('pricesFrom', () => {
                 },
               },
             },
-            price: {
-              '+': [rate('cache_write_tokens'), rate('cache_write_1h_tokens')],
-            },
-          },
+          ),
         }),
       ),
     ).toEqual({ currency: 'USD', cacheWrite: 3.75, cacheWrite1h: 6 })
@@ -153,7 +205,7 @@ describe('pricesFrom', () => {
 describe('rows', () => {
   it('keeps current chat models that write text', () => {
     expect(isChatModel(row())).toBe(true)
-    expect(isChatModel(row({ activity: 'embedding' }))).toBe(false)
+    expect(isChatModel(row({ activity: 'embeddings' }))).toBe(false)
     expect(isChatModel(row({ deprecatedAt: 1 }))).toBe(false)
     expect(
       isChatModel(row({ modalities: { input: ['text'], output: ['image'] } })),

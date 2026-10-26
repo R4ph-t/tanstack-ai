@@ -57,7 +57,10 @@ export const models: ReadonlyArray<ModelRecord> = [
     id: 'openai/gpt-oss-safeguard-20b',
     name: 'openai/gpt-oss-safeguard-20b',
     input: ['text'],
-    reasoning: { levels: {}, budget: false },
+    reasoning: {
+      levels: { low: 'low', medium: 'medium', high: 'high' },
+      budget: false,
+    },
     prices: { currency: 'USD', input: 0.075, output: 0.3, cacheRead: 0.037 },
     contextWindow: 131072,
     maxOutputTokens: 65536,

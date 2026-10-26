@@ -15,6 +15,7 @@ import type {
   ReasoningLevel,
   ReasoningLevels,
 } from '@tanstack/ai'
+import type { Model } from '@modelschemas/client'
 
 /** One catalog file: a modelschemas provider and the file it is written to. */
 export interface CatalogTarget {
@@ -87,36 +88,22 @@ export const CATALOGS: ReadonlyArray<CatalogTarget> = [
 ]
 
 /** The fields of a modelschemas row that the sync reads. */
-export interface SchemaModel {
-  provider: string
-  rawId: string
-  displayName?: string | null
-  activity?: string | null
-  deprecatedAt?: number | null
-  aliases?: ReadonlyArray<string> | null
-  contextWindow?: number | null
-  maxOutput?: number | null
-  modalities?: {
-    input?: ReadonlyArray<string> | null
-    output?: ReadonlyArray<string> | null
-  } | null
-  capabilities?: { reasoning?: boolean | null } | null
-  reasoning?: {
-    mode?: string | null
-    efforts?: ReadonlyArray<string> | null
-  } | null
-  requestMap?: {
-    thinking?: {
-      /** The provider value per level. `null`: the model does not have it. */
-      levels?: Partial<Record<ReasoningLevel, string | null>> | null
-    } | null
-  } | null
-  pricing?: {
-    tables?: Readonly<Record<string, unknown>> | null
-    /** A JSON Logic expression with `lookup` and `currency`. */
-    price?: unknown
-  } | null
-}
+export type SchemaModel = Pick<
+  Model,
+  | 'provider'
+  | 'rawId'
+  | 'displayName'
+  | 'activity'
+  | 'deprecatedAt'
+  | 'aliases'
+  | 'contextWindow'
+  | 'maxOutput'
+  | 'modalities'
+  | 'capabilities'
+  | 'reasoning'
+  | 'requestMap'
+  | 'pricing'
+>
 
 /** A current chat model that writes text. */
 export function isChatModel(model: SchemaModel): boolean {
@@ -271,9 +258,12 @@ const RATE_VARS: Readonly<Record<keyof ModelRates, string>> = {
  * expression does not read stays `undefined`. No price expression: no prices.
  */
 export function pricesFrom(model: SchemaModel): ModelPrices | undefined {
-  const price = model.pricing?.price
-  if (price === undefined || price === null) return undefined
-  const tables = model.pricing?.tables ?? {}
+  const card = model.pricing
+  if (!card) return undefined
+  // A compact summary comes only from a list call without `?pricing=1`.
+  if (!('price' in card))
+    throw new Error(`${model.rawId}: a price summary, not a rate card`)
+  const { price, tables } = card
   const read = varsOf(price)
   const ratesAt = (inputTokens: number): ModelRates => {
     const at = (extra: Record<string, number>) =>
@@ -297,7 +287,7 @@ export function pricesFrom(model: SchemaModel): ModelPrices | undefined {
     .sort((a, b) => a - b)
     .map((above) => ({ inputTokensAbove: above, ...ratesAt(above + 1) }))
   const currency =
-    typeof price === 'object' && 'currency' in price
+    price !== null && typeof price === 'object' && 'currency' in price
       ? String((price as { currency: [unknown] }).currency[0])
       : 'USD'
   return {

@@ -4,6 +4,14 @@ import type { ModelRecord } from '@tanstack/ai'
 /** Every Amazon Bedrock chat model on modelschemas.com, sorted by id. */
 export const models: ReadonlyArray<ModelRecord> = [
   {
+    id: 'amazon.nova-2-5-sonic',
+    name: 'Nova 2.5 Sonic',
+    input: ['audio', 'text'],
+    reasoning: false,
+    contextWindow: 256000,
+    maxOutputTokens: 64000,
+  },
+  {
     id: 'amazon.nova-2-lite-v1:0',
     name: 'Nova 2 Lite',
     input: ['image', 'text', 'video'],

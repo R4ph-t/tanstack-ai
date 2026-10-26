@@ -51,7 +51,7 @@ export const models: ReadonlyArray<ModelRecord> = [
   },
   {
     id: 'deep-research-pro-preview-12-2025',
-    name: 'Deep Research Pro Preview (Dec-12-2025)',
+    name: 'Deep Research Pro Preview (Dec-12-2025) [Rerouted]',
     input: ['text', 'image', 'audio', 'video', 'document'],
     reasoning: { levels: {}, budget: false },
     contextWindow: 131072,

@@ -11,24 +11,21 @@ import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createModelschemasClient, listModels } from '@modelschemas/client'
 import { writeSyncChangeset } from './model-sync/changeset.ts'
 import {
   CATALOGS,
   buildRecords,
   isChatModel,
 } from './model-sync/model-catalog.ts'
-import type { SchemaModel } from './model-sync/model-catalog'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const API_URL = 'https://modelschemas.com/v1/models?pricing=1'
 
-const response = await fetch(API_URL)
-if (!response.ok)
-  throw new Error(`modelschemas answered ${response.status} for ${API_URL}`)
-const body = (await response.json()) as {
-  count: number
-  models: Array<SchemaModel>
-}
+const { data: body, error } = await listModels({
+  client: createModelschemasClient({ baseUrl: 'https://modelschemas.com' }),
+  query: { activity: 'chat', pricing: '1', provenance: '0' },
+})
+if (!body) throw new Error(`modelschemas list failed: ${JSON.stringify(error)}`)
 if (body.models.length !== body.count)
   throw new Error(
     `modelschemas sent ${body.models.length} of ${body.count} models`,
