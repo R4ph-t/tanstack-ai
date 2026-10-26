@@ -4,6 +4,7 @@ import { EventType, chat, toolDefinition } from '@tanstack/ai'
 import { fauxAssistantMessage } from '@earendil-works/pi-ai'
 import { z } from 'zod'
 import {
+  chatParamsFromPiRequest,
   chatParamsFromPiRequestBody,
   fromPiAgentEvents,
   fromPiMessages,
@@ -363,6 +364,20 @@ describe('TanStack to pi client', () => {
         content: [{ type: 'toolCall', id: 'loc-1', name: 'getLocation' }],
       },
     ])
+    // A tanstack-interrupt names the client tool call. It is no approval.
+    const paused = first.flatMap((e) =>
+      e.type === 'message_end' &&
+      'role' in e.message &&
+      e.message.role === 'tanstack-interrupt'
+        ? e.message.interrupts
+        : [],
+    )
+    expect(paused).toMatchObject([
+      { toolCallId: 'loc-1', metadata: { kind: 'client_tool' } },
+    ])
+    expect(
+      paused.filter((interrupt) => interrupt.metadata?.kind === 'approval'),
+    ).toEqual([])
 
     // The pi client runs the tool and posts the result in the history.
     const result: ToolResultMessage = {
@@ -426,6 +441,21 @@ describe('TanStack to pi client', () => {
       toolName: 'screenshot',
       content: [{ type: 'text', text: 'Here.' }, image],
     })
+    // pi cannot hold a URL image, so the model reads the parts as JSON text.
+    const [, withUrl] = toPiMessages([
+      ...history.messages.slice(0, 1),
+      {
+        role: 'tool',
+        toolCallId: 'c1',
+        content: [
+          {
+            type: 'image',
+            source: { type: 'url', value: 'https://example.com/a.png' },
+          },
+        ],
+      },
+    ])
+    expect(JSON.stringify(withUrl)).toContain('https://example.com/a.png')
   })
 
   it('rejects a broken history', () => {
@@ -448,5 +478,235 @@ describe('TanStack to pi client', () => {
     expect(() =>
       toPiMessages([{ role: 'tool', toolCallId: 'c9', content: 'x' }]),
     ).toThrow(/no tool call/)
+    expect(() =>
+      toPiMessages([
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: { type: 'url', value: 'https://example.com/a.png' },
+            },
+          ],
+        },
+      ]),
+    ).toThrow(/base64 images only/)
+  })
+
+  it('keeps the order of thinking, tool calls and text both ways', () => {
+    const assistant: AssistantMessage = {
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: 'first', thinkingSignature: 's1' },
+        { type: 'toolCall', id: 'c1', name: 'look', arguments: {} },
+        { type: 'thinking', thinking: 'second', thinkingSignature: 's2' },
+        { type: 'text', text: 'Done.' },
+      ],
+      api: '',
+      provider: '',
+      model: '',
+      usage: emptyUsage(),
+      stopReason: 'stop',
+      timestamp: 1,
+    }
+    const { messages } = fromPiMessages([assistant])
+    expect(messages[0]?.blockOrder).toEqual([
+      { type: 'thinking', index: 0 },
+      { type: 'tool-call', id: 'c1' },
+      { type: 'thinking', index: 1 },
+      { type: 'text', length: 5 },
+    ])
+    expect(toPiMessages(messages)[0]).toMatchObject({
+      content: assistant.content,
+    })
+  })
+
+  it('reads the replay of a paused call as the answer to the history, not a new message', async () => {
+    const out = await collect(
+      toPiAgentEvents(
+        list<StreamChunk>([
+          // chat() replays the paused call, then the model answers.
+          {
+            type: EventType.TOOL_CALL_START,
+            toolCallId: 'c1',
+            toolCallName: 'look',
+          },
+          { type: EventType.TOOL_CALL_ARGS, toolCallId: 'c1', delta: '{}' },
+          { type: EventType.TOOL_CALL_END, toolCallId: 'c1' },
+          {
+            type: EventType.TOOL_CALL_RESULT,
+            messageId: 'm0',
+            toolCallId: 'c1',
+            content: 'seen',
+          },
+          { type: EventType.RUN_STARTED, threadId: 't', runId: 'r' },
+          {
+            type: EventType.TEXT_MESSAGE_START,
+            messageId: 'm1',
+            role: 'assistant',
+          },
+          {
+            type: EventType.TEXT_MESSAGE_CONTENT,
+            messageId: 'm1',
+            delta: 'Hi',
+          },
+          { type: EventType.TEXT_MESSAGE_END, messageId: 'm1' },
+          {
+            type: EventType.RUN_FINISHED,
+            threadId: 't',
+            runId: 'r',
+            finishReason: 'stop',
+          },
+        ]),
+        {
+          messages: [
+            { role: 'user', content: 'Look' },
+            {
+              role: 'assistant',
+              content: null,
+              toolCalls: [
+                {
+                  id: 'c1',
+                  type: 'function',
+                  function: { name: 'look', arguments: '{}' },
+                },
+              ],
+            },
+          ],
+        },
+      ),
+    )
+    const end = out.at(-1)
+    if (end?.type !== 'agent_end') throw new Error('No agent_end')
+    expect(end.messages).toMatchObject([
+      { role: 'toolResult', toolCallId: 'c1', toolName: 'look' },
+      { role: 'assistant', content: [{ type: 'text', text: 'Hi' }] },
+    ])
+    // Without the history, the result has no tool call to answer.
+    await expect(
+      collect(
+        toPiAgentEvents(
+          list<StreamChunk>([
+            {
+              type: EventType.TOOL_CALL_RESULT,
+              messageId: 'm0',
+              toolCallId: 'c1',
+              content: 'seen',
+            },
+          ]),
+        ),
+      ),
+    ).rejects.toThrow(/Pass the chat\(\) messages/)
+  })
+
+  it('keeps the stream going when the streamed tool arguments are not JSON', async () => {
+    const out = await collect(
+      toPiAgentEvents(
+        list<StreamChunk>([
+          { type: EventType.RUN_STARTED, threadId: 't', runId: 'r' },
+          {
+            type: EventType.TOOL_CALL_START,
+            toolCallId: 'c1',
+            toolCallName: 'look',
+          },
+          { type: EventType.TOOL_CALL_ARGS, toolCallId: 'c1', delta: '{bad' },
+          { type: EventType.TOOL_CALL_END, toolCallId: 'c1' },
+          {
+            type: EventType.RUN_FINISHED,
+            threadId: 't',
+            runId: 'r',
+            metadata: { tanstack: { finishReason: 'length' } },
+          },
+        ]),
+      ),
+    )
+    const end = out.at(-1)
+    if (end?.type !== 'agent_end') throw new Error('No agent_end')
+    expect(end.messages).toMatchObject([
+      {
+        role: 'assistant',
+        stopReason: 'length',
+        content: [{ type: 'toolCall', id: 'c1', arguments: {} }],
+      },
+    ])
+  })
+})
+
+describe('pi client request', () => {
+  const user = { role: 'user', content: 'Hi', timestamp: 1 }
+
+  it('keeps the tanstack messages and rejects other roles', () => {
+    expect(
+      chatParamsFromPiRequestBody({
+        threadId: 't',
+        messages: [
+          user,
+          {
+            role: 'tanstack-interrupt',
+            runId: 'r1',
+            interrupts: [],
+            timestamp: 1,
+          },
+        ],
+        resume: [{ interruptId: 'a', status: 'resolved', payload: true }],
+      }),
+    ).toMatchObject({ messages: [{ role: 'user' }], parentRunId: 'r1' })
+    // A TanStack tool message is not a pi message, so it is not dropped.
+    expect(() =>
+      chatParamsFromPiRequestBody({
+        threadId: 't',
+        messages: [user, { role: 'tool', toolCallId: 'c1', content: 'x' }],
+      }),
+    ).toThrow(/pi `messages`/)
+  })
+
+  it.each([
+    ['tools', { tools: [{ name: 'x' }] }],
+    ['resume', { resume: [{ interruptId: 'a', status: 'done' }] }],
+    ['parentRunId', { parentRunId: 1 }],
+    [
+      'a tool result without isError',
+      {
+        messages: [
+          user,
+          { role: 'toolResult', toolCallId: 'c1', content: [], timestamp: 1 },
+        ],
+      },
+    ],
+    [
+      'tool call arguments that are not an object',
+      {
+        messages: [
+          user,
+          {
+            role: 'assistant',
+            content: [
+              { type: 'toolCall', id: 'c1', name: 'x', arguments: [1] },
+            ],
+          },
+        ],
+      },
+    ],
+  ])('rejects bad %s', (_, extra) => {
+    expect(() =>
+      chatParamsFromPiRequestBody({
+        threadId: 't',
+        messages: [user],
+        ...extra,
+      }),
+    ).toThrow()
+  })
+
+  it('answers a bad body with a 400 and keeps the details on cause', async () => {
+    const failure: unknown = await chatParamsFromPiRequest(
+      new Request('http://test/api/chat', {
+        method: 'POST',
+        body: JSON.stringify({ threadId: 't' }),
+      }),
+    ).catch((error: unknown) => error)
+    if (!(failure instanceof Response)) throw new Error('Expected a Response')
+    expect(failure.status).toBe(400)
+    expect(await failure.text()).toBe('Invalid pi chat request body.')
+    expect(failure).toMatchObject({ cause: expect.any(Error) })
   })
 })

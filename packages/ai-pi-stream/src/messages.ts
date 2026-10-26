@@ -1,4 +1,10 @@
-import type { ContentPart, ModelMessage, ToolCall } from '@tanstack/ai'
+import { buildBlockOrder, orderedAssistantBlocks } from '@tanstack/ai'
+import type {
+  BlockOrderEntry,
+  ContentPart,
+  ModelMessage,
+  ToolCall,
+} from '@tanstack/ai'
 import type { AgentMessage } from '@earendil-works/pi-agent-core'
 import type {
   AssistantMessage,
@@ -9,9 +15,28 @@ import type {
   ToolResultMessage,
   Usage,
 } from '@earendil-works/pi-ai'
+import type { TanStackPiMessage } from './request'
 
 /** The model fields of a pi assistant message. */
 export type PiModelFields = Pick<AssistantMessage, 'api' | 'provider' | 'model'>
+
+/** `value[key]` when `value` is an object, or undefined. */
+export function field(value: unknown, key: string): unknown {
+  return typeof value === 'object' && value !== null
+    ? Reflect.get(value, key)
+    : undefined
+}
+
+/** `value[key]` when it is a string, or undefined. */
+export function stringField(value: unknown, key: string): string | undefined {
+  const found = field(value, key)
+  return typeof found === 'string' ? found : undefined
+}
+
+/** `metadata.tanstack[key]` of an event or a resume entry, or undefined. */
+export function tanstackField(metadata: unknown, key: string): unknown {
+  return field(field(metadata, 'tanstack'), key)
+}
 
 /** A pi `Usage` with every count zero. */
 export function emptyUsage(): Usage {
@@ -40,7 +65,7 @@ export function parseJsonObject(text: string): JsonObject {
   return value
 }
 
-function isJsonObject(value: unknown): value is JsonObject {
+export function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
@@ -51,25 +76,29 @@ function textOf(content: string | null | Array<ContentPart>): string {
     .join('')
 }
 
-/** TanStack content parts as pi user content. Only text and base64 images cross. */
+/**
+ * TanStack content parts as pi user content. pi user messages take text and
+ * base64 images only.
+ *
+ * @throws An error for any other part, such as a URL image or a file, so the
+ * model never answers without it.
+ */
 function toPiContent(
   content: string | null | Array<ContentPart>,
 ): string | Array<TextContent | ImageContent> {
   if (typeof content === 'string' || content === null) return content ?? ''
-  return content.flatMap((part): Array<TextContent | ImageContent> => {
-    if (part.type === 'text') return [{ type: 'text', text: part.content }]
+  return content.map((part): TextContent | ImageContent => {
+    if (part.type === 'text') return { type: 'text', text: part.content }
     if (part.type === 'image' && part.source.type === 'data') {
-      return [
-        {
-          type: 'image',
-          data: part.source.value,
-          mimeType: part.source.mimeType,
-        },
-      ]
+      return {
+        type: 'image',
+        data: part.source.value,
+        mimeType: part.source.mimeType,
+      }
     }
-    // ponytail: pi user messages take text and base64 images only. URL,
-    // file and other media parts are dropped.
-    return []
+    throw new Error(
+      `pi messages take text and base64 images only, not a ${part.type} part with a ${part.source.type} source.`,
+    )
   })
 }
 
@@ -88,18 +117,68 @@ function fromPiContent(
   )
 }
 
+type AssistantBlock = AssistantMessage['content'][number]
+
+function thinkingBlock(
+  thinking: NonNullable<ModelMessage['thinking']>[number],
+): AssistantBlock {
+  return {
+    type: 'thinking',
+    thinking: thinking.content,
+    ...(thinking.signature !== undefined && {
+      thinkingSignature: thinking.signature,
+    }),
+    ...(thinking.redacted && { redacted: true }),
+  }
+}
+
+function toolCallBlock(call: ToolCall): AssistantBlock {
+  const signature = stringField(call.metadata, 'thoughtSignature')
+  return {
+    type: 'toolCall',
+    id: call.id,
+    name: call.function.name,
+    arguments: parseJsonObject(call.function.arguments),
+    ...(signature !== undefined && { thoughtSignature: signature }),
+  }
+}
+
+/** The pi content of a TanStack assistant message, in its `blockOrder`. */
+function toPiAssistantContent(
+  message: ModelMessage,
+): AssistantMessage['content'] {
+  const ordered = orderedAssistantBlocks(message)
+  if (ordered) {
+    return ordered.map((block) =>
+      block.type === 'thinking'
+        ? thinkingBlock(block.thinking)
+        : block.type === 'text'
+          ? { type: 'text', text: block.text }
+          : toolCallBlock(block.toolCall),
+    )
+  }
+  const text = textOf(message.content)
+  return [
+    ...(message.thinking ?? []).map(thinkingBlock),
+    ...(text ? [{ type: 'text' as const, text }] : []),
+    ...(message.toolCalls ?? []).map(toolCallBlock),
+  ]
+}
+
 /**
  * Convert TanStack `ModelMessage`s, such as `chat()` history, into pi
  * messages for `agentLoop` or `Agent`. `systemPrompts` become the leading pi
- * system message.
+ * system message. System messages in `messages` are dropped, as in `chat()`,
+ * so only the server sets the system prompt.
  *
  * A pi assistant message names the model that wrote it. Pass `model` (the
  * pi model fields) so pi providers can replay reasoning signatures from the
  * same model. Without it the fields are empty strings, and pi treats the
  * messages as from another model.
  *
- * @throws An error when a tool message has no matching tool call before it,
- * or a tool call has arguments that are not a JSON object.
+ * @throws An error when a message has an unknown role, a tool message has no
+ * matching tool call before it, a tool call has arguments that are not a JSON
+ * object, or a user message has media other than base64 images.
  */
 export function toPiMessages(
   messages: ReadonlyArray<ModelMessage>,
@@ -116,6 +195,9 @@ export function toPiMessages(
   }
   for (const message of messages) {
     const at = message.createdAt?.getTime() ?? timestamp
+    // AG-UI system and developer messages arrive with the role `system`.
+    const role: string = message.role
+    if (role === 'system') continue
     if (message.role === 'user') {
       out.push({
         role: 'user',
@@ -147,33 +229,15 @@ export function toPiMessages(
       })
       continue
     }
-    const content: AssistantMessage['content'] = []
-    for (const thinking of message.thinking ?? []) {
-      content.push({
-        type: 'thinking',
-        thinking: thinking.content,
-        ...(thinking.signature !== undefined && {
-          thinkingSignature: thinking.signature,
-        }),
-        ...(thinking.redacted && { redacted: true }),
-      })
+    if (message.role !== 'assistant') {
+      throw new Error(`A message has the unknown role ${role}.`)
     }
-    const text = textOf(message.content)
-    if (text) content.push({ type: 'text', text })
     for (const call of message.toolCalls ?? []) {
       toolNames.set(call.id, call.function.name)
-      const signature = thoughtSignature(call)
-      content.push({
-        type: 'toolCall',
-        id: call.id,
-        name: call.function.name,
-        arguments: parseJsonObject(call.function.arguments),
-        ...(signature !== undefined && { thoughtSignature: signature }),
-      })
     }
     out.push({
       role: 'assistant',
-      content,
+      content: toPiAssistantContent(message),
       ...model,
       usage: emptyUsage(),
       stopReason: message.toolCalls?.length ? 'toolUse' : 'stop',
@@ -181,19 +245,6 @@ export function toPiMessages(
     })
   }
   return out
-}
-
-function thoughtSignature(call: ToolCall): string | undefined {
-  const metadata: unknown = call.metadata
-  if (
-    typeof metadata === 'object' &&
-    metadata !== null &&
-    'thoughtSignature' in metadata &&
-    typeof metadata.thoughtSignature === 'string'
-  ) {
-    return metadata.thoughtSignature
-  }
-  return undefined
 }
 
 /** Tool result content as the TanStack tool message text. */
@@ -219,7 +270,8 @@ export function fromPiToolContent(
 /**
  * TanStack tool content as pi tool result content. A string that holds a
  * JSON content-part array (the AG-UI wire form of a multimodal result) is
- * read as parts.
+ * read as parts. Parts that pi cannot hold, such as a URL image, stay as
+ * their JSON text, so the model still sees them.
  */
 export function toPiToolContent(
   content: string | null | Array<ContentPart>,
@@ -232,26 +284,37 @@ export function toPiToolContent(
       value = content
     }
   }
-  if (Array.isArray(value) && value.every(isContentPart)) {
+  if (Array.isArray(value) && value.every(isPiContentPart)) {
     const parts = toPiContent(value)
     return typeof parts === 'string' ? [{ type: 'text', text: parts }] : parts
   }
-  return [{ type: 'text', text: textOf(content) }]
+  return [
+    {
+      type: 'text',
+      text: Array.isArray(content) ? JSON.stringify(content) : textOf(content),
+    },
+  ]
 }
 
-function isContentPart(value: unknown): value is ContentPart {
+/** A text part or a base64 image part: the parts that pi content can hold. */
+function isPiContentPart(value: unknown): value is ContentPart {
+  if (typeof value !== 'object' || value === null || !('type' in value)) {
+    return false
+  }
+  if (value.type === 'text') return 'content' in value
+  const source: unknown = 'source' in value ? value.source : undefined
   return (
-    typeof value === 'object' &&
-    value !== null &&
-    'type' in value &&
-    typeof value.type === 'string' &&
-    (value.type === 'text'
-      ? 'content' in value
-      : 'source' in value && typeof value.source === 'object')
+    value.type === 'image' &&
+    typeof source === 'object' &&
+    source !== null &&
+    'type' in source &&
+    source.type === 'data'
   )
 }
 
-function isMessage(message: AgentMessage): message is Message {
+function isMessage(
+  message: AgentMessage | TanStackPiMessage,
+): message is Message {
   return (
     typeof message === 'object' &&
     'role' in message &&
@@ -268,9 +331,14 @@ function isMessage(message: AgentMessage): message is Message {
  * messages from a client request, use `messages` and set the system prompts
  * on the server. Otherwise the client controls the system prompt.
  *
- * App-specific pi messages (declared with `CustomAgentMessages`) are skipped.
+ * Only the `content` of a pi system message becomes a system prompt. Its
+ * `sections`, `toolsAdded` and `toolsRemoved` are dropped. App-specific pi
+ * messages (declared with `CustomAgentMessages`) and the `tanstack-*`
+ * messages are skipped.
  */
-export function fromPiMessages(messages: ReadonlyArray<AgentMessage>): {
+export function fromPiMessages(
+  messages: ReadonlyArray<AgentMessage | TanStackPiMessage>,
+): {
   messages: Array<ModelMessage>
   systemPrompts: Array<string>
 } {
@@ -308,10 +376,14 @@ export function fromPiMessages(messages: ReadonlyArray<AgentMessage>): {
       case 'assistant': {
         const thinking: NonNullable<ModelMessage['thinking']> = []
         const toolCalls: Array<ToolCall> = []
+        const order: Array<BlockOrderEntry> = []
         let text = ''
         for (const part of message.content) {
-          if (part.type === 'text') text += part.text
-          else if (part.type === 'thinking') {
+          if (part.type === 'text') {
+            text += part.text
+            order.push({ type: 'text', text: part.text })
+          } else if (part.type === 'thinking') {
+            order.push({ type: 'thinking' })
             thinking.push({
               content: part.thinking,
               ...(part.thinkingSignature !== undefined && {
@@ -320,6 +392,7 @@ export function fromPiMessages(messages: ReadonlyArray<AgentMessage>): {
               ...(part.redacted && { redacted: true }),
             })
           } else {
+            order.push({ type: 'tool-call', id: part.id })
             toolCalls.push({
               id: part.id,
               type: 'function',
@@ -333,11 +406,13 @@ export function fromPiMessages(messages: ReadonlyArray<AgentMessage>): {
             })
           }
         }
+        const blockOrder = buildBlockOrder(order)
         out.push({
           role: 'assistant',
           content: text || null,
           ...(thinking.length > 0 && { thinking }),
           ...(toolCalls.length > 0 && { toolCalls }),
+          ...(blockOrder && { blockOrder }),
           createdAt: new Date(message.timestamp),
         })
         break

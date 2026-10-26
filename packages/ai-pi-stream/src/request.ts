@@ -6,7 +6,7 @@ import type {
   StreamChunk,
 } from '@tanstack/ai'
 import type { AgentEvent } from '@earendil-works/pi-agent-core'
-import type { Message } from '@earendil-works/pi-ai'
+import type { Message, Tool } from '@earendil-works/pi-ai'
 import { fromPiMessages } from './messages'
 
 /**
@@ -40,10 +40,11 @@ export type PiBridgeEvent =
   | AgentEvent
   | { type: 'message_start' | 'message_end'; message: TanStackPiMessage }
 
-/** A tool that the pi client runs, as `chat()` reads it. */
-export interface PiClientTool {
-  name: string
-  description: string
+/**
+ * A tool that the pi client runs, as `chat()` reads it: a pi `Tool` with JSON
+ * Schema `parameters`, the form it takes on the wire.
+ */
+export type PiClientTool = Pick<Tool, 'name' | 'description'> & {
   parameters: JSONSchema
 }
 
@@ -73,7 +74,11 @@ function isTextOrImage(part: unknown): boolean {
   )
 }
 
-/** A structural check of one pi message. Other roles are app messages. */
+/**
+ * A structural check of one pi message or {@link TanStackPiMessage}. Other
+ * roles, such as app messages, are rejected, so no message is dropped
+ * without notice.
+ */
 function isValidMessage(value: unknown): boolean {
   if (!isRecord(value) || typeof value.role !== 'string') return false
   const { content } = value
@@ -105,12 +110,17 @@ function isValidMessage(value: unknown): boolean {
                 isRecord(part.arguments))),
         )
       )
-    default:
+    case 'tanstack-interrupt':
+    case 'tanstack-event':
       return true
+    default:
+      return false
   }
 }
 
-function isMessageList(value: unknown): value is Array<Message> {
+function isMessageList(
+  value: unknown,
+): value is Array<Message | TanStackPiMessage> {
   return Array.isArray(value) && value.every(isValidMessage)
 }
 
@@ -136,7 +146,9 @@ function isClientTool(value: unknown): value is PiClientTool {
  * `chat({ adapter, systemPrompts, ...params })`.
  *
  * The body is `{ threadId, messages, tools?, resume?, parentRunId? }`, with
- * pi messages and pi tools. The system messages of the client are dropped,
+ * pi messages and pi tools. `messages` holds pi messages and the
+ * {@link TanStackPiMessage}s of earlier runs. Leave out app messages, as
+ * `convertToLlm` does. The system messages of the client are dropped,
  * so the server sets the system prompt. When `parentRunId` is missing, it is
  * the `runId` of the last `tanstack-interrupt` message in `messages`.
  *

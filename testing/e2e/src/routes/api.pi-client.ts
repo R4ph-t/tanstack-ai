@@ -1,7 +1,10 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { chat, toolDefinition } from '@tanstack/ai'
 import { fakeText } from '@tanstack/ai/testing'
-import { fromPiMessages, toPiAgentEvents } from '@tanstack/ai-pi-stream'
+import {
+  chatParamsFromPiRequest,
+  toPiAgentEvents,
+} from '@tanstack/ai-pi-stream'
 import { z } from 'zod'
 
 const getWeather = toolDefinition({
@@ -17,7 +20,8 @@ export const Route = createFileRoute('/api/pi-client')({
   server: {
     handlers: {
       POST: async ({ request }) => {
-        const body = await request.json()
+        // The system messages of the client are dropped.
+        const params = await chatParamsFromPiRequest(request)
         const fake = fakeText()
         fake.setResponses([
           { toolCalls: [{ name: 'getWeather', input: { city: 'Oslo' } }] },
@@ -27,13 +31,8 @@ export const Route = createFileRoute('/api/pi-client')({
         ])
 
         const events = toPiAgentEvents(
-          chat({
-            adapter: fake,
-            threadId: body.threadId,
-            tools: [getWeather],
-            // A client request: keep its messages, not its system prompts.
-            messages: fromPiMessages(body.messages).messages,
-          }),
+          chat({ ...params, adapter: fake, tools: [getWeather] }),
+          { messages: params.messages },
         )
         const encoder = new TextEncoder()
         const stream = new ReadableStream<Uint8Array>({

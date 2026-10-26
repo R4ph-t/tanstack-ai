@@ -12,7 +12,6 @@ import {
 import type {
   Interrupt,
   InterruptSubmissionError,
-  JSONSchema,
   ModelMessage,
   RunAgentResumeItem,
   StreamChunk,
@@ -33,8 +32,9 @@ import type {
 } from '@earendil-works/pi-agent-core'
 import { Type } from '@earendil-works/pi-ai'
 import type { AssistantMessage, ToolResultMessage } from '@earendil-works/pi-ai'
-import { toPiMessages } from './messages'
+import { tanstackField, toPiMessages } from './messages'
 import { fromPiAgentEvents } from './stream'
+import type { PiClientTool } from './request'
 
 /** The `chatParamsFromRequest(request)` fields that `runPiAgent` reads. */
 export interface PiAgentRequest {
@@ -42,11 +42,7 @@ export interface PiAgentRequest {
   runId: string
   messages: Array<UIMessage | ModelMessage>
   /** The tools of the client, which run in the browser. */
-  tools?: ReadonlyArray<{
-    name: string
-    description: string
-    parameters: JSONSchema
-  }>
+  tools?: ReadonlyArray<PiClientTool>
   /** The answers to the interrupts of the paused run. */
   resume?: ReadonlyArray<RunAgentResumeItem>
   /** The paused run, with `resume`. */
@@ -80,9 +76,7 @@ function isAssistant(
 }
 
 /** A pi tool for a client tool. It never runs on the server. */
-function clientAgentTool(
-  tool: NonNullable<PiAgentRequest['tools']>[number],
-): AgentTool {
+function clientAgentTool(tool: PiClientTool): AgentTool {
   return {
     name: tool.name,
     label: tool.name,
@@ -184,22 +178,36 @@ function isApprovalPlaceholder(message: ToolResultMessage): boolean {
   }
 }
 
-function errorOf(entry: RunAgentResumeItem): string | undefined {
-  const tanstack: unknown = entry.metadata?.tanstack
+/**
+ * The result of a client tool answer, as `chat()` reads it. An
+ * `output-error` answer must be `{ error: string }`. Otherwise it is invalid.
+ */
+function clientToolAnswer(
+  entry: RunAgentResumeItem,
+): { error: string } | { output: unknown } | undefined {
   const payload: unknown = entry.payload
-  if (
-    typeof tanstack === 'object' &&
-    tanstack !== null &&
-    'state' in tanstack &&
-    tanstack.state === 'output-error' &&
-    typeof payload === 'object' &&
+  if (tanstackField(entry.metadata, 'state') !== 'output-error') {
+    return { output: payload }
+  }
+  return typeof payload === 'object' &&
     payload !== null &&
+    Object.keys(payload).length === 1 &&
     'error' in payload &&
     typeof payload.error === 'string'
-  ) {
-    return payload.error
-  }
-  return undefined
+    ? { error: payload.error }
+    : undefined
+}
+
+/** The decision of an approval answer, as `chat()` reads it. */
+function approvalAnswer(entry: RunAgentResumeItem): boolean | undefined {
+  const payload: unknown = entry.payload
+  if (typeof payload === 'boolean') return payload
+  return typeof payload === 'object' &&
+    payload !== null &&
+    'approved' in payload &&
+    typeof payload.approved === 'boolean'
+    ? payload.approved
+    : undefined
 }
 
 /**
@@ -240,18 +248,6 @@ export function runPiAgent(
   const clientNames = new Set(clientTools.map((tool) => tool.name))
   const allTools = [...tools, ...clientTools.map(clientAgentTool)]
 
-  const history: Array<AgentMessage> = toPiMessages(
-    convertMessagesToModelMessages(request.messages),
-    {
-      ...(systemPrompts && { systemPrompts }),
-      model: {
-        api: config.model.api,
-        provider: config.model.provider,
-        model: config.model.id,
-      },
-    },
-  )
-
   const interrupts = new Map<string, Interrupt>()
   const loopConfig: AgentLoopConfig = {
     ...config,
@@ -281,6 +277,18 @@ export function runPiAgent(
   }
 
   async function* run(): AsyncGenerator<StreamChunk> {
+    // In the generator, so a broken history becomes a RUN_ERROR event.
+    const history: Array<AgentMessage> = toPiMessages(
+      convertMessagesToModelMessages(request.messages),
+      {
+        ...(systemPrompts && { systemPrompts }),
+        model: {
+          api: config.model.api,
+          provider: config.model.provider,
+          model: config.model.id,
+        },
+      },
+    )
     const resume = request.resume ?? []
     if (resume.length === 0) {
       const prompt = history.pop()
@@ -372,6 +380,33 @@ export function runPiAgent(
             `Interrupt ${id} is not pending.`,
           ),
         ),
+      // An answer must have the shape of its kind, as in chat().
+      ...[...entries.values()].flatMap((entry) => {
+        const { interruptId: id } = entry
+        if (!expected.has(id) || entry.status === 'cancelled') return []
+        if (id.startsWith('client_tool_')) {
+          return clientToolAnswer(entry)
+            ? []
+            : [
+                interruptItemError(
+                  scope,
+                  id,
+                  'invalid-tool-output',
+                  `Client tool ${id} has an output-error answer without an error message.`,
+                ),
+              ]
+        }
+        return approvalAnswer(entry) === undefined
+          ? [
+              interruptItemError(
+                scope,
+                id,
+                'invalid-payload',
+                `Approval ${id} must be a boolean or decision envelope.`,
+              ),
+            ]
+          : []
+      }),
     ]
     if (errors.length > 0) {
       yield { type: EventType.RUN_STARTED, threadId, runId }
@@ -381,7 +416,7 @@ export function runPiAgent(
           threadId,
           runId,
           message: errors.map((error) => error.message).join(' '),
-          code: 'unknown-interrupt',
+          code: errors[0]?.code ?? 'unknown-interrupt',
         },
         { runId, threadId, interruptErrors: errors },
       )
@@ -394,32 +429,26 @@ export function runPiAgent(
       const isClient = clientNames.has(call.name)
       const id = pendingId(call)
       const answer = id === undefined ? undefined : entries.get(id)
-      const payload: unknown = answer?.payload
+      const clientAnswer =
+        isClient && answer ? clientToolAnswer(answer) : undefined
       if (!assistant || !answer) {
         results.push(textResult(call, UNANSWERED, true))
       } else if (answer.status === 'cancelled') {
         denied.add(call.id)
         results.push(textResult(call, DENIED, true))
-      } else if (isClient) {
-        const error = errorOf(answer)
+      } else if (clientAnswer) {
         results.push(
-          error !== undefined
-            ? textResult(call, error, true)
+          'error' in clientAnswer
+            ? textResult(call, clientAnswer.error, true)
             : textResult(
                 call,
-                typeof payload === 'string'
-                  ? payload
-                  : JSON.stringify(payload ?? null),
+                typeof clientAnswer.output === 'string'
+                  ? clientAnswer.output
+                  : JSON.stringify(clientAnswer.output ?? null),
                 false,
               ),
         )
-      } else if (
-        payload === true ||
-        (typeof payload === 'object' &&
-          payload !== null &&
-          'approved' in payload &&
-          payload.approved === true)
-      ) {
+      } else if (approvalAnswer(answer)) {
         const outcome = await runToolCall(call, {
           tools: allTools,
           assistantMessage: assistant,

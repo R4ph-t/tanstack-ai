@@ -6,6 +6,7 @@ import {
 } from '@tanstack/ai'
 import type {
   Interrupt,
+  ModelMessage,
   RunFinishedEvent,
   SpecTokenUsage,
   StreamChunk,
@@ -22,14 +23,26 @@ import type {
 } from '@earendil-works/pi-ai'
 import {
   emptyUsage,
+  field,
   fromPiToolContent,
+  isJsonObject,
   parseJsonObject,
+  stringField,
+  tanstackField,
   toPiToolContent,
 } from './messages'
 import type { PiModelFields } from './messages'
 import type { PiBridgeEvent, TanStackPiMessage } from './request'
 
 type FinishReason = RunFinishedEvent['finishReason']
+
+const FINISH_REASONS: ReadonlySet<unknown> = new Set<NonNullable<FinishReason>>(
+  ['stop', 'length', 'content_filter', 'tool_calls'],
+)
+
+function isFinishReason(value: unknown): value is NonNullable<FinishReason> {
+  return FINISH_REASONS.has(value)
+}
 
 /** TanStack marks a redacted thinking block by this reasoning message id prefix. */
 const REDACTED_PREFIX = 'redacted_thinking-'
@@ -44,25 +57,6 @@ function fromPiStopReason(reason: StopReason): FinishReason {
   if (reason === 'toolUse') return 'tool_calls'
   if (reason === 'length') return 'length'
   return 'stop'
-}
-
-/** `metadata.tanstack[key]` of an event, or undefined. */
-function tanstackField(metadata: unknown, key: string): unknown {
-  if (typeof metadata !== 'object' || metadata === null) return undefined
-  const tanstack: unknown = Reflect.get(metadata, 'tanstack')
-  if (typeof tanstack !== 'object' || tanstack === null) return undefined
-  return Reflect.get(tanstack, key)
-}
-
-function field(value: unknown, key: string): unknown {
-  return typeof value === 'object' && value !== null
-    ? Reflect.get(value, key)
-    : undefined
-}
-
-function stringField(value: unknown, key: string): string | undefined {
-  const found = field(value, key)
-  return typeof found === 'string' ? found : undefined
 }
 
 /**
@@ -128,6 +122,14 @@ interface Turn {
   args: Map<string, string>
 }
 
+/** Options for {@link toPiAgentEvents}. */
+export interface ToPiAgentEventsOptions {
+  /** The pi model fields for the assistant messages. */
+  model?: PiModelFields
+  /** The `chat()` history, such as the `messages` of `chatParamsFromPiRequest`. */
+  messages?: ReadonlyArray<ModelMessage>
+}
+
 /** The AG-UI events that `toPiAgentEvents` maps to pi events. */
 const MAPPED_EVENTS: ReadonlySet<string> = new Set([
   EventType.RUN_STARTED,
@@ -168,16 +170,27 @@ const MAPPED_EVENTS: ReadonlySet<string> = new Set([
  *
  * Pass `model` (the pi model fields) to stamp the assistant messages.
  * Otherwise they get the provider and model of the `chat()` adapter, and an
- * empty `api`.
+ * empty `api`, because TanStack adapter api names are not pi api names.
+ *
+ * A resumed run first sends the results of the paused tool calls, which
+ * belong to an assistant message of the history. Pass the `chat()` `messages`
+ * so these become `toolResult` messages with their tool names, and are not
+ * read as a new assistant message.
  */
 export async function* toPiAgentEvents(
   stream: AsyncIterable<StreamChunk>,
-  { model }: { model?: PiModelFields } = {},
+  { model, messages: history = [] }: ToPiAgentEventsOptions = {},
 ): AsyncGenerator<PiBridgeEvent> {
   const messages: Array<AgentMessage> = []
   let fields: PiModelFields = model ?? { api: '', provider: '', model: '' }
   let started = false
   let turn: Turn | undefined
+  // The tool calls of the history, which a resumed run answers first.
+  const pastCalls = new Map(
+    history.flatMap((message) =>
+      (message.toolCalls ?? []).map((call) => [call.id, call] as const),
+    ),
+  )
 
   function* start(): Generator<PiBridgeEvent> {
     if (started) return
@@ -360,8 +373,8 @@ export async function* toPiAgentEvents(
           if (call) call.thoughtSignature = event.encryptedValue
           break
         }
-        // ponytail: only a signature sent before REASONING_MESSAGE_END lands
-        // in that end event, the order the TanStack adapters use.
+        // ponytail: the signature lands on the thinking block, so pi sees it
+        // in the final message, not in `thinking_end`.
         const at = turn?.index.get(`reasoning:${event.entityId}`)
         const block = at === undefined ? undefined : turn?.message.content[at]
         if (block?.type === 'thinking') {
@@ -371,6 +384,9 @@ export async function* toPiAgentEvents(
       }
 
       case EventType.TOOL_CALL_START: {
+        // A resumed run replays a paused call of the history. It is not part
+        // of a new assistant message.
+        if (pastCalls.has(event.toolCallId)) break
         const current = yield* open()
         const signature = stringField(event.metadata, 'thoughtSignature')
         const at =
@@ -404,10 +420,17 @@ export async function* toPiAgentEvents(
         const call = toolCallOf(event.toolCallId)
         if (!turn || at === undefined || !call) break
         const input: unknown = event.input
-        call.arguments =
-          typeof input === 'object' && input !== null && !Array.isArray(input)
-            ? parseJsonObject(JSON.stringify(input))
-            : parseJsonObject(turn.args.get(event.toolCallId) ?? '')
+        if (isJsonObject(input)) call.arguments = input
+        else {
+          try {
+            call.arguments = parseJsonObject(
+              turn.args.get(event.toolCallId) ?? '',
+            )
+          } catch {
+            // The arguments stay `{}`. chat() answers the call with an
+            // `output-error` result that names the bad JSON.
+          }
+        }
         yield update(turn, {
           type: 'toolcall_end',
           contentIndex: at,
@@ -417,8 +440,21 @@ export async function* toPiAgentEvents(
       }
 
       case EventType.TOOL_CALL_RESULT: {
-        const call = toolCallOf(event.toolCallId)
-        if (!turn || !call) break
+        const current = toolCallOf(event.toolCallId)
+        const past = pastCalls.get(event.toolCallId)
+        const call =
+          current ??
+          (past && {
+            id: past.id,
+            name: past.function.name,
+            arguments: parseJsonObject(past.function.arguments),
+          })
+        if (!call) {
+          throw new Error(
+            `TOOL_CALL_RESULT ${event.toolCallId} has no tool call. Pass the chat() messages to toPiAgentEvents.`,
+          )
+        }
+        yield* start()
         // chat() sends only the result, so the execution starts and ends here.
         yield {
           type: 'tool_execution_start',
@@ -448,7 +484,8 @@ export async function* toPiAgentEvents(
           isError,
           timestamp: Date.now(),
         }
-        turn.toolResults.push(result)
+        // The result of a replayed call answers the history, not a turn.
+        if (current) turn?.toolResults.push(result)
         messages.push(result)
         yield { type: 'message_start', message: result }
         yield { type: 'message_end', message: result }
@@ -458,9 +495,10 @@ export async function* toPiAgentEvents(
       case EventType.RUN_FINISHED: {
         // A model call with no content is still a turn.
         yield* open()
+        const metadataReason = tanstackField(event.metadata, 'finishReason')
         const finishReason =
           event.finishReason ??
-          (tanstackField(event.metadata, 'finishReason') as FinishReason)
+          (isFinishReason(metadataReason) ? metadataReason : undefined)
         const responseId =
           event.responseId ??
           stringField(event.metadata?.tanstack, 'responseId')
