@@ -635,8 +635,14 @@ export {
 } from './utilities/provider-executed'
 export { splitMidConversationChanges } from './utilities/mid-conversation'
 export type { MidConversationRequest } from './utilities/mid-conversation'
-export { orderedAssistantBlocks } from './utilities/block-order'
-export type { OrderedAssistantBlock } from './utilities/block-order'
+export {
+  buildBlockOrder,
+  orderedAssistantBlocks,
+} from './utilities/block-order'
+export type {
+  BlockOrderEntry,
+  OrderedAssistantBlock,
+} from './utilities/block-order'
 
 // Adapter extension utilities
 export { createModel, extendAdapter } from './extend-adapter'
