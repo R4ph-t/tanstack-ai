@@ -60,8 +60,7 @@ function isValidHistory(history: Array<unknown>): boolean {
     }
   }
   return (
-    new Set(calls).size === calls.length &&
-    calls.every((id) => results.has(id))
+    new Set(calls).size === calls.length && calls.every((id) => results.has(id))
   )
 }
 
@@ -121,7 +120,9 @@ function PiClientPage() {
       }),
     })
     if (!response.body) return
-    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
+    const reader = response.body
+      .pipeThrough(new TextDecoderStream())
+      .getReader()
     let buffer = ''
     for (;;) {
       const { done, value } = await reader.read()

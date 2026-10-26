@@ -89,7 +89,10 @@ function answer(context: TranscriptContext) {
   const toolUse = { stopReason: 'toolUse' as const }
   switch (scenario) {
     case 'delete':
-      return fauxAssistantMessage(call('deleteFile', { path: 'a.txt' }), toolUse)
+      return fauxAssistantMessage(
+        call('deleteFile', { path: 'a.txt' }),
+        toolUse,
+      )
     case 'both':
       return fauxAssistantMessage(
         [
@@ -104,7 +107,10 @@ function answer(context: TranscriptContext) {
       return fauxAssistantMessage(call('explode', { path: 'a.txt' }), toolUse)
     case 'think':
       return fauxAssistantMessage(
-        [fauxThinking('Check the weather.'), call('getWeather', { city: 'Oslo' })],
+        [
+          fauxThinking('Check the weather.'),
+          call('getWeather', { city: 'Oslo' }),
+        ],
         toolUse,
       )
     case 'fail':

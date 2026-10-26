@@ -72,8 +72,16 @@ const HAND: Record<string, Array<StreamChunk>> = {
   ],
   interleave: [
     { type: EventType.RUN_STARTED, ...ids },
-    { type: EventType.REASONING_MESSAGE_START, messageId: 'r-1', role: 'reasoning' },
-    { type: EventType.REASONING_MESSAGE_CONTENT, messageId: 'r-1', delta: 'Plan.' },
+    {
+      type: EventType.REASONING_MESSAGE_START,
+      messageId: 'r-1',
+      role: 'reasoning',
+    },
+    {
+      type: EventType.REASONING_MESSAGE_CONTENT,
+      messageId: 'r-1',
+      delta: 'Plan.',
+    },
     { type: EventType.REASONING_MESSAGE_END, messageId: 'r-1' },
     {
       type: EventType.TOOL_CALL_START,
@@ -86,8 +94,16 @@ const HAND: Record<string, Array<StreamChunk>> = {
       delta: '{"city":"Oslo"}',
     },
     { type: EventType.TOOL_CALL_END, toolCallId: 'call-1' },
-    { type: EventType.REASONING_MESSAGE_START, messageId: 'r-2', role: 'reasoning' },
-    { type: EventType.REASONING_MESSAGE_CONTENT, messageId: 'r-2', delta: 'Again.' },
+    {
+      type: EventType.REASONING_MESSAGE_START,
+      messageId: 'r-2',
+      role: 'reasoning',
+    },
+    {
+      type: EventType.REASONING_MESSAGE_CONTENT,
+      messageId: 'r-2',
+      delta: 'Again.',
+    },
     { type: EventType.REASONING_MESSAGE_END, messageId: 'r-2' },
     { type: EventType.TEXT_MESSAGE_START, messageId: 't-1', role: 'assistant' },
     { type: EventType.TEXT_MESSAGE_CONTENT, messageId: 't-1', delta: 'Done.' },
