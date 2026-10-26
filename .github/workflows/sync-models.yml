@@ -71,7 +71,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add packages/ scripts/openrouter.models.json scripts/openrouter.video-models.json scripts/vercel-gateway.models.json scripts/lovable-gateway.models.json scripts/llmgateway.models.json scripts/.sync-models-last-run .changeset/
+          git add packages/ scripts/openrouter.models.json scripts/openrouter.video-models.json scripts/vercel-gateway.models.json scripts/lovable-gateway.models.json scripts/llmgateway.models.json scripts/neon.models.json scripts/.sync-models-last-run .changeset/
           git commit -m "chore: sync model metadata"
           # GITHUB_TOKEN pushes do not start the PR Test / E2E workflows.
           # After this job, a maintainer must run those checks from the
@@ -91,12 +91,13 @@ jobs:
 
           if [ -z "$EXISTING_PR" ] || [ "$EXISTING_PR" = "null" ]; then
             BODY=$(cat <<'PRBODY'
-          Automated daily sync of model metadata from OpenRouter, Vercel AI Gateway, Lovable AI Gateway, LLM Gateway, and modelschemas (native provider models, plus ElevenLabs text-to-speech, music, sound effects, and voice design).
+          Automated daily sync of model metadata from OpenRouter, Vercel AI Gateway, Lovable AI Gateway, LLM Gateway, Neon AI Gateway, and modelschemas (native provider models, plus ElevenLabs text-to-speech, music, sound effects, and voice design).
 
           - Fetches the latest model list from OpenRouter (chat + `GET /api/v1/videos/models`)
           - Fetches the latest model list from Vercel AI Gateway
           - Fetches the latest model list from Lovable AI Gateway
           - Fetches the latest model list from LLM Gateway (`GET /v1/models`)
+          - Fetches the latest model list from Neon AI Gateway
           - Converts to the internal adapter format
           - Inserts new native-provider models from modelschemas (`@modelschemas/client`)
           - Inserts new ElevenLabs text-to-speech, music, sound-effect, and voice-design models from modelschemas

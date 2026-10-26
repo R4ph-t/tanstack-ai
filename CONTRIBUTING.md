@@ -53,8 +53,8 @@ For deeper architecture details (adapter system, isomorphic tools, framework int
 
 `pnpm generate:models` is the maintainer command behind the daily **Sync Model Metadata** workflow (branch `automated/sync-models`). It:
 
-1. Fetches OpenRouter, Vercel AI Gateway, and Lovable AI Gateway catalogs (OpenRouter adapter + gateway packages).
-2. Regenerates `packages/ai-openrouter/src/model-meta.ts` and the Vercel Gateway model list.
+1. Fetches OpenRouter, Vercel AI Gateway, Lovable AI Gateway, and Neon AI Gateway catalogs.
+2. Regenerates `packages/ai-openrouter/src/model-meta.ts` and the Vercel Gateway and Neon model lists.
 3. Inserts **new** native-provider models from [modelschemas](https://modelschemas.com) (`@modelschemas/client`) into `ai-openai`, `ai-anthropic`, `ai-gemini`, `ai-grok`, `ai-groq`, `ai-mistral`, and `ai-byteplus`. Native ids, activity, limits, modalities, pricing, and capabilities come from each provider catalog. OpenRouter fills a field only when the native row left it empty. OpenAI, Anthropic, Gemini, and Grok hold an id back until the OpenRouter catalog has a matching row and both prices are known. The log names each held-back id. Groq and Mistral insert even when a price is unknown: the generator leaves that price out (`pricing: {}` when both are unknown) and never writes `0`. BytePlus does not write pricing.
 4. Inserts **new** ElevenLabs text-to-speech, music, sound-effect, and voice-design ids from [modelschemas](https://modelschemas.com/v1/schemas/elevenlabs) into `packages/ai-elevenlabs/src/model-meta.ts` (`scripts/sync-elevenlabs-models.ts`, also through `@modelschemas/client`). Text-to-speech ids are catalog rows with `providerMetadata.canDoTextToSpeech`. Music, sound-effect, and voice-design ids are the `model_id` enums of their request schemas. Transcription ids stay hand-maintained.
 5. Writes a patch changeset for the packages that changed.

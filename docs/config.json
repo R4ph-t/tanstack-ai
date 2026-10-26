@@ -1691,7 +1691,8 @@
         {
           "label": "Anthropic: Advanced",
           "to": "adapters/anthropic-advanced",
-          "addedAt": "2026-10-21"
+          "addedAt": "2026-10-21",
+          "updatedAt": "2026-10-22"
         },
         {
           "label": "Google Gemini",
@@ -1702,7 +1703,8 @@
         {
           "label": "Google Gemini: Advanced",
           "to": "adapters/gemini-advanced",
-          "addedAt": "2026-10-21"
+          "addedAt": "2026-10-21",
+          "updatedAt": "2026-10-25"
         },
         {
           "label": "Google Vertex AI",
@@ -1827,6 +1829,11 @@
           "to": "adapters/cloudflare",
           "addedAt": "2026-09-03",
           "updatedAt": "2026-10-22"
+        },
+        {
+          "label": "Neon AI Gateway",
+          "to": "adapters/neon",
+          "addedAt": "2026-10-21"
         },
         {
           "label": "Claude Code",

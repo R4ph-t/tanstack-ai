@@ -282,7 +282,7 @@ console.log(result.meta.usage);
 
 - `gpt-6-luna` is the only Decisions model.
 - An object `state` goes to OpenAI as JSON text.
-- If OpenAI refuses to answer a question, `decide()` throws an error with the name of that question.
+- If OpenAI refuses to answer a question, `decide()` throws an `EvaluateError` with `code: EVALUATE_REFUSAL_CODE`. The message names the question. The error also has the usage and the raw answers that came back, for example `{ type: 'noul', noul: 0.9 }` for a `boolean()` question. Narrow it with `isEvaluateError(error)`. See [Refused questions](../evaluate/evaluate#refused-questions).
 - `boolean()` questions work. The adapter adds the meaning of true and false to the instructions.
 
 See the [Evaluate guide](../evaluate/evaluate) for the question helpers, the result shape, abort, and middleware.

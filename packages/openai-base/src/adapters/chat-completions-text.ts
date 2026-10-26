@@ -175,6 +175,7 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
         `activity=chat provider=${this.name} model=${this.model} messages=${options.messages.length} tools=${options.tools?.length ?? 0} stream=true`,
         { provider: this.name, model: this.model },
       )
+      const streamOptions = this.streamOptions(options.model)
       const stream = await clientFor(
         this.client,
         options,
@@ -183,7 +184,7 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
         {
           ...requestParams,
           stream: true,
-          stream_options: { include_usage: true },
+          ...(streamOptions && { stream_options: streamOptions }),
         },
         extractRequestOptions(options.request),
       )
@@ -500,6 +501,7 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
         { provider: this.name, model: this.model },
       )
 
+      const streamOptions = this.streamOptions(chatOptions.model)
       const stream = await clientFor(
         this.client,
         chatOptions,
@@ -508,7 +510,7 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
         {
           ...cleanParams,
           stream: true,
-          stream_options: { include_usage: true },
+          ...(streamOptions && { stream_options: streamOptions }),
           response_format: responseFormat,
         },
         extractRequestOptions(chatOptions.request),
@@ -1435,6 +1437,17 @@ export abstract class OpenAIBaseChatCompletionsTextAdapter<
    */
   protected modelReasoning(_model: string): ModelReasoning | undefined {
     return undefined
+  }
+
+  /**
+   * The `stream_options` of a streaming request. The default asks for the
+   * usage-only tail chunk. A subclass returns `undefined` for a backend that
+   * rejects the field (it then sends usage on its own, or none).
+   */
+  protected streamOptions(
+    _model: string,
+  ): OpenAI.Chat.Completions.ChatCompletionStreamOptions | undefined {
+    return { include_usage: true }
   }
 
   /**
