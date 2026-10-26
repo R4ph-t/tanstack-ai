@@ -34,14 +34,6 @@ const CODESTRAL_2508 = {
       'vision',
     ],
   },
-  pricing: {
-    input: {
-      normal: 0.3,
-    },
-    output: {
-      normal: 0.9,
-    },
-  },
 } as const satisfies ModelMeta<MistralTextProviderOptions>
 
 const LABS_LEANSTRAL_1_5 = {
@@ -60,7 +52,6 @@ const LABS_LEANSTRAL_1_5 = {
       'vision',
     ],
   },
-  pricing: {},
 } as const satisfies ModelMeta<MistralTextProviderOptions>
 
 const LABS_LEANSTRAL_1_5_1 = {
@@ -79,7 +70,6 @@ const LABS_LEANSTRAL_1_5_1 = {
       'vision',
     ],
   },
-  pricing: {},
 } as const satisfies ModelMeta<MistralTextProviderOptions>
 
 const MINISTRAL_14B_2512 = {
@@ -99,14 +89,6 @@ const MINISTRAL_14B_2512 = {
       'vision',
     ],
   },
-  pricing: {
-    input: {
-      normal: 0.2,
-    },
-    output: {
-      normal: 0.2,
-    },
-  },
 } as const satisfies ModelMeta<MistralTextProviderOptions>
 
 const MINISTRAL_14B_LATEST = {
@@ -124,14 +106,6 @@ const MINISTRAL_14B_LATEST = {
       'reasoning',
       'vision',
     ],
-  },
-  pricing: {
-    input: {
-      normal: 0.2,
-    },
-    output: {
-      normal: 0.2,
-    },
   },
 } as const satisfies ModelMeta<MistralTextProviderOptions>
 
@@ -152,14 +126,6 @@ const MINISTRAL_3B_2512 = {
       'vision',
     ],
   },
-  pricing: {
-    input: {
-      normal: 0.1,
-    },
-    output: {
-      normal: 0.1,
-    },
-  },
 } as const satisfies ModelMeta<MistralTextProviderOptions>
 
 const MINISTRAL_8B_2512 = {
@@ -178,14 +144,6 @@ const MINISTRAL_8B_2512 = {
       'reasoning',
       'vision',
     ],
-  },
-  pricing: {
-    input: {
-      normal: 0.15,
-    },
-    output: {
-      normal: 0.15,
-    },
   },
 } as const satisfies ModelMeta<MistralTextProviderOptions>
 
@@ -206,14 +164,6 @@ const MISTRAL_LARGE_2512 = {
       'vision',
     ],
   },
-  pricing: {
-    input: {
-      normal: 0.5,
-    },
-    output: {
-      normal: 1.5,
-    },
-  },
 } as const satisfies ModelMeta<MistralTextProviderOptions>
 
 const MISTRAL_MEDIUM = {
@@ -232,7 +182,6 @@ const MISTRAL_MEDIUM = {
       'vision',
     ],
   },
-  pricing: {},
 } as const satisfies ModelMeta<MistralTextProviderOptions>
 
 const MISTRAL_MEDIUM_2604 = {
@@ -251,7 +200,6 @@ const MISTRAL_MEDIUM_2604 = {
       'vision',
     ],
   },
-  pricing: {},
 } as const satisfies ModelMeta<MistralTextProviderOptions>
 
 const MISTRAL_MEDIUM_3_5 = {
@@ -270,14 +218,6 @@ const MISTRAL_MEDIUM_3_5 = {
       'reasoning',
       'vision',
     ],
-  },
-  pricing: {
-    input: {
-      normal: 1.5,
-    },
-    output: {
-      normal: 7.5,
-    },
   },
 } as const satisfies ModelMeta<MistralTextProviderOptions>
 
@@ -298,14 +238,6 @@ const MISTRAL_SMALL_2603 = {
       'vision',
     ],
   },
-  pricing: {
-    input: {
-      normal: 0.15,
-    },
-    output: {
-      normal: 0.6,
-    },
-  },
 } as const satisfies ModelMeta<MistralTextProviderOptions>
 
 /** Provider options for vision-capable Mistral models. */
@@ -315,17 +247,12 @@ export type MistralVisionProviderOptions = MistralTextProviderOptions
 export type MistralReasoningProviderOptions = MistralTextProviderOptions
 
 /**
- * Internal metadata structure describing a Mistral model's capabilities
- * and approximate pricing (USD per million tokens).
+ * Internal metadata structure describing a Mistral model's capabilities.
  */
 interface ModelMeta<TProviderOptions = unknown> {
   name: string
   context_window?: number
   max_completion_tokens?: number
-  pricing: {
-    input?: { normal: number; cached?: number }
-    output?: { normal: number }
-  }
   supports: {
     input: Array<'text' | 'image' | 'audio' | 'document'>
     output: Array<'text'>
@@ -350,10 +277,6 @@ const MISTRAL_LARGE_LATEST = {
   name: 'mistral-large-latest',
   context_window: 131_072,
   max_completion_tokens: 8_192,
-  pricing: {
-    input: { normal: 0.5 },
-    output: { normal: 1.5 },
-  },
   supports: {
     input: ['text'],
     output: ['text'],
@@ -366,10 +289,6 @@ const MISTRAL_MEDIUM_LATEST = {
   name: 'mistral-medium-latest',
   context_window: 131_072,
   max_completion_tokens: 8_192,
-  pricing: {
-    input: { normal: 0.4 },
-    output: { normal: 2 },
-  },
   supports: {
     input: ['text', 'image', 'document'],
     output: ['text'],
@@ -383,10 +302,6 @@ const MISTRAL_SMALL_LATEST = {
   name: 'mistral-small-latest',
   context_window: 131_072,
   max_completion_tokens: 8_192,
-  pricing: {
-    input: { normal: 0.1 },
-    output: { normal: 0.3 },
-  },
   supports: {
     input: ['text', 'image', 'document'],
     output: ['text'],
@@ -400,10 +315,6 @@ const MINISTRAL_8B_LATEST = {
   name: 'ministral-8b-latest',
   context_window: 131_072,
   max_completion_tokens: 8_192,
-  pricing: {
-    input: { normal: 0.1 },
-    output: { normal: 0.1 },
-  },
   supports: {
     input: ['text'],
     output: ['text'],
@@ -416,10 +327,6 @@ const MINISTRAL_3B_LATEST = {
   name: 'ministral-3b-latest',
   context_window: 131_072,
   max_completion_tokens: 8_192,
-  pricing: {
-    input: { normal: 0.04 },
-    output: { normal: 0.04 },
-  },
   supports: {
     input: ['text'],
     output: ['text'],
@@ -432,10 +339,6 @@ const CODESTRAL_LATEST = {
   name: 'codestral-latest',
   context_window: 256_000,
   max_completion_tokens: 8_192,
-  pricing: {
-    input: { normal: 0.3 },
-    output: { normal: 0.9 },
-  },
   supports: {
     input: ['text'],
     output: ['text'],
@@ -448,10 +351,6 @@ const MAGISTRAL_MEDIUM_LATEST = {
   name: 'magistral-medium-latest',
   context_window: 40_000,
   max_completion_tokens: 40_000,
-  pricing: {
-    input: { normal: 2 },
-    output: { normal: 5 },
-  },
   supports: {
     input: ['text'],
     output: ['text'],
@@ -465,10 +364,6 @@ const MAGISTRAL_SMALL_LATEST = {
   name: 'magistral-small-latest',
   context_window: 40_000,
   max_completion_tokens: 40_000,
-  pricing: {
-    input: { normal: 0.5 },
-    output: { normal: 1.5 },
-  },
   supports: {
     input: ['text'],
     output: ['text'],
@@ -485,10 +380,6 @@ const MISTRAL_MEDIUM_3 = {
   name: 'mistral-medium-3',
   context_window: 131_072,
   max_completion_tokens: 8_192,
-  pricing: {
-    input: { normal: 0.4 },
-    output: { normal: 2 },
-  },
   supports: {
     input: ['text', 'image', 'document'],
     output: ['text'],
@@ -501,10 +392,6 @@ const MISTRAL_SMALL_2503 = {
   name: 'mistral-small-2503',
   context_window: 131_072,
   max_completion_tokens: 8_192,
-  pricing: {
-    input: { normal: 0.1 },
-    output: { normal: 0.3 },
-  },
   supports: {
     input: ['text', 'image', 'document'],
     output: ['text'],
@@ -517,10 +404,6 @@ const CODESTRAL_2 = {
   name: 'codestral-2',
   context_window: 131_072,
   max_completion_tokens: 8_192,
-  pricing: {
-    input: { normal: 0.3 },
-    output: { normal: 0.9 },
-  },
   supports: {
     input: ['text'],
     output: ['text'],

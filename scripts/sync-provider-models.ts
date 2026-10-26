@@ -3,8 +3,8 @@
  *
  * For each synced provider, this script:
  * 1. Lists that provider's models from modelschemas (`@modelschemas/client`)
- * 2. Uses native limits, modalities, pricing, and capabilities. Fills any
- *    field the native row left empty from the modelschemas OpenRouter catalog
+ * 2. Uses the native row's limits, modalities, and capabilities. A field the
+ *    row leaves empty stays empty, and a row with no modalities is skipped
  * 3. Identifies models missing from the provider's model-meta.ts
  * 4. Generates and inserts new model constants, array entries, and type map entries
  *
@@ -34,7 +34,6 @@ import { fileURLToPath } from 'node:url'
 import {
   alreadySynced,
   outputsText,
-  pricingLines,
   selectNativeInserts,
 } from './model-sync/catalog'
 import type { CatalogModel, SyncModel } from './model-sync/catalog'
@@ -105,13 +104,6 @@ interface ProviderConfig {
   skipPatterns: Array<string>
   /** Activities to insert. `null` means the catalog left activity unset. */
   acceptedActivities: Array<string | null>
-  /** See `NativeInsertRules.requireOpenRouterEnrich`. */
-  requireOpenRouterEnrich: boolean
-  /**
-   * Write a `pricing` block. An unknown side is left out, never written as
-   * 0, so Groq/Mistral can insert with `pricing: {}`. BytePlus has none.
-   */
-  includePricing: boolean
   outputTokenField: 'max_output_tokens' | 'max_completion_tokens'
 }
 
@@ -140,8 +132,6 @@ const PROVIDER_MAP: Record<SyncedProvider, ProviderConfig> = {
       'chatgpt-', // ChatGPT branded models
     ],
     acceptedActivities: ['chat'],
-    requireOpenRouterEnrich: true,
-    includePricing: true,
     outputTokenField: 'max_output_tokens',
   },
   anthropic: {
@@ -164,8 +154,6 @@ const PROVIDER_MAP: Record<SyncedProvider, ProviderConfig> = {
     providerOptionsIsMappedType: false,
     skipPatterns: [],
     acceptedActivities: ['chat'],
-    requireOpenRouterEnrich: true,
-    includePricing: true,
     outputTokenField: 'max_output_tokens',
   },
   gemini: {
@@ -188,8 +176,6 @@ const PROVIDER_MAP: Record<SyncedProvider, ProviderConfig> = {
       'gemma-', // Gemma open-source models (not Gemini API models)
     ],
     acceptedActivities: ['chat'],
-    requireOpenRouterEnrich: true,
-    includePricing: true,
     outputTokenField: 'max_output_tokens',
   },
   grok: {
@@ -208,8 +194,6 @@ const PROVIDER_MAP: Record<SyncedProvider, ProviderConfig> = {
     providerOptionsIsMappedType: true,
     skipPatterns: [],
     acceptedActivities: ['chat'],
-    requireOpenRouterEnrich: true,
-    includePricing: true,
     outputTokenField: 'max_output_tokens',
   },
   groq: {
@@ -228,8 +212,6 @@ const PROVIDER_MAP: Record<SyncedProvider, ProviderConfig> = {
     providerOptionsIsMappedType: true,
     skipPatterns: ['whisper-', 'canopylabs/'],
     acceptedActivities: [null, 'chat'],
-    requireOpenRouterEnrich: false,
-    includePricing: true,
     outputTokenField: 'max_completion_tokens',
   },
   mistral: {
@@ -258,8 +240,6 @@ const PROVIDER_MAP: Record<SyncedProvider, ProviderConfig> = {
       'zai-',
     ],
     acceptedActivities: [null, 'chat'],
-    requireOpenRouterEnrich: false,
-    includePricing: true,
     outputTokenField: 'max_completion_tokens',
   },
   byteplus: {
@@ -277,8 +257,6 @@ const PROVIDER_MAP: Record<SyncedProvider, ProviderConfig> = {
     providerOptionsIsMappedType: true,
     skipPatterns: [],
     acceptedActivities: ['chat'],
-    requireOpenRouterEnrich: false,
-    includePricing: false,
     outputTokenField: 'max_output_tokens',
   },
 }
@@ -307,9 +285,6 @@ function mapInputModalities(modalities: Array<string>): Array<InputModality> {
 function anthropicOptionsType(model: SyncModel): string {
   return buildAnthropicProviderOptionsType({
     supportedParameters: model.supportedParameters,
-    // modelschemas has no cache price, and every current Claude model
-    // supports prompt caching.
-    hasCachedPricing: true,
   })
 }
 
@@ -411,9 +386,6 @@ function generateModelConstant(
     }),
   )
   lines.push(`  },`)
-  if (config.includePricing) {
-    lines.push(...pricingLines(model.pricing))
-  }
   lines.push(`} as const satisfies ${satisfiesClause(model, provider, config)}`)
   return lines.join('\n')
 }
@@ -444,14 +416,11 @@ function detectChangedPackages(): Set<string> {
 async function syncModelMeta(
   provider: SyncedProvider,
   config: ProviderConfig,
-  catalogs: {
-    native: Record<SyncedProvider, Array<CatalogModel>>
-    openrouter: Array<CatalogModel>
-  },
+  catalogs: Record<SyncedProvider, Array<CatalogModel>>,
   cutoffTimestamp: number,
-): Promise<{ added: number; heldBack: number }> {
+): Promise<number> {
   console.log(`\nProcessing provider: ${provider}`)
-  const rows = catalogs.native[provider]
+  const rows = catalogs[provider]
   console.log(`  Found ${rows.length} modelschemas models for '${provider}'`)
 
   let content = await readFile(config.metaFile, 'utf-8')
@@ -461,23 +430,19 @@ async function syncModelMeta(
     `  Existing models in file: ${existingIds.size} IDs, ${existingConstNames.size} constants`,
   )
 
-  const { inserts, heldBack, skipped } = selectNativeInserts(
+  const { inserts, skipped } = selectNativeInserts(
     rows,
     { ...config, provider, cutoffTimestamp },
-    catalogs.openrouter,
     (nativeId) => alreadySynced(nativeId, existingIds, existingConstNames),
   )
   const skipCounts = Object.entries(skipped)
     .map(([reason, count]) => `${reason}=${count}`)
     .join(', ')
   if (skipCounts) console.log(`  Skipped: ${skipCounts}`)
-  for (const rawId of heldBack) {
-    console.log(`  Waiting for an OpenRouter price: ${rawId}`)
-  }
 
   if (inserts.length === 0) {
     console.log('  No new models to add.')
-    return { added: 0, heldBack: heldBack.length }
+    return 0
   }
 
   console.log(`  Adding ${inserts.length} new models:`)
@@ -504,7 +469,7 @@ async function syncModelMeta(
 
   await writeFile(config.metaFile, content, 'utf-8')
   console.log(`  Wrote updated file: ${config.metaFile}`)
-  return { added: inserts.length, heldBack: heldBack.length }
+  return inserts.length
 }
 
 async function main() {
@@ -519,40 +484,28 @@ async function main() {
   )
 
   const catalogs = await fetchSyncCatalogs(createSyncClient())
-  const counts = Object.entries(catalogs.native)
+  const counts = Object.entries(catalogs)
     .map(([id, rows]) => `${id}=${rows.length}`)
     .join(', ')
-  console.log(
-    `Fetched modelschemas catalogs: ${counts}, openrouter=${catalogs.openrouter.length}`,
-  )
+  console.log(`Fetched modelschemas catalogs: ${counts}`)
 
   const changedPackages = new Set<string>()
   let totalAdded = 0
-  let totalHeldBack = 0
   for (const [provider, config] of Object.entries(PROVIDER_MAP) as Array<
     [SyncedProvider, ProviderConfig]
   >) {
-    const { added, heldBack } = await syncModelMeta(
+    const added = await syncModelMeta(
       provider,
       config,
       catalogs,
       cutoffTimestamp,
     )
     totalAdded += added
-    totalHeldBack += heldBack
     if (added > 0) changedPackages.add(config.packageName)
   }
 
   console.log(`\nDone. Added ${totalAdded} new models total.`)
 
-  // Held-back ids still age out after 30 days. Freezing the timestamp
-  // instead would stall it for good on ids OpenRouter never prices (Live
-  // API models), so each run names them in its log.
-  if (totalHeldBack > 0) {
-    console.log(
-      `${totalHeldBack} models are waiting for an OpenRouter price (listed above).`,
-    )
-  }
   await writeLastRunTimestamp()
 
   const allChangedPackages = detectChangedPackages()

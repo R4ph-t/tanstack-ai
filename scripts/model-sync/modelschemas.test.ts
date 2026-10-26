@@ -27,15 +27,6 @@ describe('fetchSyncCatalogs', () => {
     await expect(fetchSyncCatalogs(client)).rejects.toThrow('unavailable')
   })
 
-  it('fails on an empty openrouter catalog instead of dropping prices', async () => {
-    const client = clientReturning((provider) =>
-      json({ models: provider === 'openrouter' ? [] : [row('x')] }),
-    )
-    await expect(fetchSyncCatalogs(client)).rejects.toThrow(
-      'empty openrouter catalog',
-    )
-  })
-
   it('fails on an empty native catalog instead of reporting no new models', async () => {
     const client = clientReturning((provider) =>
       json({ models: provider === 'groq' ? [] : [row('x')] }),
@@ -56,15 +47,19 @@ describe('fetchSyncCatalogs', () => {
 
   it('fails on a payload with no models array', async () => {
     const client = clientReturning(() => json({ data: [] }))
-    await expect(fetchSyncCatalogs(client)).rejects.toThrow('no models array')
+    // From client 0.2, `listModels` maps `models` to brand the ids, so it
+    // throws before `parseCatalogModels` can name the missing array.
+    await expect(fetchSyncCatalogs(client)).rejects.toThrow()
   })
 
-  it('returns each native catalog next to openrouter', async () => {
-    const client = clientReturning((provider) =>
-      json({ models: [row(`${provider}-model`)] }),
-    )
+  it('returns each native catalog, and does not fetch openrouter', async () => {
+    const asked: Array<string> = []
+    const client = clientReturning((provider) => {
+      asked.push(provider)
+      return json({ models: [row(`${provider}-model`)] })
+    })
     const catalogs = await fetchSyncCatalogs(client)
-    expect(catalogs.openrouter[0]?.rawId).toBe('openrouter-model')
-    expect(catalogs.native.mistral[0]?.rawId).toBe('mistral-model')
+    expect(catalogs.mistral[0]?.rawId).toBe('mistral-model')
+    expect(asked).not.toContain('openrouter')
   })
 })

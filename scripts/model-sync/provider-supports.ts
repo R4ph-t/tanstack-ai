@@ -1,9 +1,8 @@
 /**
  * `supports` blocks for newly synced native-provider models.
  *
- * Input modalities and `supported_parameters` come from the native
- * modelschemas catalog (OpenRouter fills a field only when the native row
- * is empty). Server-tool lists are the current first-party vocabulary for
+ * Input modalities and `supported_parameters` come from the provider's own
+ * modelschemas catalog, with no second source. Server-tool lists are the current first-party vocabulary for
  * openai, anthropic, gemini and grok, written only when the catalog lists
  * `tools` or `tool_choice`. Anthropic thinking flags follow the same
  * parameter split as `buildAnthropicProviderOptionsType`.
@@ -82,7 +81,6 @@ function quoteList(values: Array<string>): string {
 
 interface AnthropicProviderOptionsInput {
   supportedParameters?: Array<string>
-  hasCachedPricing?: boolean
 }
 
 const ANTHROPIC_BASE_OPTIONS = [
@@ -95,7 +93,7 @@ const ANTHROPIC_BASE_OPTIONS = [
 
 /**
  * Per-model Anthropic provider-options intersection, inferred from the
- * modelschemas capabilities (OpenRouter's when the native row has none).
+ * modelschemas capabilities. Every current Claude model takes prompt caching.
  * Does not copy another model's tool list. Thinking is not here:
  * `chat({ reasoning })` sets it, with the levels of each model's `reasoning`
  * field in `model-meta.ts`.
@@ -109,10 +107,10 @@ export function buildAnthropicProviderOptionsType(
   const params = input.supportedParameters ?? []
   const hasSampling = hasParam(params, ['temperature', 'top_p', 'top_k'])
 
-  const parts: Array<string> = [...ANTHROPIC_BASE_OPTIONS]
-  if (input.hasCachedPricing) {
-    parts.unshift('AnthropicCacheControlOptions')
-  }
+  const parts: Array<string> = [
+    'AnthropicCacheControlOptions',
+    ...ANTHROPIC_BASE_OPTIONS,
+  ]
 
   parts.push('AnthropicToolChoiceOptions')
   parts.push(

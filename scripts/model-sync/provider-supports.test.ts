@@ -113,7 +113,6 @@ describe('buildAnthropicProviderOptionsType', () => {
   it('uses max_tokens and no sampling when sampling is not listed', () => {
     const type = buildAnthropicProviderOptionsType({
       supportedParameters: ['max_tokens', 'reasoning', 'tools'],
-      hasCachedPricing: true,
     })
     expect(type).toContain('AnthropicCacheControlOptions')
     expect(type).toContain('AnthropicMaxTokensOptions')

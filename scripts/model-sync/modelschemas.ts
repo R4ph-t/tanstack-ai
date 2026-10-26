@@ -74,21 +74,15 @@ export async function getInputSchema(
 }
 
 /**
- * Every synced provider's native catalog plus the OpenRouter catalog.
- * An empty catalog throws: it would hide every insert for that provider
- * (or every price, for OpenRouter) behind a "no new models" exit 0.
+ * Every synced provider's own catalog. An empty catalog throws: it would
+ * hide every insert for that provider behind a "no new models" exit 0.
  */
-export async function fetchSyncCatalogs(client: SyncClient): Promise<{
-  native: Record<SyncedProvider, Array<CatalogModel>>
-  openrouter: Array<CatalogModel>
-}> {
-  const [openrouter, ...nativeLists] = await Promise.all([
-    fetchCatalog(client, 'openrouter'),
-    ...SYNCED_PROVIDERS.map((provider) => fetchCatalog(client, provider)),
-  ])
-  if (openrouter.length === 0) {
-    throw new Error('modelschemas returned an empty openrouter catalog')
-  }
+export async function fetchSyncCatalogs(
+  client: SyncClient,
+): Promise<Record<SyncedProvider, Array<CatalogModel>>> {
+  const nativeLists = await Promise.all(
+    SYNCED_PROVIDERS.map((provider) => fetchCatalog(client, provider)),
+  )
   const native = {} as Record<SyncedProvider, Array<CatalogModel>>
   for (const [index, provider] of SYNCED_PROVIDERS.entries()) {
     const rows = nativeLists[index]
@@ -97,5 +91,5 @@ export async function fetchSyncCatalogs(client: SyncClient): Promise<{
     }
     native[provider] = rows
   }
-  return { native, openrouter }
+  return native
 }

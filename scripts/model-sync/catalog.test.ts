@@ -1,13 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   alreadySynced,
-  findOpenRouterEnrichment,
-  hasFullPricing,
   hasImageOutput,
-  openRouterRawIdCandidates,
   outputsText,
   parseCatalogModels,
-  pricingLines,
   selectNativeInserts,
   skipNativeModelReason,
   toSyncModel,
@@ -23,12 +19,8 @@ function native(overrides: Partial<CatalogModel> = {}): CatalogModel {
     deprecatedAt: null,
     contextWindow: null,
     maxOutput: null,
-    inputModalities: [],
-    outputModalities: [],
-    pricing: {
-      inputPerMillion: undefined,
-      outputPerMillion: undefined,
-    },
+    inputModalities: ['text'],
+    outputModalities: ['text'],
     capabilities: [],
     reasoningMandatory: false,
     ...overrides,
@@ -47,12 +39,7 @@ describe('parseCatalogModels', () => {
           contextWindow: 400_000,
           maxOutput: 128_000,
           modalities: { input: ['text', 'image'], output: ['text'] },
-          pricing: {
-            per: 'token',
-            inputPerMillion: 1.25,
-            outputPerMillion: 10,
-          },
-          capabilities: ['tools', 'reasoning'],
+          capabilities: { tools: true, reasoning: true, temperature: false },
           firstSeenAt: 1_754_425_777,
           deprecatedAt: null,
         },
@@ -65,7 +52,6 @@ describe('parseCatalogModels', () => {
       contextWindow: 400_000,
       inputModalities: ['text', 'image'],
       capabilities: ['tools', 'reasoning'],
-      pricing: { inputPerMillion: 1.25, outputPerMillion: 10 },
     })
   })
 
@@ -127,90 +113,27 @@ describe('parseCatalogModels drift', () => {
   })
 })
 
-describe('openRouterRawIdCandidates', () => {
-  it('hyphen/dot-maps Anthropic ids and strips dated snapshots', () => {
+describe('toSyncModel', () => {
+  it('takes every field from the native row, and fills nothing', () => {
     expect(
-      openRouterRawIdCandidates(
-        native({ rawId: 'claude-haiku-4-5-20251001' }),
-        'anthropic',
-      ),
-    ).toEqual([
-      'anthropic/claude-haiku-4-5-20251001',
-      'anthropic/claude-haiku-4-5',
-      'anthropic/claude-haiku-4.5-20251001',
-      'anthropic/claude-haiku-4.5',
-    ])
-  })
-
-  it('prefixes Gemini with google/ and Grok with x-ai/', () => {
-    expect(
-      openRouterRawIdCandidates(
-        native({ rawId: 'gemini-3.1-pro', provider: 'gemini' }),
-        'gemini',
-      ),
-    ).toEqual(['google/gemini-3.1-pro'])
-    expect(
-      openRouterRawIdCandidates(
-        native({ rawId: 'grok-4.6', provider: 'grok' }),
+      toSyncModel(
+        native({
+          rawId: 'grok-5',
+          provider: 'grok',
+          contextWindow: 2_000_000,
+          capabilities: ['tools'],
+        }),
         'grok',
       ),
-    ).toEqual(['x-ai/grok-4.6'])
-  })
-})
-
-describe('findOpenRouterEnrichment / toSyncModel', () => {
-  it('joins a hyphenated Anthropic id to the dotted OpenRouter row', () => {
-    const enrich = native({
-      provider: 'openrouter',
-      rawId: 'anthropic/claude-sonnet-4.5',
-      contextWindow: 200_000,
-      maxOutput: 64_000,
-      inputModalities: ['text', 'image'],
+    ).toEqual({
+      nativeId: 'grok-5',
+      contextWindow: 2_000_000,
+      maxOutput: null,
+      inputModalities: ['text'],
       outputModalities: ['text'],
-      pricing: { inputPerMillion: 3, outputPerMillion: 15 },
-      capabilities: ['tools', 'temperature'],
+      supportedParameters: ['tools'],
+      reasoningMandatory: false,
     })
-    const row = native({ rawId: 'claude-sonnet-4-5' })
-    const found = findOpenRouterEnrichment(row, 'anthropic', [enrich])
-    expect(found?.rawId).toBe('anthropic/claude-sonnet-4.5')
-    const synced = toSyncModel(row, found, 'anthropic')
-    expect(synced.nativeId).toBe('claude-sonnet-4-5')
-    expect(synced.contextWindow).toBe(200_000)
-    expect(synced.supportedParameters).toEqual(['tools', 'temperature'])
-    expect(synced.pricing.inputPerMillion).toBe(3)
-  })
-
-  it('keeps native capabilities and modalities; OpenRouter only fills empty pricing', () => {
-    const enrich = native({
-      provider: 'openrouter',
-      rawId: 'anthropic/claude-sonnet-4.5',
-      contextWindow: 1_000_000,
-      inputModalities: ['text', 'image', 'file'],
-      outputModalities: ['text'],
-      pricing: { inputPerMillion: 3, outputPerMillion: 15 },
-      capabilities: ['tools', 'temperature', 'include_reasoning', 'top_k'],
-    })
-    const row = native({
-      rawId: 'claude-sonnet-4-5',
-      contextWindow: 200_000,
-      inputModalities: ['text', 'image'],
-      outputModalities: ['text'],
-      capabilities: ['tools', 'temperature'],
-    })
-    const synced = toSyncModel(row, enrich, 'anthropic')
-    expect(synced.contextWindow).toBe(200_000)
-    expect(synced.inputModalities).toEqual(['text', 'image'])
-    expect(synced.supportedParameters).toEqual(['tools', 'temperature'])
-    expect(synced.pricing.inputPerMillion).toBe(3)
-  })
-
-  it('fills a missing price side from OpenRouter without replacing the known one', () => {
-    const synced = toSyncModel(
-      native({ pricing: { inputPerMillion: 2, outputPerMillion: undefined } }),
-      native({ pricing: { inputPerMillion: 3, outputPerMillion: 15 } }),
-      'anthropic',
-    )
-    expect(synced.pricing).toEqual({ inputPerMillion: 2, outputPerMillion: 15 })
   })
 })
 
@@ -265,6 +188,18 @@ describe('skipNativeModelReason', () => {
     ).toBe('non-chat family')
   })
 
+  it('skips a row with no input modalities instead of guessing them', () => {
+    expect(
+      skipNativeModelReason(
+        native({ inputModalities: [] }),
+        'gemini',
+        [],
+        cutoff,
+        ['chat'],
+      ),
+    ).toBe('no modalities')
+  })
+
   it('keeps Groq rows with no activity', () => {
     expect(
       skipNativeModelReason(
@@ -281,8 +216,11 @@ describe('skipNativeModelReason', () => {
 describe('outputsText', () => {
   it('treats empty modalities plus unset activity as chat', () => {
     const model = toSyncModel(
-      native({ activity: null, rawId: 'qwen/qwen3.8-27b' }),
-      undefined,
+      native({
+        activity: null,
+        rawId: 'qwen/qwen3.8-27b',
+        outputModalities: [],
+      }),
       'groq',
     )
     expect(outputsText(model, null)).toBe(true)
@@ -290,41 +228,30 @@ describe('outputsText', () => {
 })
 
 describe('selectNativeInserts', () => {
-  const priced = { inputPerMillion: 3, outputPerMillion: 15 }
   const rules = {
     provider: 'anthropic' as const,
     skipPatterns: ['claude-legacy-'],
     acceptedActivities: ['chat'],
-    requireOpenRouterEnrich: true,
     cutoffTimestamp: 0,
   }
-  const openrouter = [
-    native({ rawId: 'anthropic/claude-sonnet-6', pricing: priced }),
-    native({ rawId: 'anthropic/claude-art-1', pricing: priced }),
-  ]
 
-  it('inserts a priced model and holds back one OpenRouter has not priced', () => {
-    const selection = selectNativeInserts(
-      [native({ rawId: 'claude-sonnet-6' }), native({ rawId: 'claude-new-1' })],
-      rules,
-      openrouter,
-      () => false,
-    )
-    expect(selection.inserts.map(({ model }) => model.nativeId)).toEqual([
-      'claude-sonnet-6',
-    ])
-    expect(selection.inserts[0]?.model.pricing).toEqual(priced)
-    expect(selection.heldBack).toEqual(['claude-new-1'])
-  })
-
-  it('does not hold back a model that is already in the file', () => {
+  it('inserts a new model with no price and no second source', () => {
     const selection = selectNativeInserts(
       [native({ rawId: 'claude-new-1' })],
       rules,
-      openrouter,
+      () => false,
+    )
+    expect(selection.inserts.map(({ model }) => model.nativeId)).toEqual([
+      'claude-new-1',
+    ])
+  })
+
+  it('skips a model that is already in the file', () => {
+    const selection = selectNativeInserts(
+      [native({ rawId: 'claude-new-1' })],
+      rules,
       () => true,
     )
-    expect(selection.heldBack).toEqual([])
     expect(selection.skipped).toEqual({ 'already synced': 1 })
   })
 
@@ -335,9 +262,9 @@ describe('selectNativeInserts', () => {
         native({ rawId: 'claude-old-1', deprecatedAt: 1 }),
         native({ rawId: 'claude-sonnet-6:thinking' }),
         native({ rawId: 'claude-legacy-2' }),
+        native({ rawId: 'claude-blank-1', inputModalities: [] }),
       ],
       rules,
-      openrouter,
       () => false,
     )
     expect(selection.inserts).toEqual([])
@@ -346,52 +273,8 @@ describe('selectNativeInserts', () => {
       deprecated: 1,
       'routing variant': 1,
       'skip pattern': 1,
+      'no modalities': 1,
     })
-  })
-
-  it('inserts a Groq model with no price when the price gate is off', () => {
-    const selection = selectNativeInserts(
-      [native({ provider: 'groq', rawId: 'qwen/qwen9', activity: null })],
-      {
-        ...rules,
-        provider: 'groq',
-        acceptedActivities: [null, 'chat'],
-        requireOpenRouterEnrich: false,
-      },
-      openrouter,
-      () => false,
-    )
-    expect(selection.inserts).toHaveLength(1)
-    expect(selection.heldBack).toEqual([])
-  })
-})
-
-describe('pricingLines / hasFullPricing', () => {
-  it('leaves an unknown price out instead of writing 0', () => {
-    const lines = pricingLines({
-      inputPerMillion: undefined,
-      outputPerMillion: undefined,
-    })
-    expect(lines).toEqual(['  pricing: {', '  },'])
-    expect(lines.join('\n')).not.toContain('normal: 0')
-  })
-
-  it('writes only the known side, rounded', () => {
-    const block = pricingLines({
-      inputPerMillion: 0.09999999999999999,
-      outputPerMillion: undefined,
-    }).join('\n')
-    expect(block).toContain('normal: 0.1,')
-    expect(block).not.toContain('output')
-  })
-
-  it('needs both prices for providers whose ModelMeta requires them', () => {
-    expect(
-      hasFullPricing({ inputPerMillion: 1, outputPerMillion: undefined }),
-    ).toBe(false)
-    expect(hasFullPricing({ inputPerMillion: 0, outputPerMillion: 0 })).toBe(
-      true,
-    )
   })
 })
 

@@ -1,21 +1,14 @@
 /**
  * modelschemas catalog rows for native-provider model-meta inserts.
  *
- * Native catalogs supply ids, activity, limits, modalities, pricing, and
- * capabilities. OpenRouter rows on modelschemas fill a field only when the
- * native row left it empty.
+ * Each provider's own catalog supplies ids, activity, limits, modalities, and
+ * capabilities. A field the catalog leaves empty stays empty. There is no
+ * second source, and model-meta carries no prices (they change too often to
+ * ship in a package).
  */
 
 import { toModelConstName, toNativeProviderId } from './ids'
 import type { SyncedProvider } from './provider-supports'
-
-export const OPENROUTER_PREFIX: Partial<Record<SyncedProvider, string>> = {
-  openai: 'openai/',
-  anthropic: 'anthropic/',
-  gemini: 'google/',
-  grok: 'x-ai/',
-  mistral: 'mistralai/',
-}
 
 const NON_CHAT_MODEL_PREFIXES = [
   'lyria-',
@@ -28,12 +21,6 @@ const NON_CHAT_MODEL_PREFIXES = [
 
 const DATED_SNAPSHOT = /-\d{8}$/
 
-/** USD per million tokens, as modelschemas reports it. */
-export interface CatalogPricing {
-  inputPerMillion: number | undefined
-  outputPerMillion: number | undefined
-}
-
 export interface CatalogModel {
   provider: string
   rawId: string
@@ -44,7 +31,6 @@ export interface CatalogModel {
   maxOutput: number | null
   inputModalities: Array<string>
   outputModalities: Array<string>
-  pricing: CatalogPricing
   capabilities: Array<string>
   /** `reasoning.mandatory`: thinking cannot be turned off (Claude Fable). */
   reasoningMandatory: boolean
@@ -56,7 +42,6 @@ export interface SyncModel {
   maxOutput: number | null
   inputModalities: Array<string>
   outputModalities: Array<string>
-  pricing: CatalogPricing
   supportedParameters: Array<string>
   reasoningMandatory: boolean
 }
@@ -74,10 +59,18 @@ function asFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
-/** Most providers list parameter names; BytePlus sends a feature object. */
+/**
+ * The parameter names a model is stated to support. modelschemas sends a map
+ * of flags (`{ tools: true }`): `true` keys only, because an absent key is
+ * unknown, not false. BytePlus sends a feature object instead.
+ */
 function asSupportedParameters(value: unknown): Array<string> {
   if (Array.isArray(value)) return asStringArray(value)
   if (!isRecord(value)) return []
+  const flags = Object.entries(value)
+  if (flags.every(([, flag]) => typeof flag === 'boolean')) {
+    return flags.filter(([, flag]) => flag).map(([name]) => name)
+  }
   const params: Array<string> = []
   const tools = isRecord(value.tools) ? value.tools : null
   if (tools?.function_calling === true) {
@@ -98,14 +91,6 @@ function asSupportedParameters(value: unknown): Array<string> {
   return params
 }
 
-function asPricing(value: unknown): CatalogPricing {
-  const record = isRecord(value) ? value : {}
-  return {
-    inputPerMillion: asFiniteNumber(record.inputPerMillion) ?? undefined,
-    outputPerMillion: asFiniteNumber(record.outputPerMillion) ?? undefined,
-  }
-}
-
 export function parseCatalogModel(value: unknown): CatalogModel | null {
   if (!isRecord(value)) return null
   if (typeof value.rawId !== 'string' || value.rawId.length === 0) return null
@@ -121,7 +106,6 @@ export function parseCatalogModel(value: unknown): CatalogModel | null {
     maxOutput: asFiniteNumber(value.maxOutput),
     inputModalities: asStringArray(modalities?.input),
     outputModalities: asStringArray(modalities?.output),
-    pricing: asPricing(value.pricing),
     capabilities: asSupportedParameters(value.capabilities),
     reasoningMandatory: reasoning?.mandatory === true,
   }
@@ -155,102 +139,18 @@ export function parseCatalogModels(data: unknown): Array<CatalogModel> {
   return models
 }
 
-/** OpenRouter dots Anthropic version suffixes (`4.5`); native ids use dashes. */
-function anthropicOpenRouterId(nativeId: string): string {
-  return nativeId.replace(/(\d)-(\d)/g, '$1.$2')
-}
-
-export function openRouterRawIdCandidates(
-  native: CatalogModel,
-  provider: SyncedProvider,
-): Array<string> {
-  const prefix = OPENROUTER_PREFIX[provider]
-  if (!prefix) return []
-  const ids = new Set<string>([native.rawId])
-  if (provider === 'anthropic') {
-    const undated = native.rawId.replace(DATED_SNAPSHOT, '')
-    ids.add(undated)
-    ids.add(anthropicOpenRouterId(native.rawId))
-    ids.add(anthropicOpenRouterId(undated))
-  }
-  return [...ids].map((id) => prefix + id)
-}
-
-export function findOpenRouterEnrichment(
-  native: CatalogModel,
-  provider: SyncedProvider,
-  openrouter: Array<CatalogModel>,
-): CatalogModel | undefined {
-  const wanted = new Set(openRouterRawIdCandidates(native, provider))
-  return openrouter.find((model) => wanted.has(model.rawId))
-}
-
-function pickList(
-  preferred: Array<string>,
-  fallback: Array<string> = [],
-): Array<string> {
-  return preferred.length > 0 ? preferred : fallback
-}
-
-/** Both prices known. OpenAI/Anthropic/Gemini/Grok ModelMeta require both. */
-export function hasFullPricing(pricing: CatalogPricing): boolean {
-  return pricing.inputPerMillion != null && pricing.outputPerMillion != null
-}
-
-/** Strips float noise: 0.09999999999999999 → 0.1. */
-function roundPrice(price: number): number {
-  return Math.round(price * 1e10) / 1e10
-}
-
-/**
- * The `pricing` block of a generated model constant. A price the catalog
- * does not have is left out, not written as `0` (which reads as "free").
- */
-// ponytail: modelschemas has no cached-input price, so `cached` is never written.
-export function pricingLines(pricing: CatalogPricing): Array<string> {
-  const lines = [`  pricing: {`]
-  if (pricing.inputPerMillion != null) {
-    lines.push(
-      `    input: {`,
-      `      normal: ${roundPrice(pricing.inputPerMillion)},`,
-      `    },`,
-    )
-  }
-  if (pricing.outputPerMillion != null) {
-    lines.push(
-      `    output: {`,
-      `      normal: ${roundPrice(pricing.outputPerMillion)},`,
-      `    },`,
-    )
-  }
-  lines.push(`  },`)
-  return lines
-}
-
 export function toSyncModel(
   native: CatalogModel,
-  enrich: CatalogModel | undefined,
   provider: SyncedProvider,
 ): SyncModel {
   return {
     nativeId: toNativeProviderId(native.rawId, provider),
-    contextWindow: native.contextWindow ?? enrich?.contextWindow ?? null,
-    maxOutput: native.maxOutput ?? enrich?.maxOutput ?? null,
-    inputModalities: pickList(native.inputModalities, enrich?.inputModalities),
-    outputModalities: pickList(
-      native.outputModalities,
-      enrich?.outputModalities,
-    ),
-    // Per side, so a native input price does not hide OpenRouter's output price.
-    pricing: {
-      inputPerMillion:
-        native.pricing.inputPerMillion ?? enrich?.pricing.inputPerMillion,
-      outputPerMillion:
-        native.pricing.outputPerMillion ?? enrich?.pricing.outputPerMillion,
-    },
-    supportedParameters: pickList(native.capabilities, enrich?.capabilities),
-    reasoningMandatory:
-      native.reasoningMandatory || enrich?.reasoningMandatory === true,
+    contextWindow: native.contextWindow,
+    maxOutput: native.maxOutput,
+    inputModalities: native.inputModalities,
+    outputModalities: native.outputModalities,
+    supportedParameters: native.capabilities,
+    reasoningMandatory: native.reasoningMandatory,
   }
 }
 
@@ -310,6 +210,7 @@ export function skipNativeModelReason(
   if (!acceptedActivities.includes(model.activity)) {
     return `activity ${model.activity}`
   }
+  if (model.inputModalities.length === 0) return 'no modalities'
   if (model.rawId.includes(':')) return 'routing variant'
   if (isNonChatFamily(model.rawId)) return 'non-chat family'
   if (matchesSkipPattern(model.rawId, skipPatterns)) return 'skip pattern'
@@ -326,19 +227,11 @@ export interface NativeInsertRules {
   provider: SyncedProvider
   skipPatterns: Array<string>
   acceptedActivities: Array<string | null>
-  /**
-   * Hold a native id back until the modelschemas OpenRouter catalog has a
-   * matching row and both prices are known (from either row). The
-   * OpenAI/Anthropic/Gemini/Grok ModelMeta types require both prices.
-   */
-  requireOpenRouterEnrich: boolean
   cutoffTimestamp: number
 }
 
 export interface NativeInsertSelection {
   inserts: Array<{ model: SyncModel; activity: string | null }>
-  /** Raw ids skipped only because the price gate is not met yet. */
-  heldBack: Array<string>
   /** Count of every other skip, by reason. */
   skipped: Record<string, number>
 }
@@ -347,12 +240,10 @@ export interface NativeInsertSelection {
 export function selectNativeInserts(
   rows: Array<CatalogModel>,
   rules: NativeInsertRules,
-  openrouter: Array<CatalogModel>,
   isSynced: (nativeId: string) => boolean,
 ): NativeInsertSelection {
   const selection: NativeInsertSelection = {
     inserts: [],
-    heldBack: [],
     skipped: {},
   }
   const skip = (reason: string) => {
@@ -370,8 +261,7 @@ export function selectNativeInserts(
       skip(reason)
       continue
     }
-    const enrich = findOpenRouterEnrichment(row, rules.provider, openrouter)
-    const model = toSyncModel(row, enrich, rules.provider)
+    const model = toSyncModel(row, rules.provider)
     if (isSynced(model.nativeId)) {
       skip('already synced')
       continue
@@ -383,13 +273,6 @@ export function selectNativeInserts(
       })
     ) {
       skip('image output')
-      continue
-    }
-    if (
-      rules.requireOpenRouterEnrich &&
-      !(enrich && hasFullPricing(model.pricing))
-    ) {
-      selection.heldBack.push(row.rawId)
       continue
     }
     selection.inserts.push({ model, activity: row.activity })
