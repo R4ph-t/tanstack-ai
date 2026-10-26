@@ -1982,17 +1982,20 @@
         {
           "label": "TanStack useChat with a pi agent",
           "to": "migration/pi-agent-tanstack-client",
-          "addedAt": "2026-10-23"
+          "addedAt": "2026-10-23",
+          "updatedAt": "2026-10-26"
         },
         {
           "label": "pi UI with a TanStack AI server",
           "to": "migration/pi-client-tanstack-server",
-          "addedAt": "2026-10-23"
+          "addedAt": "2026-10-23",
+          "updatedAt": "2026-10-26"
         },
         {
           "label": "pi bridge compatibility",
           "to": "migration/pi-compatibility",
-          "addedAt": "2026-10-23"
+          "addedAt": "2026-10-23",
+          "updatedAt": "2026-10-26"
         },
         {
           "label": "AG-UI Client Compliance",

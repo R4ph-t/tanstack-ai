@@ -83,7 +83,8 @@ export async function POST(request: Request) {
 ```
 
 - The last message of the history is the prompt. The rest becomes pi messages, stamped with the pi model, so pi sends the reasoning signatures back to the same model.
-- `systemPrompts` is set on the server. The request cannot change it.
+- `systemPrompts` is set on the server. The system and developer messages of the request are dropped, so the request cannot change it.
+- A history that pi cannot hold ends the run with a `RUN_ERROR`. Examples are a tool message with no call, or an image URL from the user.
 - To run the pi loop yourself, convert its events with `fromPiAgentEvents(agentLoop(...), { threadId, runId })` and the history with `toPiMessages`. You then handle approvals and client tools yourself.
 
 ## 3. Connect useChat
@@ -148,9 +149,10 @@ export function Approvals() {
 
 - The next request carries the answer. `runPiAgent` runs an approved call with the pi `beforeToolCall` and `afterToolCall` hooks, then continues the loop.
 - A denied call gets an error result with the `denied` outcome, and the model sees the denial.
-- The other tool calls of the same model call run at once.
+- The other tool calls of the same model call still run in this request, before the pause.
 - The history comes from the client, as in a stateless `chat()` route. An approval runs only a tool in `needsApproval`, and never a call that already has a result. A pending call to any other pi tool gets an error result and does not run. If a person other than the user approves, keep the history on the server.
 - Each paused call needs one answer. A missing answer, or an answer to a call that did not pause, ends the run with a `RUN_ERROR` (code `unknown-interrupt`), as in `chat()`.
+- An answer of the wrong shape also ends the run with a `RUN_ERROR`, as in `chat()`. An approval needs a boolean or `{ approved }`, so the code is `invalid-payload`. A client tool error needs `{ error }`, so the code is `invalid-tool-output`.
 
 ## 5. Run client tools
 

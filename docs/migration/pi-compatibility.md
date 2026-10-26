@@ -23,6 +23,7 @@ Each row has one of these results:
 | 🔄 **Mapped**  | It arrives as a different shape that carries the same data.        |
 | 🧩 **Grouped** | It is joined with other items into one item, or is split from one. |
 | ❌ **Dropped** | It does not cross. The row says which side has no place for it.    |
+| ❌ **Rejected** | The bridge stops with an error, so nothing is lost without notice. |
 | ➖ **Not sent** | Nothing is lost. The same data crosses in another row.             |
 
 ## 🚫 What does not cross, and why
@@ -31,15 +32,16 @@ Everything else crosses. These do not, because one side has no place for them.
 
 pi has no place for:
 
-- **Image URLs, audio, video and documents from the user.** A pi user message holds text and base64 images only. The bridge does not download files to fill that gap.
+- **Image URLs, audio, video and documents from the user.** A pi user message holds text and base64 images only, so `runPiAgent` ends the run with `RUN_ERROR`. The bridge does not download files to fill that gap.
 - **Structured output from a pi agent.** pi has no structured output, so a pi answer is text.
 - **Subagents from a pi agent.** pi has no subagents.
-- **Images in a `chat()` tool result for a URL or file.** A pi tool result holds text and base64 images only.
+- **Images in a `chat()` tool result for a URL or file.** A pi tool result holds text and base64 images only, so these parts reach pi as their JSON text.
 
 TanStack AI and AG-UI have no place for:
 
 - **The cost breakdown of pi.** TanStack usage has one `cost` total, so the input, output and cache costs of pi join into it.
 - **pi model fields on a history message.** `chat()` messages do not keep the usage, stop reason and model of each pi assistant message.
+- **The sections and tool changes of a pi system message.** Only its `content` becomes a system prompt.
 
 ## 📋 Features
 
@@ -51,7 +53,7 @@ TanStack AI and AG-UI have no place for:
 | Gemini `thoughtSignature` on a tool call  | 🔄 Mapped to tool-call `metadata` and back                                          | 🔄 Mapped to `thoughtSignature` on the pi tool call                                         |
 | Agent and server tools                    | ✅ Same                                                                             | 🔄 Mapped to `tool_execution_start` and `tool_execution_end` at the result                  |
 | Tool errors                               | 🔄 Mapped to the `output-error` state                                               | 🔄 Mapped to `isError: true`                                                                |
-| Images in tool results                    | 🔄 Mapped to image content parts                                                    | 🔄 Mapped to pi image content. URL and file images are ❌ Dropped (pi has no place).        |
+| Images in tool results                    | 🔄 Mapped to image content parts                                                    | 🔄 Mapped to pi image content. URL and file images stay as JSON text (pi has no place).     |
 | Partial tool results                      | 🔄 Mapped to a `pi.tool-progress` custom event                                      | 🔄 Mapped to a `tanstack-event` message (a tool's custom events)                            |
 | Tool approvals                            | 🔄 Mapped to an approval interrupt with `runPiAgent({ needsApproval })`             | 🔄 Mapped to a `tanstack-interrupt` message. Answer with `resume`.                          |
 | Client tools                              | 🔄 Mapped to a client tool interrupt with `runPiAgent`                              | 🔄 Mapped to a `toolUse` stop. The pi client runs the tool and sends the result.            |
@@ -60,10 +62,10 @@ TanStack AI and AG-UI have no place for:
 | Token cost                                | 🧩 Grouped into the TanStack usage `cost`. The breakdown is ❌ Dropped (AG-UI limit). | 🔄 Mapped to the pi cost total                                                              |
 | Errors and aborts                         | 🔄 Mapped to `RUN_ERROR`                                                            | 🔄 Mapped to an assistant message with `stopReason: 'error'`                                |
 | Text and base64 images from the user      | ✅ Same                                                                             | ✅ Same                                                                                     |
-| Image URLs, audio, video and documents    | ❌ Dropped (pi has no place: text and base64 images only)                           | ❌ Dropped (pi has no place: text and base64 images only)                                   |
+| Image URLs, audio, video and documents    | ❌ Rejected with `RUN_ERROR` (pi has no place: text and base64 images only)         | ❌ Dropped (pi has no place: text and base64 images only)                                   |
 | System prompts                            | 🔄 Mapped to the leading pi system message, from the server                         | 🧩 Grouped into `systemPrompts`. From a client request, the server sets them instead.       |
 | Steering and follow-up messages of pi     | 🔄 Mapped to a `pi.message` custom event                                            | ✅ Same (they are user messages in the history)                                             |
-| Custom pi messages (`CustomAgentMessages`) | 🔄 Mapped to a `pi.message` custom event                                           | ❌ Dropped from the history (TanStack AI has no place for app messages)                     |
+| Custom pi messages (`CustomAgentMessages`) | 🔄 Mapped to a `pi.message` custom event when `fromPiAgentEvents({ forwardMessage })` allows it. `runPiAgent` does not send them. | ❌ Rejected by `chatParamsFromPiRequest`. Leave them out of the request, as `convertToLlm` does. |
 | Steps, state, activity and custom events  | ➖ pi has none to send                                                              | 🔄 Mapped to `tanstack-event` messages                                                      |
 | Subagents                                 | ❌ Dropped (pi has no subagents)                                                    | 🔄 Mapped to `tanstack-event` messages with the subagent events                             |
 | Structured output                         | ❌ Dropped (pi has no structured output)                                            | ✅ Same (the JSON is text)                                                                  |
@@ -74,7 +76,8 @@ TanStack AI and AG-UI have no place for:
 
 | pi agent event                                          | AG-UI event from `fromPiAgentEvents`                                    | Result                                        |
 | ------------------------------------------------------- | ----------------------------------------------------------------------- | --------------------------------------------- |
-| `agent_start`                                           | `RUN_STARTED` with the `threadId` and `runId` you pass                  | 🔄 Mapped                                     |
+| The start of the stream                                 | `RUN_STARTED` with the `threadId` and `runId` you pass                  | 🔄 Mapped                                     |
+| `agent_start`                                           |                                                                         | ➖ Not sent. `RUN_STARTED` came first.        |
 | `message_start` of an assistant message                 | A new message id for the events that follow                             | 🔄 Mapped                                     |
 | `text_start` / `text_delta` / `text_end`                | `TEXT_MESSAGE_START` / `CONTENT` / `END`                                | ✅ Same                                       |
 | `thinking_start` / `thinking_delta` / `thinking_end`    | `REASONING_MESSAGE_START` / `CONTENT` / `END`                           | ✅ Same                                       |
@@ -90,7 +93,9 @@ TanStack AI and AG-UI have no place for:
 | `message_end` of an assistant message                   | `RUN_FINISHED` with the finish reason, model, response id and usage     | 🔄 Mapped. A tool-use message ends at `turn_end`. |
 | The pi cost total                                       | `metadata.tanstack.usage.cost` on `RUN_FINISHED`                        | 🔄 Mapped                                     |
 | `message_end` with `stopReason` `error` or `aborted`    | `RUN_ERROR` with the error message                                      | 🔄 Mapped                                     |
-| `message_end` of a user, system or app message mid-run  | `CUSTOM` named `pi.message`                                             | 🔄 Mapped                                     |
+| `message_end` of a user message mid-run                 | `CUSTOM` named `pi.message`                                             | 🔄 Mapped                                     |
+| `message_end` of an app message mid-run                 | `CUSTOM` named `pi.message`, when `forwardMessage` allows it            | 🔄 Mapped. By default, none are sent.         |
+| `message_end` of a system message                       |                                                                         | ➖ Not sent. It stays on the server.          |
 | `message_end` of the prompt                             |                                                                         | ➖ Not sent. The client sent it.              |
 | `agent_end`                                             | `RUN_FINISHED`, only when no assistant message ended                    | 🔄 Mapped                                     |
 | `turn_start`, `tool_execution_start`, `end`             |                                                                         | ➖ Not sent. The messages carry the same data. |
@@ -100,17 +105,22 @@ TanStack AI and AG-UI have no place for:
 | TanStack message or request field             | pi message                                                   | Result                                          |
 | --------------------------------------------- | ------------------------------------------------------------ | ----------------------------------------------- |
 | `systemPrompts` of `runPiAgent`               | One leading `system` message                                 | 🧩 Grouped                                      |
+| `system` and `developer` messages             |                                                              | ❌ Dropped on purpose. The server sets `systemPrompts`. |
 | `user` with text and data images              | `user` with `text` and `image` content                       | ✅ Same                                         |
-| `user` image URLs, audio, video and documents |                                                              | ❌ Dropped (pi has no place for them)           |
-| `assistant` thinking, text and tool calls     | `assistant` with `thinking`, `text` and `toolCall` content   | 🔄 Mapped. The text comes after the thinking.   |
+| `user` image URLs, audio, video and documents |                                                              | ❌ Rejected with `RUN_ERROR` (pi has no place for them) |
+| `assistant` thinking, text and tool calls     | `assistant` with `thinking`, `text` and `toolCall` content   | 🔄 Mapped, in the `blockOrder` of the message   |
 | `assistant` thinking signature, redacted flag | `thinkingSignature`, `redacted`                              | ✅ Same                                         |
 | Tool call `metadata.thoughtSignature`         | `thoughtSignature` on the `toolCall`                         | 🔄 Mapped                                       |
 | `tool`, with text or image parts              | `toolResult` with the tool name of its call                  | 🔄 Mapped                                       |
 | `tool` with `error`                           | `toolResult` with `isError: true`                            | 🔄 Mapped                                       |
 | Client tools of the request                   | pi tools with their JSON Schema, which pause the run         | 🔄 Mapped                                       |
-| `resume`, approved                            | The pi tool runs, and its `toolResult` continues the loop    | 🔄 Mapped                                       |
+| `resume`, approved                            | The pi tool runs, and its `toolResult` continues the loop    | 🔄 Mapped. Only a tool in `needsApproval` runs. |
 | `resume`, denied                              | A `toolResult` with `isError: true` and the `denied` outcome | 🔄 Mapped                                       |
 | `resume`, client tool output                  | A `toolResult` with the output                               | 🔄 Mapped                                       |
+| `resume` with a missing answer, or an answer to a call that did not pause | `RUN_ERROR` with the code `unknown-interrupt` | ❌ Rejected, as in `chat()`                 |
+| `resume` with an answer of the wrong shape    | `RUN_ERROR` with the code `invalid-payload` or `invalid-tool-output` | ❌ Rejected, as in `chat()`             |
+| Another pending call of the paused message    | A `toolResult` with `isError: true`. The tool does not run.  | 🔄 Mapped                                       |
+| A `tool` message with no call, or tool call arguments that are not a JSON object | `RUN_ERROR` | ❌ Rejected                             |
 | The model that wrote an assistant message     | `api`, `provider`, `model` from the pi model                 | 🔄 Mapped                                       |
 
 ## 🌴 pi client, TanStack server
@@ -127,6 +137,8 @@ TanStack AI and AG-UI have no place for:
 | `REASONING_ENCRYPTED_VALUE`, message              | `thinkingSignature` on the thinking content                                   | 🔄 Mapped                                           |
 | `REASONING_ENCRYPTED_VALUE`, tool call            | `thoughtSignature` on the tool call                                           | 🔄 Mapped                                           |
 | `TOOL_CALL_START` / `ARGS` / `END`                | `toolcall_start` / `toolcall_delta` / `toolcall_end`                          | ✅ Same                                             |
+| `TOOL_CALL_END` with arguments that are not JSON  | A tool call with `{}` arguments. `chat()` answers it with an error result.    | 🔄 Mapped                                           |
+| The replay of a paused call, on resume            | A `toolResult` message for the call in `messages`                             | 🔄 Mapped. Pass `toPiAgentEvents({ messages })`.    |
 | `RUN_FINISHED` of a model call                    | `message_end` with the stop reason, usage, cost and response id               | 🔄 Mapped                                           |
 | `RUN_FINISHED` with an interrupt outcome          | A `tanstack-interrupt` message with the run id and the interrupts             | 🔄 Mapped                                           |
 | `TOOL_CALL_RESULT`                                | `tool_execution_start`, `tool_execution_end`, then a `toolResult` message     | 🔄 Mapped                                           |
@@ -144,8 +156,9 @@ TanStack AI and AG-UI have no place for:
 | -------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------ |
 | `system`, from `chatParamsFromPiRequest`           |                                                      | ❌ Dropped on purpose. The server sets `systemPrompts`.            |
 | `system`, from `fromPiMessages`                    | One entry of `systemPrompts`                         | 🔄 Mapped. Use it only for a history the server owns.              |
+| `sections`, `toolsAdded`, `toolsRemoved` of `system` |                                                    | ❌ Dropped (only the `content` becomes a system prompt)            |
 | `user` with `text` and `image` content             | `user` with text and data image parts                | ✅ Same                                                            |
-| `assistant` text                                   | `assistant` content                                  | 🧩 Grouped. The text blocks join.                                  |
+| `assistant` text                                   | `assistant` content                                  | 🧩 Grouped. The text blocks join, and `blockOrder` keeps the order. |
 | `assistant` thinking, signature, redacted flag     | `thinking`                                           | ✅ Same                                                            |
 | `assistant` tool calls                             | `toolCalls` with the arguments as JSON               | 🔄 Mapped                                                          |
 | `thoughtSignature` on a tool call                  | Tool call `metadata.thoughtSignature`                | 🔄 Mapped                                                          |
@@ -155,4 +168,4 @@ TanStack AI and AG-UI have no place for:
 | `resume` and `parentRunId`                         | `resume` and `parentRunId` of `chat()`               | ✅ Same                                                            |
 | `tanstack-interrupt` and `tanstack-event` messages |                                                      | ➖ Not sent. The run id of the last interrupt fills `parentRunId`. |
 | Usage, stop reason, model of an assistant message  |                                                      | ❌ Dropped (TanStack history messages have no place for them)      |
-| Custom pi messages                                 |                                                      | ❌ Dropped (TanStack AI has no place for app messages)             |
+| Custom pi messages, or messages with other roles   |                                                      | ❌ Rejected by `chatParamsFromPiRequest` with a 400                |

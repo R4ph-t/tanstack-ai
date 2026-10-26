@@ -64,12 +64,10 @@ import {
 } from '@tanstack/ai-pi-stream'
 
 export async function POST(request: Request) {
+  const params = await chatParamsFromPiRequest(request)
   const events = toPiAgentEvents(
-    chat({
-      adapter,
-      systemPrompts: ['Be helpful.'],
-      ...(await chatParamsFromPiRequest(request)),
-    }),
+    chat({ adapter, systemPrompts: ['Be helpful.'], ...params }),
+    { messages: params.messages },
   )
   // Stream the events to the pi client, for example one JSON line each.
 }
@@ -84,7 +82,7 @@ export async function POST(request: Request) {
 | `runPiAgent(params, options)`                    | A pi agent for a `useChat` request, with approvals and client tools |
 | `chatParamsFromPiRequest(request)`               | A pi client request to `chat()` params, with `resume`               |
 | `fromPiAgentEvents(events, { threadId, runId })` | pi agent events to AG-UI events                                     |
-| `toPiAgentEvents(stream, { model })`             | `chat()` events to pi agent events                                  |
+| `toPiAgentEvents(stream, { model, messages })`   | `chat()` events to pi agent events                                  |
 | `toPiMessages` / `fromPiMessages`                | The history in each direction                                       |
 
 ## Docs

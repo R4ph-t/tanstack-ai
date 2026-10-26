@@ -63,15 +63,17 @@ converts pi agent events and pi messages in both directions:
   tools of `useChat` run in the browser. For a hand-run `agentLoop()`, use
   `fromPiAgentEvents` and `toPiMessages`.
   https://tanstack.com/ai/latest/docs/migration/pi-agent-tanstack-client
-- Server first:
-  `chat({ adapter, systemPrompts, ...(await chatParamsFromPiRequest(request)) })`,
-  then stream `toPiAgentEvents(stream)` to the pi UI. `chatParamsFromPiRequest`
-  drops the client's system messages, so the server sets `systemPrompts`.
-  Approvals arrive as `tanstack-interrupt` pi messages and go back as `resume`.
+- Server first: `const params = await chatParamsFromPiRequest(request)`, then
+  stream `toPiAgentEvents(chat({ adapter, systemPrompts, ...params }), { messages: params.messages })`
+  to the pi UI. Pass `messages` so a resumed run's tool results find their
+  calls. `chatParamsFromPiRequest` drops the client's system messages, so the
+  server sets `systemPrompts`, and rejects app messages with a 400. Approvals
+  arrive as `tanstack-interrupt` pi messages and go back as `resume`.
   https://tanstack.com/ai/latest/docs/migration/pi-client-tanstack-server
 
-What does not cross is what one side cannot hold: image URLs, audio, video
-and documents sent to pi, and structured output and subagents from pi. See
+What does not cross is what one side cannot hold: structured output and
+subagents from pi. Image URLs, audio, video and documents sent to pi end the
+run with a `RUN_ERROR`. See
 https://tanstack.com/ai/latest/docs/migration/pi-compatibility
 
 ## Upgrading TanStack AI itself

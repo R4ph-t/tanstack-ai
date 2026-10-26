@@ -58,6 +58,7 @@ export async function POST(request: Request) {
       systemPrompts: ['You are a helpful assistant.'],
       ...params,
     }),
+    { messages: params.messages },
   )
 
   const encoder = new TextEncoder()
@@ -76,6 +77,7 @@ export async function POST(request: Request) {
 ```
 
 - `chatParamsFromPiRequest` drops the `system` messages of the client, so the route sets the system prompt. A body that is not a pi request gets a 400 response.
+- Pass `messages` to `toPiAgentEvents`. A resumed run first sends the results of the paused calls, and `toPiAgentEvents` finds their calls in the history.
 - Each model call of `chat()` is one pi turn with one assistant message.
 - The server tools of `chat()` show as `tool_execution_start` and `tool_execution_end`, then a `toolResult` message.
 - `agent_end` carries the new messages of the run. The prompt stays on the client.
@@ -115,6 +117,8 @@ export async function* runRemoteAgent(
 
 When `agent_end` arrives, append its `messages` to the history after the prompt. The next request sends that history back, and `chat()` replays it.
 
+The history can hold pi messages and the `tanstack-*` messages below. Leave out app messages, as `convertToLlm` does. A request with another role gets a 400 response.
+
 Two pi messages carry `chat()` data that pi has no type for. They come as `message_start` and `message_end`:
 
 - `tanstack-interrupt`: the run paused. See the next step.
@@ -122,7 +126,7 @@ Two pi messages carry `chat()` data that pi has no type for. They come as `messa
 
 ## 4. Answer tool approvals
 
-A `chat()` tool with `needsApproval: true` pauses the run. The pi client gets a `tanstack-interrupt` message with the paused `runId` and the `interrupts`. Send an answer for each interrupt in `resume`, with the history:
+A `chat()` tool with `needsApproval: true` pauses the run. The pi client gets a `tanstack-interrupt` message with the paused `runId` and the `interrupts`. Send an answer for each approval in `resume`, with the history:
 
 ```typescript
 import type { AgentMessage } from '@earendil-works/pi-agent-core'
@@ -138,11 +142,13 @@ export function approve(
     threadId,
     messages: history,
     parentRunId: paused.runId,
-    resume: paused.interrupts.map((interrupt) => ({
-      interruptId: interrupt.id,
-      status: 'resolved',
-      payload: { approved },
-    })),
+    resume: paused.interrupts
+      .filter((interrupt) => interrupt.metadata?.kind === 'approval')
+      .map((interrupt) => ({
+        interruptId: interrupt.id,
+        status: 'resolved',
+        payload: { approved },
+      })),
   }
 }
 ```
@@ -166,6 +172,6 @@ export function withClientTools(
 }
 ```
 
-When the model calls one, the assistant message stops with `stopReason: 'toolUse'`. Run the tool, append its `toolResult` message to the history, and post again. `chat()` continues from the result.
+When the model calls one, the assistant message stops with `stopReason: 'toolUse'`, and a `tanstack-interrupt` message names the call. Run the tool, append its `toolResult` message to the history, and post again. The `toolResult` answers the interrupt, and `chat()` continues from the result.
 
 Send a prompt. The pi UI renders the `chat()` reply with the same events as a local pi agent.
