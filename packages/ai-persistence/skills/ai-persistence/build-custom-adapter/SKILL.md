@@ -12,6 +12,12 @@ migration flow.
 
 Do not create a package, a second client, or a migration runner.
 
+**Always write all four tables (or collections) and all four stores: thread, run, interrupt,
+metadata.** The docs call `interrupts` and `metadata` optional for a
+hand-rolled adapter; this recipe is not that case. `withPersistence` needs
+all four to type-check as `ChatPersistence`, and the conformance suite fails
+without them. Do not stop at a thread table and a run table.
+
 **Route first.** If the app already runs one of these, stop and use that skill —
 it has the driver-specific code:
 
@@ -355,13 +361,13 @@ import { runPersistenceConformance } from '@tanstack/ai-persistence/testkit'
 import { chatPersistence } from '../src/lib/chat-persistence'
 
 runPersistenceConformance('app-custom', () => chatPersistence, {
-  skip: ['generationRuns', 'artifacts', 'blobs'],
+  skip: ['activities', 'generationRuns', 'artifacts', 'blobs'],
 })
 ```
 
-Point it at a throwaway database and reset between runs. The suite covers all
-seven stores, so declare every intentional omission — a chat adapter skips the
-generation half above, and adds e.g. `'metadata'` if it drops that too. `skip`
+Point it at a throwaway database and reset between runs. The suite covers
+every store, so declare every intentional omission: a chat adapter skips the
+optional `activities` store and the generation half, as above. `skip`
 never accepts `'locks'`, which is not a store.
 
 If your recipe leaves `listByThread` or `listReclaimable` unimplemented,
