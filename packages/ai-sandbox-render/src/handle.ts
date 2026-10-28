@@ -1,0 +1,603 @@
+/**
+ * SandboxHandle backed by a Render sandbox (via `@renderinc/sdk`). Real
+ * isolation: fs/exec/git operate inside a remote Render microVM; the
+ * `/workspace` virtual root is a real directory created at boot.
+ *
+ * File reads and writes use the SDK's native `download`/`upload`; every other
+ * fs call is one shell command. Render's `exec` takes no cwd, env, stdin or
+ * kill, and dropping its stream leaves the remote process running (measured),
+ * so every command runs through a wrapper that records its process group in a
+ * file, and `kill()` signals that group from a second `exec`.
+ */
+import { randomUUID } from 'node:crypto'
+import { Buffer } from 'node:buffer'
+import {
+  UnsupportedCapabilityError,
+  createExecBackedGit,
+} from '@tanstack/ai-sandbox'
+import { ClientError } from '@renderinc/sdk'
+import type { SandboxSnapshotKind, SandboxesClient } from '@renderinc/sdk'
+import type {
+  ExecResult,
+  ProcessOptions,
+  SandboxCapabilities,
+  SandboxFsStat,
+  SandboxHandle,
+  SnapshotRef,
+  SpawnHandle,
+} from '@tanstack/ai-sandbox'
+
+/** Default workspace root inside the sandbox; created at boot. */
+export const DEFAULT_WORKDIR = '/workspace'
+
+/** Prefix of every snapshot name this provider creates. */
+export const SNAPSHOT_PREFIX = 'tsai-'
+
+/** Byte cap per stream, for spawned processes and captured exec output. */
+const MAX_STREAM_BYTES = 8 * 1024 * 1024
+
+/**
+ * How long a kill waits for the remote exit after `TERM` and the in-sandbox
+ * `KILL` escalation (2 s) before giving up on confirming it.
+ */
+const KILL_SETTLE_MS = 12_000
+
+/** Where each command's process-group id is recorded while it runs. */
+const PGID_DIR = '/tmp/tsai'
+
+/**
+ * Capability descriptor for a Render sandbox.
+ *
+ * - `killableProcesses`: every command records its process group and `kill()`
+ *   signals the group from a second exec (TERM, then KILL after 2 s). MEASURED
+ *   against a real sandbox: a backgrounded child stopped writing after the
+ *   group kill. `tests/journal.conformance.test.ts` re-measures it.
+ * - `writableStdin` / `ports` / `fork`: Render has no exec stdin, no inbound
+ *   ports and no native fork.
+ * - `networkPolicy`: `deny-all` is enforced by Render (measured: DNS fails).
+ * - `durableFilesystem`: an idle sandbox suspends with its disk and resumes on
+ *   the next exec or file call.
+ */
+export const RENDER_CAPS: SandboxCapabilities = {
+  fs: true,
+  exec: true,
+  env: true,
+  ports: false,
+  backgroundProcesses: true,
+  writableStdin: false,
+  killableProcesses: true,
+  snapshots: true,
+  networkPolicy: true,
+  durableFilesystem: true,
+  fork: false,
+}
+
+/** POSIX single-quote escape for embedding values in `bash -c`. */
+export function q(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/**
+ * Wrap `command` so its process group is recorded in `pgidFile` while it
+ * runs. Each Render exec shell is already its own process-group leader
+ * (measured), so `$$` is the group id and the inner `bash -c` joins it.
+ */
+export function wrapCommand(
+  command: string,
+  pgidFile: string,
+  cwd: string,
+  env: Record<string, string>,
+): string {
+  const exports = Object.entries(env).map(([name, value]) => {
+    if (!ENV_NAME.test(name)) {
+      throw new Error(`render: invalid env var name ${JSON.stringify(name)}`)
+    }
+    return `${name}=${q(value)}`
+  })
+  const exportStep = exports.length > 0 ? `export ${exports.join(' ')} && ` : ''
+  return `mkdir -p ${PGID_DIR} && echo $$ > ${pgidFile} && cd ${q(cwd)} && ${exportStep}bash -c ${q(command)}; tsai_status=$?; rm -f ${pgidFile}; exit $tsai_status`
+}
+
+/**
+ * Signal the process group recorded in `pgidFile`: `TERM`, then `KILL` if it
+ * is still alive after 2 s. Waits up to 2 s for the file, so a kill that races
+ * the wrapper's start still lands. A missing file means the command is gone.
+ */
+export function killCommand(pgidFile: string): string {
+  return `for i in $(seq 20); do [ -f ${pgidFile} ] && break; sleep 0.1; done; g=$(cat ${pgidFile} 2>/dev/null) || exit 0; kill -TERM -- -$g 2>/dev/null || { rm -f ${pgidFile}; exit 0; }; for i in $(seq 20); do sleep 0.1; kill -0 -- -$g 2>/dev/null || { rm -f ${pgidFile}; exit 0; }; done; kill -KILL -- -$g 2>/dev/null; rm -f ${pgidFile}; true`
+}
+
+const LSTAT_MISSING = '__TANSTACK_LSTAT_MISSING__'
+
+/** Verify a missing path by listing parent entries. `test -e` also fails for inaccessible parents. */
+export function lstatCommand(path: string): string {
+  return `tanstack_lstat_path=${q(path)}; tanstack_lstat_output=$(stat -c '%f:%s' -- "$tanstack_lstat_path" 2>&1); tanstack_lstat_status=$?; if [ "$tanstack_lstat_status" -eq 0 ]; then printf '%s\n' "$tanstack_lstat_output"; else tanstack_lstat_missing() { tanstack_missing_path=$1; case "$tanstack_missing_path" in /|.) return 1 ;; */*) tanstack_parent=${'$'}{tanstack_missing_path%/*}; tanstack_name=${'$'}{tanstack_missing_path##*/}; [ -n "$tanstack_parent" ] || tanstack_parent=/ ;; *) tanstack_parent=.; tanstack_name=$tanstack_missing_path ;; esac; tanstack_parent_mode=$(stat -L -c '%f' -- "$tanstack_parent" 2>/dev/null); tanstack_parent_status=$?; if [ "$tanstack_parent_status" -ne 0 ]; then tanstack_lstat_missing "$tanstack_parent"; else case "$tanstack_parent_mode" in 4[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) case "$tanstack_parent" in /*) tanstack_find_parent=$tanstack_parent ;; *) tanstack_find_parent=./$tanstack_parent ;; esac; tanstack_match=$(find -H "$tanstack_find_parent" -mindepth 1 -maxdepth 1 -exec sh -c 'tanstack_target=$1; shift; for tanstack_candidate do [ "${'$'}{tanstack_candidate##*/}" = "$tanstack_target" ] && { printf 1; exit 0; }; done; exit 0' sh "$tanstack_name" '{}' + 2>/dev/null); tanstack_find_status=$?; [ "$tanstack_find_status" -eq 0 ] && [ -z "$tanstack_match" ] ;; *) return 1 ;; esac; fi; }; if tanstack_lstat_missing "$tanstack_lstat_path"; then printf '%s' '${LSTAT_MISSING}'; else printf '%s\n' "$tanstack_lstat_output" >&2; exit "$tanstack_lstat_status"; fi; fi`
+}
+
+function parseLstatOutput(output: string): SandboxFsStat {
+  const fields = /^(?<mode>[0-9a-fA-F]{4}):(?<size>\d+)\n?$/.exec(output)
+  const mode = fields?.groups?.mode
+  const size = fields?.groups?.size
+  if (!mode || !size) throw new Error(`invalid lstat output: ${output}`)
+  const parsedMode = Number.parseInt(mode, 16)
+  const parsedSize = Number(size)
+  if (
+    !Number.isSafeInteger(parsedMode) ||
+    !Number.isSafeInteger(parsedSize) ||
+    parsedSize < 0
+  )
+    throw new Error(`invalid lstat output: ${output}`)
+  const type = parsedMode & 0xf000
+  if (type === 0x8000)
+    return { type: 'file', mode: parsedMode, size: parsedSize }
+  if (type === 0x4000) return { type: 'dir', mode: parsedMode }
+  if (type === 0xa000) return { type: 'symlink', mode: parsedMode }
+  return { type: 'other', mode: parsedMode }
+}
+
+/**
+ * Reject paths `rm -rf` must never see. The path is single-quoted into the
+ * command, so this guards intent (wiping the root), not injection.
+ */
+export function assertRemovablePath(path: string): void {
+  if (path.includes('\0')) throw new Error('render: path contains a NUL byte')
+  const normalized = path.replace(/\/+/g, '/').replace(/(.)\/$/, '$1')
+  if (normalized === '' || normalized === '/' || !normalized.startsWith('/')) {
+    throw new Error(`render: refusing to remove ${JSON.stringify(path)}`)
+  }
+  if (normalized.split('/').some((part) => part === '..' || part === '.')) {
+    throw new Error(
+      `render: refusing to remove a path with relative segments: ${JSON.stringify(path)}`,
+    )
+  }
+}
+
+/**
+ * A push-driven async iterable with a byte cap. The streamer pushes decoded
+ * chunks and calls `end()` once; consumers `for await` over it.
+ */
+class AsyncChunkQueue implements AsyncIterable<string> {
+  private readonly chunks: Array<string> = []
+  private readonly waiters: Array<(r: IteratorResult<string>) => void> = []
+  private ended = false
+  private bytes = 0
+
+  constructor(
+    private readonly label: string,
+    private readonly onOverflow: () => void,
+  ) {}
+
+  push(chunk: string): void {
+    if (chunk === '' || this.ended) return
+    this.bytes += Buffer.byteLength(chunk)
+    if (this.bytes > MAX_STREAM_BYTES) {
+      this.emit(
+        `\n[render] ${this.label} exceeded ${MAX_STREAM_BYTES} bytes; output truncated\n`,
+      )
+      this.end()
+      this.onOverflow()
+      return
+    }
+    this.emit(chunk)
+  }
+
+  private emit(chunk: string): void {
+    const waiter = this.waiters.shift()
+    if (waiter) waiter({ value: chunk, done: false })
+    else this.chunks.push(chunk)
+  }
+
+  end(): void {
+    this.ended = true
+    let waiter = this.waiters.shift()
+    while (waiter) {
+      waiter({ value: undefined, done: true })
+      waiter = this.waiters.shift()
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<string> {
+    return {
+      next: () => {
+        const chunk = this.chunks.shift()
+        if (chunk !== undefined) {
+          return Promise.resolve({ value: chunk, done: false })
+        }
+        if (this.ended) {
+          return Promise.resolve({ value: undefined, done: true })
+        }
+        return new Promise((resolve) => this.waiters.push(resolve))
+      },
+    }
+  }
+}
+
+/** A started command: its exit code, and a kill that settles on the exit. */
+interface RunningCommand {
+  exit: Promise<number>
+  kill: () => Promise<void>
+}
+
+export interface RenderHandleDeps {
+  /** The SDK's sandboxes client. */
+  client: SandboxesClient
+  /** Sandbox id (`sbx-…`). */
+  id: string
+  /** Directory the `/workspace` virtual root maps to. */
+  workdir: string
+  /** What `snapshot()` captures. */
+  snapshotKind: SandboxSnapshotKind
+  /** Handle-local env overlay applied to every exec/spawn. */
+  env?: Record<string, string>
+}
+
+export class RenderHandle implements SandboxHandle {
+  readonly id: string
+  readonly provider = 'render'
+  readonly workspaceRoot: string
+  readonly capabilities = RENDER_CAPS
+  readonly fs: SandboxHandle['fs']
+  readonly git: SandboxHandle['git']
+  readonly process: SandboxHandle['process']
+  readonly ports: SandboxHandle['ports']
+  readonly env: SandboxHandle['env']
+
+  private readonly client: SandboxesClient
+  private readonly workdir: string
+  private readonly snapshotKind: SandboxSnapshotKind
+  private readonly envVars: Record<string, string> = {}
+
+  constructor(deps: RenderHandleDeps) {
+    this.client = deps.client
+    this.id = deps.id
+    this.workdir = deps.workdir
+    this.workspaceRoot = deps.workdir
+    this.snapshotKind = deps.snapshotKind
+    if (deps.env) Object.assign(this.envVars, deps.env)
+
+    this.process = {
+      exec: (command, opts) => this.exec(command, opts),
+      spawn: (command, opts) => this.spawnProcess(command, opts),
+    }
+
+    this.fs = {
+      read: async (p, o) =>
+        Buffer.from(await this.download(p, o?.signal)).toString('utf8'),
+      readBytes: (p, o) => this.download(p, o?.signal),
+      // Render creates missing parents (measured).
+      write: (p, data, o) =>
+        this.client.upload(
+          this.id,
+          this.abs(p),
+          // Copy into a fresh buffer: a caller's view may sit on a SharedArrayBuffer.
+          typeof data === 'string' ? data : Buffer.from(data),
+          undefined,
+          o?.signal ? { signal: o.signal } : undefined,
+        ),
+      list: async (p, o) => {
+        // `-p` marks directories with a trailing `/`; symlinks are not followed.
+        const r = await this.check(
+          `ls -1Ap -- ${q(this.abs(p))}`,
+          `list ${p}`,
+          o?.signal,
+        )
+        const base = p.replace(/\/$/, '')
+        return r.stdout
+          .split('\n')
+          .filter((line) => line !== '')
+          .map((line) => {
+            const name = line.replace(/\/$/, '')
+            return {
+              name,
+              path: `${base}/${name}`,
+              type: line.endsWith('/') ? ('dir' as const) : ('file' as const),
+            }
+          })
+      },
+      lstat: (p, o) => this.lstat(this.abs(p), o?.signal),
+      mkdir: async (p, o) => {
+        await this.check(
+          `mkdir -p -- ${q(this.abs(p))}`,
+          `mkdir ${p}`,
+          o?.signal,
+        )
+      },
+      remove: async (p, o) => {
+        const path = this.abs(p)
+        assertRemovablePath(path)
+        await this.check(`rm -rf -- ${q(path)}`, `remove ${p}`, o?.signal)
+      },
+      rename: async (from, to, o) => {
+        await this.check(
+          `mv -f -- ${q(this.abs(from))} ${q(this.abs(to))}`,
+          `rename ${from}`,
+          o?.signal,
+        )
+      },
+      exists: async (p, o) => {
+        const path = q(this.abs(p))
+        const r = await this.sh(`test -e ${path} || test -L ${path}`, o?.signal)
+        return r.exitCode === 0
+      },
+    }
+
+    this.git = createExecBackedGit(this.process, this.workspaceRoot)
+
+    this.ports = {
+      connect: () =>
+        Promise.reject(
+          new UnsupportedCapabilityError(
+            'render',
+            'ports',
+            'Render sandboxes do not expose inbound ports.',
+          ),
+        ),
+    }
+
+    this.env = {
+      // Render has no VM-wide mutable env, so the overlay is handle-local and
+      // exported into every later exec/spawn. TanStack re-applies workspace
+      // secrets through this on resume and restore.
+      set: (vars) => {
+        Object.assign(this.envVars, vars)
+        return Promise.resolve()
+      },
+    }
+  }
+
+  /**
+   * Map the `/workspace` virtual root onto the workdir and resolve relative
+   * paths against it (Render resolves them against `/root`).
+   */
+  private abs(p: string): string {
+    if (!p.startsWith('/')) return `${this.workdir}/${p}`
+    if (this.workdir === '/workspace') return p
+    if (p === '/workspace') return this.workdir
+    if (p.startsWith('/workspace/'))
+      return `${this.workdir}/${p.slice('/workspace/'.length)}`
+    return p
+  }
+
+  private async download(
+    p: string,
+    signal: AbortSignal | undefined,
+  ): Promise<Uint8Array> {
+    const file = await this.client.download(
+      this.id,
+      this.abs(p),
+      undefined,
+      signal,
+    )
+    // A directory downloads as a tar archive; reading one is an error.
+    if (file.contentType === 'application/x-tar') {
+      throw new Error(`render: ${p} is a directory`)
+    }
+    return new Uint8Array(file.data)
+  }
+
+  /**
+   * Run an fs helper from `/`. Helpers take absolute paths, and the workdir
+   * may not exist yet (creating it is the first helper `create` runs).
+   */
+  private sh(
+    command: string,
+    signal: AbortSignal | undefined,
+  ): Promise<ExecResult> {
+    return this.exec(command, { cwd: '/', ...(signal ? { signal } : {}) })
+  }
+
+  /** Run an fs helper and throw on a non-zero exit. */
+  private async check(
+    command: string,
+    what: string,
+    signal: AbortSignal | undefined,
+  ): Promise<ExecResult> {
+    const r = await this.sh(command, signal)
+    if (r.exitCode !== 0) {
+      throw new Error(
+        `render: ${what} failed (exit ${r.exitCode}): ${r.stderr.trim()}`,
+      )
+    }
+    return r
+  }
+
+  private async lstat(
+    path: string,
+    signal: AbortSignal | undefined,
+  ): Promise<SandboxFsStat | undefined> {
+    const r = await this.sh(lstatCommand(path), signal)
+    if (r.exitCode === 0 && r.stdout.trim() === LSTAT_MISSING) return undefined
+    if (r.exitCode !== 0) {
+      const output = `${r.stdout}\n${r.stderr}`
+      throw new Error(`lstat failed: ${output.trim()}`)
+    }
+    return parseLstatOutput(r.stdout)
+  }
+
+  /** Run a short command with no wrapper and no abort; used to deliver kills. */
+  private async raw(command: string): Promise<void> {
+    const events = await this.client.exec(this.id, command)
+    for await (const event of events) void event
+  }
+
+  /**
+   * Start `command` under the process-group wrapper. Abort is handled by the
+   * callers through `kill`, not the SDK signal: dropping the stream would only
+   * detach this host and leave the command running.
+   */
+  private run(
+    command: string,
+    opts: ProcessOptions | undefined,
+    onOutput: (stream: 'stdout' | 'stderr', data: string) => void,
+  ): RunningCommand {
+    const pgidFile = `${PGID_DIR}/${randomUUID()}`
+    const stream = new AbortController()
+    let settled = false
+
+    const kill = async (): Promise<void> => {
+      if (settled) return
+      await this.raw(killCommand(pgidFile)).catch(() => undefined)
+      await settleWithin(exit, KILL_SETTLE_MS)
+      if (!settled) {
+        stream.abort()
+        throw new Error(
+          `render: no exit confirmed ${KILL_SETTLE_MS}ms after killing \`${command}\``,
+        )
+      }
+    }
+
+    const exit = (async (): Promise<number> => {
+      const wrapped = wrapCommand(
+        command,
+        pgidFile,
+        opts?.cwd ? this.abs(opts.cwd) : this.workdir,
+        { ...this.envVars, ...opts?.env },
+      )
+      const events = await this.client.exec(
+        this.id,
+        wrapped,
+        undefined,
+        stream.signal,
+      )
+      for await (const event of events) {
+        if (event.type === 'output') onOutput(event.stream, event.data)
+        else return event.exit_code
+      }
+      throw new Error('render: exec stream ended without an exit event')
+    })()
+      .catch(async (error: unknown) => {
+        // The stream failed, so the process state is unknown: kill the group
+        // rather than leave it running until the sandbox times out.
+        if (!stream.signal.aborted) {
+          await this.raw(killCommand(pgidFile)).catch(() => undefined)
+        }
+        throw error
+      })
+      .finally(() => {
+        settled = true
+      })
+    exit.catch(() => undefined)
+
+    return { exit, kill }
+  }
+
+  private async exec(
+    command: string,
+    opts?: ProcessOptions,
+  ): Promise<ExecResult> {
+    const signal = opts?.signal
+    signal?.throwIfAborted()
+    const out = { stdout: '', stderr: '' }
+    let truncated = false
+    const running = this.run(command, opts, (stream, data) => {
+      if (out[stream].length + data.length > MAX_STREAM_BYTES) {
+        truncated = true
+        return
+      }
+      out[stream] += data
+    })
+    // An aborted exec kills the group and resolves with its real (signalled)
+    // exit code, as Railway does.
+    const onAbort = (): void => {
+      void running.kill().catch(() => undefined)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+      const exitCode = await running.exit
+      return {
+        stdout: out.stdout,
+        stderr: truncated
+          ? `${out.stderr}\n[render] output truncated\n`
+          : out.stderr,
+        exitCode,
+      }
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason
+      throw error
+    } finally {
+      signal?.removeEventListener('abort', onAbort)
+    }
+  }
+
+  private spawnProcess(
+    command: string,
+    opts?: ProcessOptions,
+  ): Promise<SpawnHandle> {
+    opts?.signal?.throwIfAborted()
+    const kill = (): void => {
+      void running.kill().catch(() => undefined)
+    }
+    const stdoutQ = new AsyncChunkQueue('stdout', kill)
+    const stderrQ = new AsyncChunkQueue('stderr', kill)
+    const running = this.run(command, opts, (stream, data) =>
+      (stream === 'stdout' ? stdoutQ : stderrQ).push(data),
+    )
+    opts?.signal?.addEventListener('abort', kill, { once: true })
+    const exit = running.exit.finally(() => {
+      opts?.signal?.removeEventListener('abort', kill)
+      stdoutQ.end()
+      stderrQ.end()
+    })
+    exit.catch(() => undefined)
+
+    const noStdin = (): Promise<never> =>
+      Promise.reject(
+        new UnsupportedCapabilityError(
+          'render',
+          'writableStdin',
+          'Render exec has no stdin; deliver input through a file.',
+        ),
+      )
+
+    return Promise.resolve({
+      // The process group id lives in the sandbox; a fabricated pid would be wrong.
+      pid: -1,
+      stdout: stdoutQ,
+      stderr: stderrQ,
+      stdin: { write: noStdin, end: noStdin },
+      wait: () => exit,
+      // Always TERM then KILL to the whole group; the requested signal is not honoured.
+      kill: () => running.kill(),
+    })
+  }
+
+  snapshot = async (label?: string): Promise<SnapshotRef> => {
+    const snap = await this.client.snapshots.create({
+      sandboxId: this.id,
+      kind: this.snapshotKind,
+      name: `${SNAPSHOT_PREFIX}${label ?? 'snap'}`,
+      wait: true,
+    })
+    return { id: snap.id, ...(label !== undefined ? { label } : {}) }
+  }
+
+  async destroy(): Promise<void> {
+    try {
+      await this.client.terminate(this.id)
+    } catch (error) {
+      if (error instanceof ClientError && error.statusCode === 404) return
+      throw error
+    }
+  }
+}
+
+/** Wait for `settled` up to `ms`, ignoring its outcome. */
+async function settleWithin(
+  settled: Promise<unknown>,
+  ms: number,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms)
+    timer.unref?.()
+  })
+  try {
+    await Promise.race([settled.then(noop, noop), timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function noop(): void {}
