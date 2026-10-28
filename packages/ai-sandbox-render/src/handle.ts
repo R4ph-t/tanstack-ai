@@ -7,7 +7,9 @@
  * fs call is one shell command. Render's `exec` takes no cwd, env, stdin or
  * kill, and dropping its stream leaves the remote process running (measured),
  * so every command runs through a wrapper that records its process group in a
- * file, and `kill()` signals that group from a second `exec`.
+ * file, and `kill()` signals that group from a second `exec`. Env reaches the
+ * wrapper as an uploaded file, never in the command string, because Render
+ * stores command text on the sandbox's exec timeline.
  */
 import { randomUUID } from 'node:crypto'
 import { Buffer } from 'node:buffer'
@@ -80,33 +82,45 @@ export function q(value: string): string {
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 /**
+ * `env` as a file of `export` lines for the wrapper to source. Names are
+ * checked and values quoted, so a value cannot break out into shell code.
+ */
+export function envFileContent(env: Record<string, string>): string {
+  return Object.entries(env)
+    .map(([name, value]) => {
+      if (!ENV_NAME.test(name)) {
+        throw new Error(`render: invalid env var name ${JSON.stringify(name)}`)
+      }
+      return `export ${name}=${q(value)}\n`
+    })
+    .join('')
+}
+
+/**
  * Wrap `command` so its process group is recorded in `pgidFile` while it
  * runs. Each Render exec shell is already its own process-group leader
  * (measured), so `$$` is the group id and the inner `bash -c` joins it.
+ * `envFiles` are sourced in order, so a later file overrides an earlier one.
  */
 export function wrapCommand(
   command: string,
   pgidFile: string,
   cwd: string,
-  env: Record<string, string>,
+  envFiles: Array<string>,
 ): string {
-  const exports = Object.entries(env).map(([name, value]) => {
-    if (!ENV_NAME.test(name)) {
-      throw new Error(`render: invalid env var name ${JSON.stringify(name)}`)
-    }
-    return `${name}=${q(value)}`
-  })
-  const exportStep = exports.length > 0 ? `export ${exports.join(' ')} && ` : ''
-  return `mkdir -p ${PGID_DIR} && echo $$ > ${pgidFile} && cd ${q(cwd)} && ${exportStep}bash -c ${q(command)}; tsai_status=$?; rm -f ${pgidFile}; exit $tsai_status`
+  const sourceStep = envFiles.map((file) => `. ${file} && `).join('')
+  return `mkdir -p ${PGID_DIR} && echo $$ > ${pgidFile} && ${sourceStep}cd ${q(cwd)} && bash -c ${q(command)}; tsai_status=$?; rm -f ${pgidFile} ${pgidFile}.env; exit $tsai_status`
 }
 
 /**
  * Signal the process group recorded in `pgidFile`: `TERM`, then `KILL` if it
  * is still alive after 2 s. Waits up to 2 s for the file, so a kill that races
  * the wrapper's start still lands. A missing file means the command is gone.
+ * Also removes the command's env file, which a killed wrapper leaves behind.
  */
 export function killCommand(pgidFile: string): string {
-  return `for i in $(seq 20); do [ -f ${pgidFile} ] && break; sleep 0.1; done; g=$(cat ${pgidFile} 2>/dev/null) || exit 0; kill -TERM -- -$g 2>/dev/null || { rm -f ${pgidFile}; exit 0; }; for i in $(seq 20); do sleep 0.1; kill -0 -- -$g 2>/dev/null || { rm -f ${pgidFile}; exit 0; }; done; kill -KILL -- -$g 2>/dev/null; rm -f ${pgidFile}; true`
+  const cleanup = `rm -f ${pgidFile} ${pgidFile}.env`
+  return `for i in $(seq 20); do [ -f ${pgidFile} ] && break; sleep 0.1; done; g=$(cat ${pgidFile} 2>/dev/null) || { ${cleanup}; exit 0; }; kill -TERM -- -$g 2>/dev/null || { ${cleanup}; exit 0; }; for i in $(seq 20); do sleep 0.1; kill -0 -- -$g 2>/dev/null || { ${cleanup}; exit 0; }; done; kill -KILL -- -$g 2>/dev/null; ${cleanup}; true`
 }
 
 const LSTAT_MISSING = '__TANSTACK_LSTAT_MISSING__'
@@ -229,8 +243,6 @@ export interface RenderHandleDeps {
   workdir: string
   /** What `snapshot()` captures. */
   snapshotKind: SandboxSnapshotKind
-  /** Handle-local env overlay applied to every exec/spawn. */
-  env?: Record<string, string>
 }
 
 export class RenderHandle implements SandboxHandle {
@@ -248,6 +260,8 @@ export class RenderHandle implements SandboxHandle {
   private readonly workdir: string
   private readonly snapshotKind: SandboxSnapshotKind
   private readonly envVars: Record<string, string> = {}
+  /** The uploaded copy of `envVars`, once `env.set` has written one. */
+  private envFile: string | undefined
 
   constructor(deps: RenderHandleDeps) {
     this.client = deps.client
@@ -255,7 +269,6 @@ export class RenderHandle implements SandboxHandle {
     this.workdir = deps.workdir
     this.workspaceRoot = deps.workdir
     this.snapshotKind = deps.snapshotKind
-    if (deps.env) Object.assign(this.envVars, deps.env)
 
     this.process = {
       exec: (command, opts) => this.exec(command, opts),
@@ -338,11 +351,14 @@ export class RenderHandle implements SandboxHandle {
 
     this.env = {
       // Render has no VM-wide mutable env, so the overlay is handle-local and
-      // exported into every later exec/spawn. TanStack re-applies workspace
-      // secrets through this on resume and restore.
-      set: (vars) => {
+      // uploaded as a root-only file (uploads land 0600, measured) that every
+      // later exec/spawn sources. TanStack re-applies workspace secrets
+      // through this on resume and restore.
+      set: async (vars) => {
         Object.assign(this.envVars, vars)
-        return Promise.resolve()
+        const file = this.envFile ?? `${PGID_DIR}/env-${randomUUID()}`
+        await this.client.upload(this.id, file, envFileContent(this.envVars))
+        this.envFile = file
       },
     }
   }
@@ -448,12 +464,22 @@ export class RenderHandle implements SandboxHandle {
       }
     }
 
+    const envFiles = this.envFile ? [this.envFile] : []
     const exit = (async (): Promise<number> => {
+      // Per-call env goes in its own file, sourced after the overlay so it wins.
+      if (opts?.env && Object.keys(opts.env).length > 0) {
+        await this.client.upload(
+          this.id,
+          `${pgidFile}.env`,
+          envFileContent(opts.env),
+        )
+        envFiles.push(`${pgidFile}.env`)
+      }
       const wrapped = wrapCommand(
         command,
         pgidFile,
         opts?.cwd ? this.abs(opts.cwd) : this.workdir,
-        { ...this.envVars, ...opts?.env },
+        envFiles,
       )
       const events = await this.client.exec(
         this.id,

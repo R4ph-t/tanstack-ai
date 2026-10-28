@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { UnsupportedCapabilityError } from '@tanstack/ai-sandbox'
-import { RenderHandle, wrapCommand } from '../src/handle'
+import { RenderHandle, envFileContent } from '../src/handle'
 import { fakeClient } from './fakes'
 
 let dir: string
@@ -57,8 +57,20 @@ describe('process', () => {
     expect(r.stdout.trim()).toBe(join(dir, 'sub'))
   })
 
+  it('never puts env values in the command string (Render stores it)', async () => {
+    await handle.env.set({ SECRET: 'sk-overlay' })
+    const r = await handle.process.exec('echo "$SECRET $TOKEN"', {
+      env: { TOKEN: 'tok-per-call', SECRET: 'sk-override' },
+    })
+    expect(r.stdout).toBe('sk-override tok-per-call\n')
+    const sent = fake.client.exec.mock.calls.map(
+      (call: Array<unknown>) => call[1],
+    )
+    expect(sent.join('\n')).not.toMatch(/sk-overlay|sk-override|tok-per-call/)
+  })
+
   it('rejects env names that are not shell identifiers', () => {
-    expect(() => wrapCommand('true', '/tmp/x', '/', { 'A;rm': 'x' })).toThrow(
+    expect(() => envFileContent({ 'A;rm': 'x' })).toThrow(
       /invalid env var name/,
     )
   })
@@ -125,8 +137,10 @@ describe('fs', () => {
     await handle.fs.write('x.txt', 'hello')
     expect(fake.client.upload.mock.calls[0]?.[1]).toBe(join(dir, 'x.txt'))
     expect(await handle.fs.read('x.txt')).toBe('hello')
-    await handle.fs.write('/tmp/b.bin', new Uint8Array([0, 255]))
-    expect([...(await handle.fs.readBytes('/tmp/b.bin'))]).toEqual([0, 255])
+    await handle.fs.write(join(dir, 'b.bin'), new Uint8Array([0, 255]))
+    expect([...(await handle.fs.readBytes(join(dir, 'b.bin')))]).toEqual([
+      0, 255,
+    ])
   })
 
   it('refuses to read a directory (Render returns a tar archive)', async () => {
