@@ -378,7 +378,7 @@ const render = renderSandbox({
 ```
 
 - **Isolation:** a managed [Render](https://render.com/docs/sandboxes) sandbox. It boots from the base image (Debian 12, `root` user), a custom image (`buildName`), or a named snapshot (`snapshotName`).
-- **Auth:** the SDK reads `RENDER_API_KEY` and `RENDER_WORKSPACE_ID`. Pass `token` and `ownerId` to set them in code. Harness credentials are [workspace secrets](./provisioning), and each command gets them as env.
+- **Auth:** the SDK reads `RENDER_API_KEY` and `RENDER_WORKSPACE_ID`. Pass `token` and `ownerId` to set them in code. Harness credentials are [workspace secrets](./provisioning). The provider uploads them to a file that only `root` can read, and each command loads that file. No value goes into a command string.
 - **Lifetime:** Render suspends an idle sandbox after `idleTimeoutSeconds` (default 900) and keeps its disk, so `durableFilesystem` is `true`. The next command or file call resumes it. After `timeoutSeconds` (default 86400), Render terminates it.
 - **Network:** `policy.capabilities.network: 'deny'` sends `deny-all`, and Render enforces it. Otherwise the provider sends `networkPolicy`, or allows all egress.
 - **Not available:** inbound ports, stdin for a spawned process, and fork. `ports.connect` throws. Harnesses that need a port or stdin, such as OpenCode and ACP harnesses, do not run on Render.

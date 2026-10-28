@@ -5,7 +5,9 @@
  * aborted stream only detaches, as on Render: the process keeps running.
  */
 import { spawn } from 'node:child_process'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { constants } from 'node:os'
+import { dirname } from 'node:path'
 import { vi } from 'vitest'
 import type { SandboxExecEvent, SandboxesClient } from '@renderinc/sdk'
 
@@ -61,13 +63,17 @@ export function fakeClient(files = new Map<string, Uint8Array>()): {
       (_id: string, command: string, _owner?: string, signal?: AbortSignal) =>
         Promise.resolve(localExec(command, signal)),
     ),
-    upload: vi.fn((_id: string, path: string, data: string | Uint8Array) => {
-      files.set(path, typeof data === 'string' ? Buffer.from(data) : data)
-      return Promise.resolve()
-    }),
-    download: vi.fn((_id: string, path: string) => {
-      const data = files.get(path)
-      if (data === undefined) return Promise.reject(new Error('not found'))
+    // Uploads land on the local disk too, so the local bash can source env files.
+    upload: vi.fn(
+      async (_id: string, path: string, data: string | Uint8Array) => {
+        await mkdir(dirname(path), { recursive: true })
+        await writeFile(path, data, { mode: 0o600 })
+      },
+    ),
+    download: vi.fn(async (_id: string, path: string) => {
+      const data =
+        files.get(path) ?? (await readFile(path).catch(() => undefined))
+      if (data === undefined) throw new Error('not found')
       return Promise.resolve({
         data: Buffer.from(data),
         size: data.byteLength,
