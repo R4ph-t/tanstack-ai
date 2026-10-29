@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { Render } from '@renderinc/sdk'
 import { renderSandbox } from '../src/index'
 import type { SandboxHandle } from '@tanstack/ai-sandbox'
 
@@ -8,6 +9,8 @@ const hasCreds =
   !!process.env.RENDER_API_KEY && !!process.env.RENDER_WORKSPACE_ID
 
 const provider = renderSandbox({ timeoutSeconds: 1800 })
+/** For cleanup the contract has no hook for: deleting snapshots. */
+const sandboxes = new Render().sandboxes
 
 /** Run `body` against a fresh sandbox and always terminate it. */
 async function withSandbox(
@@ -73,12 +76,14 @@ describe.skipIf(!hasCreds)(
       await withSandbox({}, async (sbx) => {
         await sbx.fs.write('/workspace/kept.txt', 'kept')
         const ref = await sbx.snapshot!('live-test')
-        const restored = await provider.restoreSnapshot!({
-          snapshotId: ref.id,
-          env: { AFTER: 'restore' },
-          policy: { capabilities: { network: 'deny' } },
-        })
+        const { sandboxGroupId } = await sandboxes.get(sbx.id)
+        let restored: SandboxHandle | undefined
         try {
+          restored = await provider.restoreSnapshot!({
+            snapshotId: ref.id,
+            env: { AFTER: 'restore' },
+            policy: { capabilities: { network: 'deny' } },
+          })
           expect(await restored.fs.read('/workspace/kept.txt')).toBe('kept')
           const r = await restored.process.exec(
             'echo $AFTER; curl -sS -m 5 https://example.com >/dev/null; echo curl=$?',
@@ -86,18 +91,29 @@ describe.skipIf(!hasCreds)(
           expect(r.stdout).toContain('restore')
           expect(r.stdout).not.toContain('curl=0')
         } finally {
-          await restored.destroy()
+          await restored?.destroy()
+          // Otherwise every run leaves a `tsai-live-test` snapshot behind.
+          if (sandboxGroupId) {
+            await sandboxes.snapshots.delete({
+              sandboxGroupId,
+              snapshotId: ref.id,
+            })
+          }
         }
       })
     }, 180_000)
 
     it('resumes a live sandbox and returns null once it is gone', async () => {
       const sbx = await provider.create({})
-      const resumed = await provider.resume({ id: sbx.id })
-      expect((await resumed!.process.exec('echo back')).stdout).toBe('back\n')
-      await provider.destroy({ id: sbx.id })
-      expect(await provider.resume({ id: sbx.id })).toBeNull()
-      await provider.destroy({ id: sbx.id })
+      try {
+        const resumed = await provider.resume({ id: sbx.id })
+        expect((await resumed!.process.exec('echo back')).stdout).toBe('back\n')
+        await provider.destroy({ id: sbx.id })
+        expect(await provider.resume({ id: sbx.id })).toBeNull()
+      } finally {
+        // Idempotent, and stops a billed sandbox if an assertion failed.
+        await provider.destroy({ id: sbx.id })
+      }
     }, 120_000)
   },
 )
