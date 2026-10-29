@@ -678,13 +678,17 @@ export class RenderHandle implements SandboxHandle {
     const signal = opts?.signal
     signal?.throwIfAborted()
     const out = { stdout: '', stderr: '' }
+    // The cap is in UTF-8 bytes, so multi-byte output cannot exceed it.
+    const bytes = { stdout: 0, stderr: 0 }
     // Once a stream hits the cap, drop the rest of it, not just one chunk.
     const cut = { stdout: false, stderr: false }
     const running = this.run(command, opts, (stream, data) => {
-      if (cut[stream] || out[stream].length + data.length > MAX_STREAM_BYTES) {
+      const size = Buffer.byteLength(data)
+      if (cut[stream] || bytes[stream] + size > MAX_STREAM_BYTES) {
         cut[stream] = true
         return
       }
+      bytes[stream] += size
       out[stream] += data
     })
     // An aborted exec kills the group and resolves with its real (signalled)

@@ -145,6 +145,17 @@ describe('process', () => {
     expect(r.stderr).toContain('output truncated')
   })
 
+  it('caps captured output in bytes, not string units', async () => {
+    // "é\n" is 3 bytes but 2 string units: 9 MB of it is 6M units, under the
+    // 8 MiB cap when counted as units.
+    const r = await handle.process.exec(
+      'printf xyz; sleep 0.1; yes é | head -c 9000000; sleep 0.2; echo TAIL',
+    )
+    expect(r.stdout).not.toContain('TAIL')
+    expect(r.stderr).toContain('output truncated')
+    expect(Buffer.byteLength(r.stdout)).toBeLessThanOrEqual(8 * 1024 * 1024)
+  })
+
   it('spawn with an aborted signal rejects instead of throwing', async () => {
     let result: Promise<unknown> | undefined
     expect(() => {
