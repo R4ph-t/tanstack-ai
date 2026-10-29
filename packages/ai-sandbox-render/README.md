@@ -100,7 +100,7 @@ passes. Keep the returned id in your instance store.
 | --------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `fs`                  | yes       | `read`, `readBytes`, and `write` use native file transfer. Other calls run one shell command each. `lstat` is a GNU `stat` probe that does not follow symlinks.   |
 | `exec`                | yes       | Separate `stdout` and `stderr`. An aborted `exec` resolves with the exit code of the signal.                                                                      |
-| `env`                 | yes       | Create-time env plus a shared root-only overlay replaced when secrets are reapplied on reconnect. No value goes into a command string.                            |
+| `env`                 | yes       | Create-time env plus a shared root-only overlay in memory-backed `/dev`, replaced when secrets are reapplied. No value goes into a command string.                |
 | `backgroundProcesses` | yes       | `spawn()` streams output. `pid` is `-1`. A command keeps running if the host disconnects.                                                                         |
 | `killableProcesses`   | yes       | A supervisor owns each command group and stops remaining children. Cancellation sends `TERM`, then `KILL` after 2 s, and prevents delayed commands from starting. |
 | `snapshots`           | yes       | `filesystem` by default, `runtime` with `snapshotKind`. Named `tsai-<label>`.                                                                                     |
