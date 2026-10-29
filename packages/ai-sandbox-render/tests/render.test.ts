@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { Render } from '@renderinc/sdk'
 import { renderSandbox } from '../src/index'
@@ -72,13 +73,24 @@ describe.skipIf(!hasCreds)(
       })
     }, 120_000)
 
-    it('snapshots, then restores with env reapplied and egress denied', async () => {
+    it('snapshots without the env overlay, then restores with env reapplied and egress denied', async () => {
       await withSandbox({}, async (sbx) => {
         await sbx.fs.write('/workspace/kept.txt', 'kept')
+        // Unique, so finding it on disk can only mean the overlay leaked.
+        const canary = `canary-${randomUUID()}`
+        await sbx.env.set({ OVERLAY: canary })
         const ref = await sbx.snapshot!('live-test')
         const { sandboxGroupId } = await sandboxes.get(sbx.id)
         let restored: SandboxHandle | undefined
         try {
+          // The overlay stays in memory-backed /dev through the capture.
+          expect(
+            (
+              await sbx.process.exec(
+                'echo $OVERLAY; ls /dev/tsai; ls /tmp/tsai | grep env; true',
+              )
+            ).stdout,
+          ).toBe(`${canary}\nenv\n`)
           restored = await provider.restoreSnapshot!({
             snapshotId: ref.id,
             env: { AFTER: 'restore' },
@@ -90,6 +102,11 @@ describe.skipIf(!hasCreds)(
           )
           expect(r.stdout).toContain('restore')
           expect(r.stdout).not.toContain('curl=0')
+          // A filesystem snapshot leaves /dev out, so the secret stays behind.
+          const secret = await restored.process.exec(
+            `echo "[$OVERLAY]"; test -e /dev/tsai/env && echo overlay; grep -rlsF ${canary} /tmp /workspace /root; true`,
+          )
+          expect(secret.stdout).toBe('[]\n')
         } finally {
           try {
             await restored?.destroy()
