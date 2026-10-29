@@ -91,13 +91,16 @@ describe.skipIf(!hasCreds)(
           expect(r.stdout).toContain('restore')
           expect(r.stdout).not.toContain('curl=0')
         } finally {
-          await restored?.destroy()
-          // Otherwise every run leaves a `tsai-live-test` snapshot behind.
-          if (sandboxGroupId) {
-            await sandboxes.snapshots.delete({
-              sandboxGroupId,
-              snapshotId: ref.id,
-            })
+          try {
+            await restored?.destroy()
+          } finally {
+            // Otherwise every run leaves a `tsai-live-test` snapshot behind.
+            if (sandboxGroupId) {
+              await sandboxes.snapshots.delete({
+                sandboxGroupId,
+                snapshotId: ref.id,
+              })
+            }
           }
         }
       })
