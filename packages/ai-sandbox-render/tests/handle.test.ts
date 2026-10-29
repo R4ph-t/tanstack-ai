@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { UnsupportedCapabilityError } from '@tanstack/ai-sandbox'
-import { RenderHandle, envFileContent } from '../src/handle'
+import { RenderHandle, envFileContent, groupSignal } from '../src/handle'
 import { fakeClient } from './fakes'
 
 let dir: string
@@ -164,6 +164,47 @@ describe('process', () => {
     const after = await lines(ticks)
     await sleep(300)
     expect(await lines(ticks)).toBe(after)
+  })
+
+  it('kill(signal) delivers the requested signal to the group', async () => {
+    const proc = await handle.process.spawn(
+      "trap 'echo got-int; exit 7' INT; echo ready; while true; do sleep 0.05; done",
+    )
+    const out: Array<string> = []
+    const reading = (async () => {
+      for await (const chunk of proc.stdout) out.push(chunk)
+    })()
+    while (!out.join('').includes('ready')) await sleep(20)
+    await proc.kill('SIGINT')
+    expect(await proc.wait()).toBe(7)
+    await reading
+    expect(out.join('')).toContain('got-int')
+  })
+
+  it('kill("SIGKILL") skips the TERM grace period', async () => {
+    // The command ignores TERM, so a TERM-first kill would take the full 2 s.
+    const proc = await handle.process.spawn(
+      "trap '' TERM; echo ready; while true; do sleep 0.05; done",
+    )
+    const out: Array<string> = []
+    void (async () => {
+      for await (const chunk of proc.stdout) out.push(chunk)
+    })()
+    while (!out.join('').includes('ready')) await sleep(20)
+    const start = Date.now()
+    await proc.kill('SIGKILL')
+    expect(await proc.wait()).toBe(128 + 9)
+    expect(Date.now() - start).toBeLessThan(1500)
+  })
+
+  it('maps kill signals onto group signals', () => {
+    expect(groupSignal()).toBe('TERM')
+    expect(groupSignal('SIGINT')).toBe('INT')
+    expect(groupSignal(2)).toBe('INT')
+    expect(groupSignal('SIGKILL')).toBe('KILL')
+    expect(groupSignal('SIGHUP')).toBe('HUP')
+    // Anything the wrapper does not forward is a request to stop.
+    expect(groupSignal('SIGUSR1')).toBe('KILL')
   })
 
   it('an aborted exec kills the group and resolves with its exit code', async () => {

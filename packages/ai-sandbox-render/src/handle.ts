@@ -72,7 +72,8 @@ const envStates = new Map<string, EnvState>()
  * Capability descriptor for a Render sandbox.
  *
  * - `killableProcesses`: every command records its process group and `kill()`
- *   signals the group from a second exec (TERM, then KILL after 2 s). MEASURED
+ *   signals the group from a second exec (the requested signal, `TERM` by
+ *   default, then `KILL` after 2 s). MEASURED
  *   against a real sandbox: a backgrounded child stopped writing after the
  *   group kill. `tests/journal.conformance.test.ts` re-measures it.
  * - `writableStdin` / `ports` / `fork`: Render has no exec stdin, no inbound
@@ -150,16 +151,51 @@ export function wrapCommand(
   return `bash -c ${q(supervisor)}`
 }
 
+type GroupSignal = 'TERM' | 'KILL' | 'INT' | 'HUP' | 'QUIT'
+
+const GROUP_SIGNALS: ReadonlyMap<string | number, GroupSignal> = new Map<
+  string | number,
+  GroupSignal
+>([
+  ['SIGTERM', 'TERM'],
+  [15, 'TERM'],
+  ['SIGKILL', 'KILL'],
+  [9, 'KILL'],
+  ['SIGINT', 'INT'],
+  [2, 'INT'],
+  ['SIGHUP', 'HUP'],
+  [1, 'HUP'],
+  ['SIGQUIT', 'QUIT'],
+  [3, 'QUIT'],
+])
+
 /**
- * Signal the process group recorded in `pgidFile`: `TERM`, then `KILL` if it
- * is still alive after 2 s. It first leaves a `.killed` marker, so a wrapper
- * that starts later exits without running, then waits up to 2 s for the file
- * so a kill that races the start still lands. Cleans up the files a killed
- * wrapper leaves behind.
+ * Map a `kill()` signal onto a name for the shell's `kill`. As in the Railway
+ * provider, any other signal is a request to stop, so it becomes `KILL`.
  */
-export function killCommand(pgidFile: string, callEnvFile: string): string {
+export function groupSignal(signal?: NodeJS.Signals | number): GroupSignal {
+  if (signal === undefined) return 'TERM'
+  return GROUP_SIGNALS.get(signal) ?? 'KILL'
+}
+
+/**
+ * Signal the process group recorded in `pgidFile` with `signal`, then send
+ * `KILL` if the group is still alive after 2 s. It first leaves a `.killed`
+ * marker, so a wrapper that starts later exits without running, then waits up
+ * to 2 s for the file so a kill that races the start still lands. Cleans up
+ * the files a killed wrapper leaves behind.
+ */
+export function killCommand(
+  pgidFile: string,
+  callEnvFile: string,
+  signal: GroupSignal = 'TERM',
+): string {
   const cleanup = `rm -f ${pgidFile} ${callEnvFile} ${pgidFile}.killed`
-  const kill = `mkdir -p ${PGID_DIR} && touch ${pgidFile}.killed; for i in $(seq 20); do [ -f ${pgidFile} ] && break; sleep 0.1; done; g=$(cat ${pgidFile} 2>/dev/null) || exit 0; kill -TERM -- -$g 2>/dev/null || { ${cleanup}; exit 0; }; for i in $(seq 20); do sleep 0.1; kill -0 -- -$g 2>/dev/null || { ${cleanup}; exit 0; }; done; kill -KILL -- -$g 2>/dev/null; ${cleanup}; true`
+  const grace =
+    signal === 'KILL'
+      ? ''
+      : `for i in $(seq 20); do sleep 0.1; kill -0 -- -$g 2>/dev/null || { ${cleanup}; exit 0; }; done; kill -KILL -- -$g 2>/dev/null; `
+  const kill = `mkdir -p ${PGID_DIR} && touch ${pgidFile}.killed; for i in $(seq 20); do [ -f ${pgidFile} ] && break; sleep 0.1; done; g=$(cat ${pgidFile} 2>/dev/null) || exit 0; kill -${signal} -- -$g 2>/dev/null || { ${cleanup}; exit 0; }; ${grace}${cleanup}; true`
   return `bash -c ${q(kill)}`
 }
 
@@ -271,7 +307,7 @@ class AsyncChunkQueue implements AsyncIterable<string> {
 /** A started command: its exit code, and a kill that settles on the exit. */
 interface RunningCommand {
   exit: Promise<number>
-  kill: () => Promise<void>
+  kill: (signal?: GroupSignal) => Promise<void>
 }
 
 export interface RenderHandleDeps {
@@ -570,10 +606,12 @@ export class RenderHandle implements SandboxHandle {
     let settled = false
     let killed = false
 
-    const kill = async (): Promise<void> => {
+    const kill = async (signal?: GroupSignal): Promise<void> => {
       if (settled) return
       killed = true
-      await this.raw(killCommand(pgidFile, callEnvFile)).catch(() => undefined)
+      await this.raw(killCommand(pgidFile, callEnvFile, signal)).catch(
+        () => undefined,
+      )
       await settleWithin(exit, KILL_SETTLE_MS)
       if (!settled) {
         stream.abort()
@@ -710,8 +748,8 @@ export class RenderHandle implements SandboxHandle {
       stderr: stderrQ,
       stdin: { write: noStdin, end: noStdin },
       wait: () => exit,
-      // Always TERM then KILL to the whole group; the requested signal is not honoured.
-      kill: () => running.kill(),
+      // The requested signal goes to the whole group, then KILL after 2 s.
+      kill: (signal) => running.kill(groupSignal(signal)),
     }
   }
 

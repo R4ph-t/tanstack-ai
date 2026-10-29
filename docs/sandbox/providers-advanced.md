@@ -415,7 +415,7 @@ Take snapshots while commands are stopped. A runtime snapshot also captures memo
 Processes on Render:
 
 - Each command runs through `bash -c` in `/workspace`. Set `workdir` to change it. stdout and stderr stay separate, and `spawn()` reports `pid: -1`.
-- Each command has its own process group, recorded in `/tmp/tsai`. `kill()` and abort send `TERM`, then `KILL` after 2 s. A cancellation marker prevents delayed commands from starting.
+- Each command has its own process group, recorded in `/tmp/tsai`. `kill(signal)` sends the requested signal and abort sends `TERM`, then `KILL` after 2 s if the group is still alive. Signals other than `TERM`, `INT`, `HUP`, `QUIT` and `KILL` become `KILL`. A cancellation marker prevents delayed commands from starting.
 - A supervising shell stops remaining children before it reports exit. A kill finishes on the confirmed remote exit. An aborted `exec` resolves with the exit code of the signal.
 - If the host disconnects, the command keeps running in the sandbox. The [run journal](./journal) owns run identity, so a new host reads the output from the journal.
 - `read`, `readBytes`, and `write` use native file transfer. Each other file call is one command, about 0.6 s. Render allows 1,000 commands per minute for each user.
@@ -452,7 +452,7 @@ If a provider cannot be measured yet, it stays `false`. A `false` value only mak
 | Cloudflare | `false` | `kill()` does nothing. The `AbortSignal` of the caller reaches neither `exec` nor `spawn`, because Workers RPC cannot serialize one. |
 | boxd | `true` | **Measured.** The spawn wrapper runs under `setsid`, so the recorded pid leads its own process group. `kill()` runs a shell inside the machine that signals that group, then sends `KILL`, then checks with `kill -0`. Closing the stream alone is not a kill: the process survived it. Verified against production: a spawned `sleep 5 && touch <marker>` was killed, and the marker never appeared. Needs `BOXD_API_KEY`. |
 | Railway | `true` | **Measured.** `kill()` and an aborted `exec` send `TERM` to the process group, then `KILL` after 2 s. An aborted `spawn` sends `KILL` at once. Each one finishes only when the remote exit is confirmed. Verified against production: the shared journal conformance kill case passes. Spawned `sleep 5 && touch <marker>` commands (one with a background child) were killed before the marker appeared, for `kill()`, an aborted `exec`, and an aborted `spawn`. Needs `RAILWAY_API_TOKEN` or `RAILWAY_TOKEN` and `RAILWAY_ENVIRONMENT_ID`. |
-| Render | `true` | **Measured.** Each command records its process group. `kill()` sends `TERM` to the group from a second command, then `KILL` after 2 s. A closed exec stream does not stop the process (measured), so every abort sends the kill. The shared journal conformance kill case passes against a real sandbox. Needs `RENDER_API_KEY` and `RENDER_WORKSPACE_ID`. |
+| Render | `true` | **Measured.** Each command records its process group. `kill()` sends the requested signal (`TERM` by default) to the group from a second command, then `KILL` after 2 s. A closed exec stream does not stop the process (measured), so every abort sends the kill. The shared journal conformance kill case passes against a real sandbox. Needs `RENDER_API_KEY` and `RENDER_WORKSPACE_ID`. |
 
 Each remote provider registers the shared journal conformance suite, so you can test each claim:
 

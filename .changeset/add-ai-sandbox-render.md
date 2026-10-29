@@ -12,5 +12,6 @@ runtime snapshots, resume by id, and an enforced `deny-all` network policy.
 
 `killableProcesses` is `true` and measured against a real sandbox: every
 command records its process group, and `kill()` or an aborted `signal` sends
-`TERM` to the group from a second command, then `KILL` after 2 s. `ports`,
+the requested signal (`TERM` by default) to the group from a second command,
+then `KILL` after 2 s. `ports`,
 `writableStdin` and `fork` are `false`.
