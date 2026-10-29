@@ -8,8 +8,8 @@
  * kill, and dropping its stream leaves the remote process running (measured),
  * so every command runs through a wrapper that records its process group in a
  * file, and `kill()` signals that group from a second `exec`. Env reaches the
- * wrapper as an uploaded file, never in the command string, because Render
- * stores command text on the sandbox's exec timeline.
+ * wrapper as a file uploaded to `/dev`, never in the command string, because
+ * Render stores command text on the sandbox's exec timeline.
  */
 import { randomUUID } from 'node:crypto'
 import { Buffer } from 'node:buffer'
@@ -49,10 +49,14 @@ const KILL_SETTLE_MS = 12_000
 const PGID_DIR = '/tmp/tsai'
 
 /**
- * The env overlay, one path per sandbox: a later handle (after resume)
- * overwrites an earlier one's secrets instead of leaving them on disk.
+ * Where env files go. `/dev` is the sandbox's only memory-backed mount
+ * (devtmpfs, measured): filesystem snapshots leave it out and it survives an
+ * idle suspend, so secrets never reach the disk.
  */
-const ENV_FILE = `${PGID_DIR}/env`
+export const ENV_DIR = '/dev/tsai'
+
+/** Overlays earlier versions kept on disk, removed whenever we can. */
+const LEGACY_ENV = `${PGID_DIR}/env ${PGID_DIR}/env-*`
 
 interface EnvState {
   queue: Promise<void>
@@ -60,8 +64,8 @@ interface EnvState {
   restore?: Uint8Array
 }
 
-// Handles for the same sandbox share one queue. Separate orchestrator processes
-// still need the caller's sandbox lifecycle lock.
+// Handles for the same sandbox share one queue. Runtime snapshots from separate
+// orchestrator processes still need the caller's sandbox lifecycle lock.
 const envStates = new Map<string, EnvState>()
 
 /**
@@ -138,10 +142,11 @@ export function wrapCommand(
   pgidFile: string,
   cwd: string,
   envFiles: Array<string>,
+  callEnvFile: string,
 ): string {
   const sourceStep = envFiles.map((file) => `. ${q(file)} && `).join('')
-  const inner = `echo $$ > ${pgidFile}.tmp && mv -f ${pgidFile}.tmp ${pgidFile} || exit $?; [ ! -e ${pgidFile}.killed ] || exit 143; ${sourceStep}rm -f ${pgidFile}.env && cd ${q(cwd)} && exec bash -c ${q(command)}`
-  const supervisor = `mkdir -p ${PGID_DIR} || exit $?; set -m; bash -c ${q(inner)} & tsai_group=$!; set +m; wait "$tsai_group" 2>/dev/null; tsai_status=$?; ${stopGroup('"$tsai_group"')}; rm -f ${pgidFile} ${pgidFile}.tmp ${pgidFile}.env ${pgidFile}.killed; exit $tsai_status`
+  const inner = `echo $$ > ${pgidFile}.tmp && mv -f ${pgidFile}.tmp ${pgidFile} || exit $?; [ ! -e ${pgidFile}.killed ] || exit 143; ${sourceStep}rm -f ${callEnvFile} && cd ${q(cwd)} && exec bash -c ${q(command)}`
+  const supervisor = `mkdir -p ${PGID_DIR} || exit $?; set -m; bash -c ${q(inner)} & tsai_group=$!; set +m; wait "$tsai_group" 2>/dev/null; tsai_status=$?; ${stopGroup('"$tsai_group"')}; rm -f ${pgidFile} ${pgidFile}.tmp ${callEnvFile} ${pgidFile}.killed; exit $tsai_status`
   return `bash -c ${q(supervisor)}`
 }
 
@@ -152,8 +157,8 @@ export function wrapCommand(
  * so a kill that races the start still lands. Cleans up the files a killed
  * wrapper leaves behind.
  */
-export function killCommand(pgidFile: string): string {
-  const cleanup = `rm -f ${pgidFile} ${pgidFile}.env ${pgidFile}.killed`
+export function killCommand(pgidFile: string, callEnvFile: string): string {
+  const cleanup = `rm -f ${pgidFile} ${callEnvFile} ${pgidFile}.killed`
   const kill = `mkdir -p ${PGID_DIR} && touch ${pgidFile}.killed; for i in $(seq 20); do [ -f ${pgidFile} ] && break; sleep 0.1; done; g=$(cat ${pgidFile} 2>/dev/null) || exit 0; kill -TERM -- -$g 2>/dev/null || { ${cleanup}; exit 0; }; for i in $(seq 20); do sleep 0.1; kill -0 -- -$g 2>/dev/null || { ${cleanup}; exit 0; }; done; kill -KILL -- -$g 2>/dev/null; ${cleanup}; true`
   return `bash -c ${q(kill)}`
 }
@@ -278,6 +283,8 @@ export interface RenderHandleDeps {
   workdir: string
   /** What `snapshot()` captures. */
   snapshotKind: SandboxSnapshotKind
+  /** Where env files go; defaults to {@link ENV_DIR}. Tests point it elsewhere. */
+  envDir?: string
 }
 
 export class RenderHandle implements SandboxHandle {
@@ -294,6 +301,9 @@ export class RenderHandle implements SandboxHandle {
   private readonly client: SandboxesClient
   private readonly workdir: string
   private readonly snapshotKind: SandboxSnapshotKind
+  private readonly envDir: string
+  /** The env overlay, one path per sandbox: a later handle (after resume) overwrites an earlier one's secrets. */
+  private readonly envFile: string
   private readonly envVars: Record<string, string> = {}
   /** Bumped by each `env.set`; 0 means this handle has no overlay. */
   private envVersion = 0
@@ -306,6 +316,8 @@ export class RenderHandle implements SandboxHandle {
     this.workdir = deps.workdir
     this.workspaceRoot = deps.workdir
     this.snapshotKind = deps.snapshotKind
+    this.envDir = deps.envDir ?? ENV_DIR
+    this.envFile = `${this.envDir}/env`
 
     this.process = {
       exec: (command, opts) => this.exec(command, opts),
@@ -388,9 +400,9 @@ export class RenderHandle implements SandboxHandle {
 
     this.env = {
       // Render has no VM-wide mutable env, so the overlay is handle-local and
-      // uploaded as a root-only file (uploads land 0600, measured) that every
-      // later exec/spawn sources. TanStack re-applies workspace secrets
-      // through this on resume and restore.
+      // uploaded to `/dev` as a root-only file (uploads land 0600, measured)
+      // that every later exec/spawn sources. TanStack re-applies workspace
+      // secrets through this on resume and restore.
       set: async (vars) => {
         // Check names first, so a rejected call leaves the overlay unchanged.
         envFileContent(vars)
@@ -399,7 +411,7 @@ export class RenderHandle implements SandboxHandle {
         await this.queueEnv(async (state) => {
           await this.writeEnv(state)
           // Remove overlays left by earlier versions before returning fresh credentials.
-          await this.raw(`rm -f -- ${PGID_DIR}/env-*`)
+          await this.raw(`rm -f -- ${LEGACY_ENV}`)
         })
       },
     }
@@ -504,11 +516,19 @@ export class RenderHandle implements SandboxHandle {
   private async writeEnv(state: EnvState): Promise<void> {
     const version = this.envVersion
     if (version > 0 && this.envWritten !== version) {
-      await this.client.upload(this.id, ENV_FILE, envFileContent(this.envVars))
+      await this.client.upload(
+        this.id,
+        this.envFile,
+        envFileContent(this.envVars),
+      )
       this.envWritten = version
       state.restore = undefined
     } else if (state.restore !== undefined) {
-      await this.client.upload(this.id, ENV_FILE, Buffer.from(state.restore))
+      await this.client.upload(
+        this.id,
+        this.envFile,
+        Buffer.from(state.restore),
+      )
       state.restore = undefined
     }
   }
@@ -538,8 +558,10 @@ export class RenderHandle implements SandboxHandle {
     opts: ProcessOptions | undefined,
     onOutput: (stream: 'stdout' | 'stderr', data: string) => void,
   ): RunningCommand {
-    const pgidFile = `${PGID_DIR}/${randomUUID()}`
+    const commandId = randomUUID()
+    const pgidFile = `${PGID_DIR}/${commandId}`
     // Per-call env goes in its own file, sourced after the overlay so it wins.
+    const callEnvFile = `${this.envDir}/${commandId}.env`
     const callEnv =
       opts?.env && Object.keys(opts.env).length > 0
         ? envFileContent(opts.env)
@@ -551,7 +573,7 @@ export class RenderHandle implements SandboxHandle {
     const kill = async (): Promise<void> => {
       if (settled) return
       killed = true
-      await this.raw(killCommand(pgidFile)).catch(() => undefined)
+      await this.raw(killCommand(pgidFile, callEnvFile)).catch(() => undefined)
       await settleWithin(exit, KILL_SETTLE_MS)
       if (!settled) {
         stream.abort()
@@ -566,15 +588,15 @@ export class RenderHandle implements SandboxHandle {
       // rewrites the overlay if a snapshot left it missing.
       const events = await this.queueEnv(async (state) => {
         await this.writeEnv(state)
-        const envFiles = this.envVersion > 0 ? [ENV_FILE] : []
+        const envFiles = this.envVersion > 0 ? [this.envFile] : []
         if (callEnv !== undefined) {
-          await this.client.upload(this.id, `${pgidFile}.env`, callEnv)
-          envFiles.push(`${pgidFile}.env`)
+          await this.client.upload(this.id, callEnvFile, callEnv)
+          envFiles.push(callEnvFile)
         }
         // Killed before the start: never start it, and remove what the kill
         // could not see yet.
         if (killed) {
-          await this.raw(`rm -f ${pgidFile}.env ${pgidFile}.killed`).catch(noop)
+          await this.raw(`rm -f ${callEnvFile} ${pgidFile}.killed`).catch(noop)
           return undefined
         }
         const wrapped = wrapCommand(
@@ -582,6 +604,7 @@ export class RenderHandle implements SandboxHandle {
           pgidFile,
           opts?.cwd ? this.abs(opts.cwd) : this.workdir,
           envFiles,
+          callEnvFile,
         )
         return this.client.exec(this.id, wrapped, undefined, stream.signal)
       })
@@ -596,7 +619,9 @@ export class RenderHandle implements SandboxHandle {
         // The stream failed, so the process state is unknown: kill the group
         // rather than leave it running until the sandbox times out.
         if (!stream.signal.aborted) {
-          await this.raw(killCommand(pgidFile)).catch(() => undefined)
+          await this.raw(killCommand(pgidFile, callEnvFile)).catch(
+            () => undefined,
+          )
         }
         throw error
       })
@@ -693,33 +718,41 @@ export class RenderHandle implements SandboxHandle {
   snapshot = (label?: string): Promise<SnapshotRef> =>
     this.queueEnv(async (state) => {
       await this.writeEnv(state)
-      // Read the shared file, even for a fresh handle. Restoring this handle's
-      // cached vars could resurrect a secret another handle already rotated.
+      if (this.snapshotKind === 'filesystem') {
+        // The overlay is in `/dev`, which a filesystem snapshot leaves out, so
+        // it stays in place. This also wakes a suspended sandbox before capture.
+        await this.raw(`rm -f -- ${LEGACY_ENV}`)
+        return this.capture(label)
+      }
+      // A runtime snapshot keeps memory, `/dev` included, so the overlay comes
+      // out for the capture. Read the shared file, even for a fresh handle:
+      // restoring this handle's cached vars could resurrect a secret another
+      // handle already rotated.
       try {
-        state.restore = await this.download(ENV_FILE, undefined)
+        state.restore = await this.download(this.envFile, undefined)
       } catch (error) {
         if (!(error instanceof ClientError && error.statusCode === 404))
           throw error
       }
       try {
-        // This also wakes a suspended sandbox before capture.
-        await this.raw(`rm -f -- ${ENV_FILE} ${PGID_DIR}/env-*`)
-        const snap = await this.client.snapshots.create({
-          sandboxId: this.id,
-          kind: this.snapshotKind,
-          name: `${SNAPSHOT_PREFIX}${label ?? 'snap'}`.slice(
-            0,
-            SNAPSHOT_NAME_MAX,
-          ),
-          wait: true,
-        })
-        return { id: snap.id, ...(label !== undefined ? { label } : {}) }
+        await this.raw(`rm -f -- ${this.envFile} ${LEGACY_ENV}`)
+        return await this.capture(label)
       } finally {
         // Keep a successful snapshot ref if write-back fails. The next queued
         // operation retries these exact bytes, including from a fresh handle.
         await this.writeEnv(state).catch(noop)
       }
     })
+
+  private async capture(label: string | undefined): Promise<SnapshotRef> {
+    const snap = await this.client.snapshots.create({
+      sandboxId: this.id,
+      kind: this.snapshotKind,
+      name: `${SNAPSHOT_PREFIX}${label ?? 'snap'}`.slice(0, SNAPSHOT_NAME_MAX),
+      wait: true,
+    })
+    return { id: snap.id, ...(label !== undefined ? { label } : {}) }
+  }
 
   async destroy(): Promise<void> {
     try {
