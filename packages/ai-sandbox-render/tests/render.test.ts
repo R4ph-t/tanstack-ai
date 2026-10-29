@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import { Render } from '@renderinc/sdk'
 import { renderSandbox } from '../src/index'
 import type { SandboxHandle } from '@tanstack/ai-sandbox'
@@ -9,9 +9,11 @@ import type { SandboxHandle } from '@tanstack/ai-sandbox'
 const hasCreds =
   !!process.env.RENDER_API_KEY && !!process.env.RENDER_WORKSPACE_ID
 
-const provider = renderSandbox({ timeoutSeconds: 1800 })
+// Both build an SDK client, which throws without RENDER_API_KEY, so they are
+// created in beforeAll: the file must still load when the suite is skipped.
+let provider: ReturnType<typeof renderSandbox>
 /** For cleanup the contract has no hook for: deleting snapshots. */
-const sandboxes = new Render().sandboxes
+let sandboxes: Render['sandboxes']
 
 /** Run `body` against a fresh sandbox and always terminate it. */
 async function withSandbox(
@@ -29,6 +31,11 @@ async function withSandbox(
 describe.skipIf(!hasCreds)(
   'render provider (gated on RENDER_API_KEY + RENDER_WORKSPACE_ID)',
   () => {
+    beforeAll(() => {
+      provider = renderSandbox({ timeoutSeconds: 1800 })
+      sandboxes = new Render().sandboxes
+    })
+
     it('runs exec, env and a full fs round trip', async () => {
       await withSandbox({ env: { CREATE_VAR: 'created' } }, async (sbx) => {
         const echo = await sbx.process.exec('pwd')
