@@ -86,8 +86,10 @@ describe.skipIf(!hasCreds)(
         // Unique, so finding it on disk can only mean the overlay leaked.
         const canary = `canary-${randomUUID()}`
         await sbx.env.set({ OVERLAY: canary })
-        const ref = await sbx.snapshot!('live-test')
+        // Look this up first: a failure after the capture would leave the
+        // snapshot behind.
         const { sandboxGroupId } = await sandboxes.get(sbx.id)
+        const ref = await sbx.snapshot!('live-test')
         let restored: SandboxHandle | undefined
         try {
           // The overlay stays in memory-backed /dev through the capture.
